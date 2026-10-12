@@ -597,10 +597,14 @@ fn file_browser(state: &mut State, ui: &mut Ui) {
     let can_forward = !state.ui.nav_forward[i].is_empty();
     // Common-destination shortcuts. Home comes straight from `state.home`;
     // Desktop/Downloads are the conventional sub-dirs that exist on both
-    // Windows and Linux. Each is only enabled when the target actually
-    // exists, so we never `cd` into a missing dir and push a diagnostic.
+    // Windows and Linux; AppData is added on Windows only. Each is only
+    // enabled when the target actually exists, so we never `cd` into a
+    // missing dir and push a diagnostic.
     let home = state.home.clone();
     let desktop = home.as_ref().map(|h| h.join("Desktop"));
+    // AppData is Windows-only, so its button only exists there.
+    #[cfg(windows)]
+    let appdata = home.as_ref().map(|h| h.join("AppData"));
     let downloads = home.as_ref().map(|h| h.join("Downloads"));
     let mut go_up = false;
     let mut go_back = false;
@@ -628,7 +632,7 @@ fn file_browser(state: &mut State, ui: &mut Ui) {
         {
             go_forward = true;
         }
-        // Glyph buttons: 🏠 Home, 🖥 Desktop, 📥 Downloads.
+        // Glyph buttons: 🏠 Home, ⚙ AppData (Windows), 🖥 Desktop, 📥 Downloads.
         let home_ok = home.as_ref().is_some_and(|h| h.is_dir());
         if ui
             .add_enabled(home_ok, egui::Button::new("🏠"))
@@ -636,6 +640,17 @@ fn file_browser(state: &mut State, ui: &mut Ui) {
             .clicked()
         {
             go_to = home.clone();
+        }
+        #[cfg(windows)]
+        {
+            let appdata_ok = appdata.as_ref().is_some_and(|d| d.is_dir());
+            if ui
+                .add_enabled(appdata_ok, egui::Button::new("⚙"))
+                .on_hover_text("AppData")
+                .clicked()
+            {
+                go_to = appdata.clone();
+            }
         }
         let desktop_ok = desktop.as_ref().is_some_and(|d| d.is_dir());
         if ui
@@ -1043,20 +1058,32 @@ fn tabs_bar(state: &mut State, ui: &mut Ui) {
         ui.separator();
         gui_font_delta = font_size_control(ui, "GUI font size: ", gui_font_size, "panel");
         ui.separator();
+        // Breathing room either side of the tab section.
+        ui.add_space(20.0);
 
         for (i, leaf) in labels.iter().enumerate() {
             let text = format!("{i}: {leaf}");
-            if ui.selectable_label(i == active, text).clicked() {
-                to_select = Some(i);
-            }
-            if n > 1 && ui.small_button("x").on_hover_text("Close tab").clicked() {
-                to_close = Some(i);
-            }
+            // Tighter spacing within a tab so its `x` hugs the name.
+            ui.scope(|ui| {
+                ui.spacing_mut().item_spacing.x = 1.0;
+                let tab = ui.selectable_label(i == active, text);
+                if tab.clicked() {
+                    to_select = Some(i);
+                }
+                // Middle-click closes, same as the `x`.
+                if n > 1 && tab.middle_clicked() {
+                    to_close = Some(i);
+                }
+                if n > 1 && ui.small_button("x").on_hover_text("Close tab").clicked() {
+                    to_close = Some(i);
+                }
+            });
             ui.separator();
         }
         if ui.button("+ tab").on_hover_text("New tab").clicked() {
             add_new = true;
         }
+        ui.add_space(20.0);
         // One-click SSH connect per saved remote, e.g. `ssh 0 192.168.1.10`.
         // Connects the active tab — same as typing `ssh <index>`.
         for (i, host) in &remotes {
