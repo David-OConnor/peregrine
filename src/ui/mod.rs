@@ -191,29 +191,27 @@ const BOOKMARK_MAX_LEN: usize = 22;
 
 /// A Bookmarks / Recent dirs button label: `prefix` (the index, plus any
 /// marker), then `path` as `~/...`, colour-coded by directory (see
-/// [path_color]) and truncated to [BOOKMARK_MAX_LEN].
+/// [path_color]) with its final directory bold, and truncated to
+/// [BOOKMARK_MAX_LEN].
 fn dir_label(ui: &Ui, prefix: String, path: &Path, home: Option<&Path>) -> LayoutJob {
     let dark = ui.visuals().dark_mode;
     let parts = path_color::parts(&render_with_tilde(path, home), Some("~"), dark);
     let mut label = vec![Part::plain(prefix)];
     label.extend(path_color::truncate_start(parts, BOOKMARK_MAX_LEN));
-    path_color::layout_job(
-        &label,
-        TextStyle::Button.resolve(ui.style()),
-        Color32::PLACEHOLDER,
-    )
+    let font = TextStyle::Button.resolve(ui.style());
+    let bold = FontId::new(font.size, bold_family());
+    path_color::layout_job(&label, font, Some(bold), Color32::PLACEHOLDER)
 }
 
-/// `path` as `~/...`, colour-coded by directory (see [path_color]), in the
-/// body font. Uncoloured runs take the label's own text colour.
+/// `path` as `~/...`, colour-coded by directory (see [path_color]) with its
+/// final part bold, in the body font. Uncoloured runs take the label's own
+/// text colour.
 fn path_job(ui: &Ui, path: &Path, home: Option<&Path>) -> LayoutJob {
     let dark = ui.visuals().dark_mode;
     let parts = path_color::parts(&render_with_tilde(path, home), Some("~"), dark);
-    path_color::layout_job(
-        &parts,
-        TextStyle::Body.resolve(ui.style()),
-        Color32::PLACEHOLDER,
-    )
+    let font = TextStyle::Body.resolve(ui.style());
+    let bold = FontId::new(font.size, bold_family());
+    path_color::layout_job(&parts, font, Some(bold), Color32::PLACEHOLDER)
 }
 
 /// A Command history / In this dir button label: `"<i>: "`, then the command
@@ -327,7 +325,7 @@ fn dir_history(state: &mut State, ui: &mut Ui) {
 fn cwd_cmd_history(state: &mut State, ui: &mut Ui) {
     panel_header(
         ui,
-        "In this dir",
+        "Cmds in this dir",
         &mut state.ui.panel_vis.recent_cmds_in_dir,
     );
 
@@ -539,7 +537,7 @@ fn term_in(state: &mut State, ui: &mut Ui) {
     let show_branch = !state.is_remote();
     ui.horizontal(|ui| {
         let mono = TextStyle::Monospace.resolve(ui.style());
-        ui.label(path_color::layout_job(&cwd_parts, mono, COLOR_PROMPT));
+        ui.label(path_color::layout_job(&cwd_parts, mono, None, COLOR_PROMPT));
         if let Some(b) = branch {
             if show_branch {
                 ui.label(

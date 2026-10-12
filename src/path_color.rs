@@ -179,12 +179,23 @@ pub fn truncate_start(parts: Vec<Part>, max: usize) -> Vec<Part> {
 
 /// Lay `parts` out for a label or button. `default` colours the uncoloured
 /// runs; pass [Color32::PLACEHOLDER] to use the widget's own text colour
-/// (which follows hover / selection).
-pub fn layout_job(parts: &[Part], font: FontId, default: Color32) -> LayoutJob {
+/// (which follows hover / selection). If `last_font` is given, the last
+/// coloured run (the path's final directory) is drawn in it, e.g. to bold it.
+pub fn layout_job(
+    parts: &[Part],
+    font: FontId,
+    last_font: Option<FontId>,
+    default: Color32,
+) -> LayoutJob {
+    let last = parts.iter().rposition(|p| p.color.is_some());
     let mut job = LayoutJob::default();
-    for p in parts {
+    for (i, p) in parts.iter().enumerate() {
+        let font_id = match &last_font {
+            Some(f) if Some(i) == last => f.clone(),
+            _ => font.clone(),
+        };
         let format = TextFormat {
-            font_id: font.clone(),
+            font_id,
             color: p.color.unwrap_or(default),
             ..Default::default()
         };
