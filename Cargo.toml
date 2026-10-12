@@ -10,4 +10,26 @@ egui = "0.34.3"
 eframe = "0.34.3"
 #egui-file-dialog = "0.13.0" #  For file dialogs.
 
+# Markdown viewer windows (see `src/markdown.rs`). egui_commonmark 0.23 is the
+# release built against egui 0.34. `better_syntax_highlighting` colours fenced
+# code blocks via syntect (pure-Rust regex, no C deps); the default features
+# load local images the document references.
+egui_commonmark = { version = "0.23.0", features = ["better_syntax_highlighting"] }
+# Image loaders for those pictures. Local files only: no `http`, so viewing a
+# file never makes network requests (remote images show a ⚠ placeholder).
+egui_extras = { version = "0.34.3", features = ["file", "image", "gif", "webp", "svg"] }
+# egui_extras decodes only the formats enabled on the `image` crate.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp"] }
+
 shell = { path = "../shell" }
+
+# Files panel (see `src/files.rs`): `ShellExecuteW` opens a file with its default
+# program, as an Explorer double-click does; `SHGetFileInfoW` gives Explorer's
+# type name ("Text Document") for the details pane. Same version `shell` uses,
+# so this adds nothing new to the build.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Storage_FileSystem",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }

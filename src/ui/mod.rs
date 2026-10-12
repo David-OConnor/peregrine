@@ -1,7 +1,10 @@
-use std::path::PathBuf;
+use std::{
+    path::{Path, PathBuf},
+    time::SystemTime,
+};
 
 use egui::{
-    CentralPanel, Color32, Frame, Key, Label, Panel, RichText, ScrollArea, Sense, TextEdit,
+    Align, CentralPanel, Color32, Frame, Key, Layout, Panel, RichText, ScrollArea, TextEdit,
     TextWrapMode, Ui,
 };
 use shell::SshMode;
@@ -19,7 +22,29 @@ fn search_box(ui: &mut Ui, buf: &mut String, id_salt: &str) -> bool {
     .changed()
 }
 
-use crate::{OutType, ansi, render_with_tilde, run_command, state::State};
+/// A side panel's title row: the heading on the left and a small `x` on the
+/// right that hides the panel — the same as unticking it in the "Panels:" row
+/// (see [panel_toggles]). `visible` is that panel's [shell::PanelVis] flag.
+fn panel_header(ui: &mut Ui, title: &str, visible: &mut bool) {
+    ui.horizontal(|ui| {
+        ui.heading(title);
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if ui.small_button("x").on_hover_text("Close panel").clicked() {
+                *visible = false;
+                ui.ctx().request_repaint();
+            }
+        });
+    });
+}
+
+use crate::{
+    OutType, ansi,
+    files::{FileDetails, format_size, open_with_default_app},
+    markdown::is_markdown,
+    render_with_tilde, run_command,
+    state::State,
+    submit_command,
+};
 
 pub const WINDOW_WIDTH: f32 = 1400.;
 pub const WINDOW_HEIGHT: f32 = 900.;
@@ -73,6 +98,8 @@ enum ListAction {
     /// Open a file with the OS's default associated program, the way a
     /// double-click does in Explorer / a Linux file manager.
     OpenFile(PathBuf),
+    /// Select a Files-panel row, showing its details in the pane below.
+    SelectFile(PathBuf),
     RemoveBookmark(usize),
     FillInput(String),
     /// Re-run the history item at this index in its original working dir,
@@ -109,7 +136,7 @@ fn truncate_start(s: &str, max: usize) -> String {
 /// to that bookmark; the `x` removes it from the list. The search box
 /// filters by case-insensitive substring against the full path.
 fn dir_bookmarks(state: &mut State, ui: &mut Ui) {
-    ui.heading("Bookmarks");
+    panel_header(ui, "Bookmarks", &mut state.ui.panel_vis.bookmarks);
 
     if ui.button("+ bookmark current dir").clicked() {
         let msg = state.toggle_bookmark_cwd();
@@ -152,7 +179,7 @@ fn dir_bookmarks(state: &mut State, ui: &mut Ui) {
 /// column. Newest first. Stars mark dirs that are also bookmarked. The
 /// search box filters by case-insensitive substring against the full path.
 fn dir_history(state: &mut State, ui: &mut Ui) {
-    ui.heading("Recent dirs");
+    panel_header(ui, "Recent dirs", &mut state.ui.panel_vis.recent_dirs);
 
     if search_box(ui, &mut state.ui.recent_dirs_search, "recent_dirs_search") {
         state.refresh_recent_dirs_filter();
@@ -190,7 +217,11 @@ fn dir_history(state: &mut State, ui: &mut Ui) {
 /// Display commands previously run in the active tab's cwd. Newest first.
 /// Same click behavior as the global history panel.
 fn cwd_cmd_history(state: &mut State, ui: &mut Ui) {
-    ui.heading("In this dir");
+    panel_header(
+        ui,
+        "In this dir",
+        &mut state.ui.panel_vis.recent_cmds_in_dir,
+    );
 
     if search_box(ui, &mut state.ui.cwd_history_search, "cwd_history_search") {
         state.refresh_cwd_history_filter();
@@ -230,7 +261,7 @@ fn cwd_cmd_history(state: &mut State, ui: &mut Ui) {
 /// the command into the input box so the user can edit or run it; the
 /// "In dir" button re-runs it in the directory it was originally run from.
 fn cmd_history(state: &mut State, ui: &mut Ui) {
-    ui.heading("Command history");
+    panel_header(ui, "Command history", &mut state.ui.panel_vis.recent_cmds);
 
     if search_box(ui, &mut state.ui.history_search, "history_search") {
         state.refresh_history_filter();
@@ -283,41 +314,10 @@ fn cmd_history(state: &mut State, ui: &mut Ui) {
     apply_action(state, action);
 }
 
-/// Open `path` with the operating system's default associated program, the
-/// same way double-clicking it in Explorer (Windows) or a file manager
-/// (Linux) would. The launcher is detached: we `spawn` rather than `output`
-/// so the GUI doesn't block while the program runs.
-///
-/// - Windows: `cmd /C start "" "<path>"`. The empty `""` is the window-title
-///   argument `start` consumes first when the path itself is quoted.
-/// - macOS: `open <path>`.
-/// - Other (Linux/BSD): `xdg-open <path>`.
-fn open_with_default_app(path: &std::path::Path) -> std::io::Result<()> {
-    use shell::quiet_command;
-    #[cfg(target_os = "windows")]
-    let mut cmd = {
-        let mut c = quiet_command("cmd");
-        c.args(["/C", "start", ""]).arg(path);
-        c
-    };
-    #[cfg(target_os = "macos")]
-    let mut cmd = {
-        let mut c = quiet_command("open");
-        c.arg(path);
-        c
-    };
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    let mut cmd = {
-        let mut c = quiet_command("xdg-open");
-        c.arg(path);
-        c
-    };
-    cmd.spawn().map(|_| ())
-}
-
 fn apply_action(state: &mut State, action: Option<ListAction>) {
     match action {
         Some(ListAction::ChangeDir(p)) => state.change_dir(p),
+        Some(ListAction::OpenFile(p)) if is_markdown(&p) => state.md_viewers.open(p),
         Some(ListAction::OpenFile(p)) => {
             if let Err(e) = open_with_default_app(&p) {
                 state.push_out(
@@ -326,6 +326,7 @@ fn apply_action(state: &mut State, action: Option<ListAction>) {
                 );
             }
         }
+        Some(ListAction::SelectFile(p)) => state.select_file(&p),
         Some(ListAction::RemoveBookmark(i)) => {
             if i < state.dir_bookmarks.len() {
                 let path = state.dir_bookmarks.remove(i);
@@ -345,7 +346,7 @@ fn apply_action(state: &mut State, action: Option<ListAction>) {
         Some(ListAction::RunHistoryInDir(i)) => {
             // Reuse the `hisd` built-in so the spawn / output-capture path
             // stays in one place (run_command in main.rs).
-            run_command(state, &format!("hisd {i}"));
+            submit_command(state, &format!("hisd {i}"));
         }
         Some(ListAction::ConnectRemote(i)) => state.connect_remote(i),
         Some(ListAction::EditRemote(i)) => {
@@ -521,7 +522,7 @@ fn term_in(state: &mut State, ui: &mut Ui) {
         let input = std::mem::take(&mut state.ui.cli_input[active]);
         // In interactive (PTY) mode the line goes straight to the remote shell,
         // which echoes it back — so we don't run it as a command or echo it
-        // locally. Exec mode (and all local tabs) go through `run_command`.
+        // locally. Exec mode (and all local tabs) go through `submit_command`.
         let pty = state
             .active_remote()
             .map(|s| s.mode() == SshMode::Pty)
@@ -530,23 +531,30 @@ fn term_in(state: &mut State, ui: &mut Ui) {
         if pty {
             state.send_remote_line(&input);
         } else {
-            run_command(state, &input);
+            submit_command(state, &input);
         }
         state.ui.focus_input = true;
     }
 }
 
-/// Files in the active tab's cwd, as a simple text column. Folders are
+/// Files in the active tab's cwd, as a selectable list. Folders are
 /// sorted first and prefixed with 📁; executable files (Unix +x, or
 /// Windows `.exe`/`.msi`) are coloured green. The listing is refreshed
 /// by [State::refresh_browser_files] on every cwd change and after every
 /// command, so we just read what's already there.
 ///
-/// Double-clicking a folder row navigates into it (same path as
-/// clicking a bookmark or recent dir); double-clicking a file opens it
-/// with the OS's default associated program (see [open_with_default_app]).
+/// Clicking a row selects it, and the bottom third of the panel shows its
+/// details (see [file_details]). Double-clicking a folder row navigates into
+/// it (same path as clicking a bookmark or recent dir); double-clicking a
+/// Markdown file opens it in a viewer window (see `crate::markdown`); any
+/// other file opens with the OS's default associated program (see
+/// [open_with_default_app]).
 fn file_browser(state: &mut State, ui: &mut Ui) {
-    ui.heading("Files");
+    // Measured before anything is laid out, so the details pane is a third
+    // of the whole panel rather than of what's left under the header.
+    let details_height = ui.available_height() / 3.0;
+
+    panel_header(ui, "Files", &mut state.ui.panel_vis.file_browser);
 
     // Browser-style navigation row. Up goes to the parent dir; Back/Forward
     // walk the per-tab history maintained in `State::change_dir`. Buttons are
@@ -626,12 +634,26 @@ fn file_browser(state: &mut State, ui: &mut Ui) {
 
     ui.separator();
 
+    // Added before the list so it claims the bottom of the panel; the list
+    // then fills the space left above it.
+    Panel::bottom("file_details_panel")
+        .resizable(false)
+        .exact_size(details_height)
+        .frame(Frame::new().inner_margin(egui::Margin::symmetric(0, 4)))
+        .show_inside(ui, |ui| {
+            file_details(state.selected_file.as_ref(), state.home.as_deref(), ui);
+        });
+
+    let selected = state.selected_file.as_ref().map(|d| d.path.as_path());
     let mut action: Option<ListAction> = None;
 
     ScrollArea::vertical()
         .id_salt("file_browser_scroll")
         .auto_shrink([false, false])
         .show(ui, |ui| {
+            // Rows butt up against each other, like a file manager's list.
+            ui.spacing_mut().item_spacing.y = 0.0;
+
             for f in &state.browser_files {
                 let text = if f.is_folder {
                     format!("📁 {}", f.disp_name)
@@ -642,17 +664,24 @@ fn file_browser(state: &mut State, ui: &mut Ui) {
                 if !f.is_folder && f.is_executable {
                     rich = rich.color(COLOR_EXECUTABLE);
                 }
-                // Both folders and files get a click sense so we can detect
-                // the double-click. Double-clicking a folder navigates into
-                // it; double-clicking a file opens it with its associated
-                // program, just like a desktop file manager.
-                let resp = ui.add(Label::new(rich).sense(Sense::click()));
+                // Full width so the whole row is clickable and the selection
+                // highlight spans the panel. Long names are truncated; the
+                // details pane shows the full name.
+                let row = egui::Button::selectable(selected == Some(f.path.as_path()), rich)
+                    .truncate()
+                    .min_size(egui::vec2(ui.available_width(), 0.0));
+                let resp = ui.add(row);
+                // A double-click's first click has already selected the row.
+                // Then a folder navigates into it; a file opens with its
+                // associated program, just like a desktop file manager.
                 if resp.double_clicked() {
                     action = Some(if f.is_folder {
                         ListAction::ChangeDir(f.path.clone())
                     } else {
                         ListAction::OpenFile(f.path.clone())
                     });
+                } else if resp.clicked() {
+                    action = Some(ListAction::SelectFile(f.path.clone()));
                 }
             }
         });
@@ -660,12 +689,76 @@ fn file_browser(state: &mut State, ui: &mut Ui) {
     apply_action(state, action);
 }
 
+/// The Files panel's lower pane: type, size, dates and attributes of the
+/// selected row, read when it was selected (see [FileDetails::read]).
+fn file_details(details: Option<&FileDetails>, home: Option<&Path>, ui: &mut Ui) {
+    let Some(d) = details else {
+        ui.label(
+            RichText::new("Select a file to see its details.")
+                .italics()
+                .weak(),
+        );
+        return;
+    };
+
+    // One "Label  value" line per field, wrapping when the value is long.
+    let field = |ui: &mut Ui, label: &str, value: String| {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new(label).weak());
+            ui.label(value);
+        });
+    };
+    let time = |t: SystemTime| {
+        chrono::DateTime::<chrono::Local>::from(t)
+            .format("%Y-%m-%d %H:%M")
+            .to_string()
+    };
+
+    ScrollArea::vertical()
+        .id_salt("file_details_scroll")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.style_mut().wrap_mode = Some(TextWrapMode::Wrap);
+
+            ui.label(RichText::new(&d.name).strong());
+            field(ui, "Type", d.type_name.clone());
+            if let Some(size) = d.size {
+                field(ui, "Size", format_size(size));
+            }
+            if let Some(n) = d.item_count {
+                let s = if n == 1 { "" } else { "s" };
+                field(ui, "Contains", format!("{n} item{s}"));
+            }
+            if let Some(t) = d.modified {
+                field(ui, "Modified", time(t));
+            }
+            if let Some(t) = d.created {
+                field(ui, "Created", time(t));
+            }
+            let attrs: Vec<&str> = [
+                (d.readonly, "Read-only"),
+                (d.hidden, "Hidden"),
+                (d.executable && !d.is_folder, "Executable"),
+            ]
+            .into_iter()
+            .filter_map(|(on, name)| on.then_some(name))
+            .collect();
+            if !attrs.is_empty() {
+                field(ui, "Attributes", attrs.join(", "));
+            }
+            if let Some(target) = &d.link_target {
+                field(ui, "Link to", render_with_tilde(target, home));
+            }
+            field(ui, "Path", render_with_tilde(&d.path, home));
+        });
+}
+
 /// Saved SSH remotes. Lists each `user@host:port` with Connect / Edit / delete
 /// controls, an add/edit form, and — when the active tab is connected — a
 /// status line with Disconnect and an Exec⇄PTY mode toggle. Passwords are kept
 /// in the OS keyring (see `shell::secrets`), never in the panel or state file.
 fn remote_terminals(state: &mut State, ui: &mut Ui) {
-    ui.heading("Remote");
+    panel_header(ui, "Remote", &mut state.ui.panel_vis.remote_terminals);
 
     // Connection status for the active tab.
     if let Some(remote) = state.active_remote() {
@@ -820,7 +913,6 @@ fn remote_form(state: &mut State, ui: &mut Ui) {
 /// back. Each toggle reads from / writes back to [PanelVis] on the
 /// active StateUi.
 fn panel_toggles(state: &mut State, ui: &mut Ui) {
-    let before = state.ui.panel_vis;
     ui.horizontal(|ui| {
         ui.label("Panels:");
         let v = &mut state.ui.panel_vis;
@@ -831,12 +923,6 @@ fn panel_toggles(state: &mut State, ui: &mut Ui) {
         ui.toggle_value(&mut v.recent_cmds, "Cmd history");
         ui.toggle_value(&mut v.recent_cmds_in_dir, "In this dir");
     });
-
-    // Persist on any change so the layout survives restart.
-    let after = state.ui.panel_vis;
-    if !panel_vis_eq(&before, &after) {
-        let _ = state.save();
-    }
 }
 
 /// Field-by-field equality so a toggle change triggers a save without
@@ -916,7 +1002,7 @@ fn tabs_bar(state: &mut State, ui: &mut Ui) {
             }
             ui.separator();
         }
-        if ui.button("+").on_hover_text("New tab").clicked() {
+        if ui.button("+ tab").on_hover_text("New tab").clicked() {
             add_new = true;
         }
         // One-click SSH connect per saved remote, e.g. `ssh 0 192.168.1.10`.
@@ -972,6 +1058,16 @@ fn shrink_panel_fonts(ui: &mut Ui) {
 }
 
 pub fn draw(state: &mut State, ui: &mut Ui) {
+    // Snapshot panel visibility so a change from the "Panels:" toggles or a
+    // panel's own close button is persisted at the end of the frame.
+    let vis_before = state.ui.panel_vis;
+
+    // Run the command submitted last frame. That frame already painted its
+    // echo, so the user sees what they ran while this blocks.
+    if let Some(input) = state.ui.pending_cmd.take() {
+        run_command(state, &input);
+    }
+
     // Pump any live PTY output into the active tab's pane. While a PTY session
     // is active, keep requesting repaints so streamed output (e.g. `top`) keeps
     // flowing even when the user isn't interacting.
@@ -1083,4 +1179,19 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
         .show_inside(ui, |ui| {
             term_out(state, ui);
         });
+
+    // Markdown viewer windows are child viewports: they only stay open while
+    // the main window's pass keeps showing them.
+    state.md_viewers.show(ui.ctx());
+
+    // A command was submitted this frame: paint its echo, then come straight
+    // back to run it.
+    if state.ui.pending_cmd.is_some() {
+        ui.ctx().request_repaint();
+    }
+
+    // Persist on any change so the layout survives restart.
+    if !panel_vis_eq(&vis_before, &state.ui.panel_vis) {
+        let _ = state.save();
+    }
 }

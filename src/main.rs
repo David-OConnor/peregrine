@@ -5,6 +5,8 @@
 // )]
 
 mod ansi;
+mod files;
+mod markdown;
 mod state;
 mod ui;
 mod util;
@@ -71,9 +73,11 @@ fn record_recent_dir(recent: &mut Vec<RecentDir>, cwd: &Path) {
     });
 }
 
-/// Runs one command line. Output is pushed into `state.ui.out` rather than
-/// printed to stdout/stderr, so the GUI's terminal pane can show it.
-pub fn run_command(state: &mut State, input: &str) {
+/// Echo a command line into the output pane and queue it to run at the start
+/// of the next frame (see `ui::draw`). Commands block the UI thread while they
+/// run, so deferring by a frame lets the echo (and the cleared input row)
+/// paint before the wait, rather than appearing only once the command is done.
+pub fn submit_command(state: &mut State, input: &str) {
     let input = input.trim();
     if input.is_empty() {
         return;
@@ -94,6 +98,13 @@ pub fn run_command(state: &mut State, input: &str) {
     state.reset_history_nav();
     state.push_out(format!("{prompt}> {input}"), OutType::Prompt);
 
+    state.ui.pending_cmd = Some(input.to_string());
+}
+
+/// Runs one command line, already echoed by [submit_command]. Output is
+/// pushed into `state.ui.out` rather than printed to stdout/stderr, so the
+/// GUI's terminal pane can show it.
+pub fn run_command(state: &mut State, input: &str) {
     let (cmd, args) = match input.find(char::is_whitespace) {
         Some(i) => (&input[..i], input[i..].trim()),
         None => (input, ""),
@@ -125,7 +136,7 @@ pub fn run_command(state: &mut State, input: &str) {
         let resolved = shell::find_history_index(&state.history, cwd, args)
             .and_then(|idx| state.history.get(idx).map(|item| item.text.clone()));
         match resolved {
-            Some(text) => run_command(state, &text),
+            Some(text) => submit_command(state, &text),
             None => state.push_out(
                 format!("{cmd}: no matching history item for `{args}`"),
                 OutType::StdErr,

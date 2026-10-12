@@ -10,7 +10,7 @@ use shell::{
     get_home, read_browser_files, save_data, ssh, ssh::secrets, truncate_branch,
 };
 
-use crate::{OutItem, OutType, ui};
+use crate::{OutItem, OutType, files::FileDetails, markdown::MarkdownViewers, ui};
 
 /// State specific to the GUI: the current input buffer, the captured terminal
 /// output, and a "please focus the input next frame" flag we use after
@@ -27,6 +27,10 @@ pub struct StateUi {
     /// Set when something programmatic should pull keyboard focus to the
     /// input box on the next frame (e.g. just after running a command).
     pub focus_input: bool,
+    /// A submitted command that's been echoed but not yet run. Set by
+    /// `submit_command` and taken at the start of the next frame, so the echo
+    /// paints before the (blocking) command starts.
+    pub pending_cmd: Option<String>,
 
     /// Search text for each sidebar panel. Empty = "show everything". Updated
     /// in-place by the panel's TextEdit.
@@ -79,6 +83,7 @@ impl Default for StateUi {
             out: vec![Vec::new()],
             active_tab: 0,
             focus_input: true,
+            pending_cmd: None,
             bookmarks_search: String::new(),
             recent_dirs_search: String::new(),
             history_search: String::new(),
@@ -124,6 +129,10 @@ pub struct State {
     pub active_remote: Vec<Option<RemoteSession>>,
     /// In the current dir. Note persistent, unlike some of our other lists.
     pub browser_files: Vec<BrowserFile>,
+    /// The row selected in the Files panel, with the details its lower pane
+    /// shows. Re-read whenever `browser_files` is, and cleared once the path
+    /// is no longer in the listing (e.g. after a cd or tab switch).
+    pub selected_file: Option<FileDetails>,
     /// Where bookmarks + recent dirs are persisted.
     pub state_path: PathBuf,
     /// Cached git branch for each tab's cwd (parallel to `cwd`). `None`
@@ -137,6 +146,9 @@ pub struct State {
     /// Font size (in points) for the terminal input/output panes, adjusted via
     /// the +/- buttons on the tab strip and persisted to the state file.
     pub font_size: f32,
+    /// Open Markdown viewer windows (double-clicked in the Files panel).
+    /// Not persisted.
+    pub md_viewers: MarkdownViewers,
 }
 
 impl Default for State {
@@ -154,11 +166,13 @@ impl Default for State {
             clone_roots: Vec::new(),
             active_remote: vec![None],
             browser_files: Vec::new(),
+            selected_file: None,
             state_path: save_data::default_path()
                 .unwrap_or_else(|| PathBuf::from(save_data::FILENAME)),
             branch: vec![branch],
             window_size: None,
             font_size: ui::DEFAULT_FONT_SIZE,
+            md_viewers: MarkdownViewers::default(),
         };
         s.refresh_all_filters();
         s.refresh_browser_files();
@@ -238,6 +252,19 @@ impl State {
     pub fn refresh_browser_files(&mut self) {
         let cwd = self.cwd().to_path_buf();
         self.browser_files = read_browser_files(&cwd);
+        if let Some(sel) = self.selected_file.take() {
+            self.select_file(&sel.path);
+        }
+    }
+
+    /// Select the Files-panel row for `path` and read its details. Leaves
+    /// nothing selected if `path` isn't in the current listing.
+    pub fn select_file(&mut self, path: &Path) {
+        self.selected_file = self
+            .browser_files
+            .iter()
+            .find(|f| f.path == path)
+            .and_then(FileDetails::read);
     }
 
     /// Snapshot of the active tab's recall cursors. Returned by value so
@@ -326,10 +353,12 @@ impl State {
             clone_roots: loaded.clone_roots,
             active_remote: (0..n).map(|_| None).collect(),
             browser_files: Vec::new(),
+            selected_file: None,
             state_path: path,
             branch,
             window_size: loaded.window_size,
             font_size: loaded.font_size.unwrap_or(ui::DEFAULT_FONT_SIZE),
+            md_viewers: MarkdownViewers::default(),
         };
         s.refresh_all_filters();
         s.refresh_browser_files();
