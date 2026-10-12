@@ -228,7 +228,7 @@ pub fn to_layout_job(segments: &[Segment], default_fg: Color32, font: FontId) ->
             background: seg.bg.unwrap_or(Color32::TRANSPARENT),
             italics: seg.italic,
             underline: if seg.underline {
-                Stroke::new(1.0, color)
+                Stroke::new(1.0_f32, color)
             } else {
                 Stroke::NONE
             },

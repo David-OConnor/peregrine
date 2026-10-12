@@ -5,18 +5,18 @@
 // )]
 
 mod ansi;
-mod gui;
 mod state;
+mod ui;
 mod util;
 
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
-use shell::{HistoryItem, NavState, RecentDir, commands::OutKind, quiet_command, save_data};
+use shell::{HistoryItem, NavState, RecentDir, commands::OutKind, save_data};
 use state::State;
 
 use crate::{
-    gui::{MIN_CENTRAL_WIDTH, WINDOW_HEIGHT, WINDOW_WIDTH},
+    ui::{MIN_CENTRAL_WIDTH, WINDOW_HEIGHT, WINDOW_WIDTH},
     util::handle_cmd,
 };
 
@@ -99,20 +99,37 @@ pub fn run_command(state: &mut State, input: &str) {
         None => (input, ""),
     };
 
-    // `his`/`hist <n>` re-runs a previous history item.
-    if cmd == "his" || cmd == "hist" {
-        match args.parse::<usize>() {
-            Ok(idx) => match state.history.get(idx).map(|item| item.text.clone()) {
-                Some(text) => {
-                    run_command(state, &text);
-                    return;
-                }
-                None => state.push_out(
-                    format!("{cmd}: no history item at index {idx}"),
-                    OutType::StdErr,
-                ),
-            },
-            Err(_) => state.push_out(format!("{cmd}: usage: {cmd} <number>"), OutType::StdErr),
+    // History recall and page listing use the same absolute indices as the
+    // visible history panels. Do not store the recall invocation itself.
+    if cmd == "his" || cmd == "hist" || cmd == "this" {
+        let cwd = (cmd == "this").then_some(state.cwd());
+        if args.is_empty()
+            || args
+                .strip_prefix('p')
+                .and_then(|n| n.parse::<usize>().ok())
+                .is_some()
+        {
+            let page = args
+                .strip_prefix('p')
+                .and_then(|n| n.parse::<usize>().ok())
+                .unwrap_or(1)
+                .saturating_sub(1);
+            let listing = if cmd == "this" {
+                shell::render_history_in_dir(&state.history, state.cwd(), page)
+            } else {
+                shell::render_history(&state.history, page)
+            };
+            state.push_out(listing, OutType::StdOut);
+            return;
+        }
+        let resolved = shell::find_history_index(&state.history, cwd, args)
+            .and_then(|idx| state.history.get(idx).map(|item| item.text.clone()));
+        match resolved {
+            Some(text) => run_command(state, &text),
+            None => state.push_out(
+                format!("{cmd}: no matching history item for `{args}`"),
+                OutType::StdErr,
+            ),
         }
         return;
     }
@@ -129,34 +146,15 @@ pub fn run_command(state: &mut State, input: &str) {
                 .map(|item| (item.text.clone(), item.dir.clone()))
             {
                 Some((text, dir)) => {
-                    let result = if cfg!(windows) {
-                        quiet_command("pwsh")
-                            .args(["-NoProfile", "-NoLogo", "-Command", &text])
-                            .current_dir(&dir)
-                            .output()
-                    } else {
-                        quiet_command("sh")
-                            .args(["-c", text.as_str()])
-                            .current_dir(&dir)
-                            .output()
-                    };
-                    match result {
-                        Ok(out) => {
-                            if !out.stdout.is_empty() {
-                                state.push_out(
-                                    String::from_utf8_lossy(&out.stdout).into_owned(),
-                                    OutType::StdOut,
-                                );
-                            }
-                            if !out.stderr.is_empty() {
-                                state.push_out(
-                                    String::from_utf8_lossy(&out.stderr).into_owned(),
-                                    OutType::StdErr,
-                                );
-                            }
-                        }
-                        Err(e) => state.push_out(format!("shell: {e}"), OutType::StdErr),
-                    }
+                    // Expand shorthands (`run`, `pull`, …) the same way a
+                    // typed command would be; pwsh has never heard of them.
+                    let line = shell::commands::expand_input(
+                        &text,
+                        state.clone_roots.last().map(String::as_str),
+                        Some(&dir),
+                    )
+                    .line;
+                    util::run_passthrough(state, &line, &dir);
                     return;
                 }
                 None => state.push_out(

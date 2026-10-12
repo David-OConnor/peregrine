@@ -14,6 +14,11 @@ Most commands and terminal functionality from *Shell* work here as well, but thi
 enabled by the GUI, including displayed panels of directories, bookmarks, recent commands, etc. It also includes GUI
 controls to supplement commands.
 
+Type `shelp` to list every command and key shortcut, one per line.
+The **In this dir** panel lists commands entered in the active tab's current directory.
+You can also use `this <number>` or `this <letters>` to re-run one, and
+`this p<page>` to show a page of that directory's history in the output pane.
+
 ## Remote (SSH)
 The **Remote** panel manages SSH connections (shared in-process `russh` transport with the CLI; passwords are kept in
 the OS keyring, not the state file). Add a remote (host / port / user / password), then click **Connect** to attach the

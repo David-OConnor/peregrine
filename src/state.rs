@@ -5,12 +5,12 @@ use std::{
 
 use chrono::Utc;
 use shell::{
-    BrowserFile, HistoryItem, NavState, OpenTabs, PanelVis, RecentDir, RemoteSession, RemoteTerminal,
-    SshMode, WindowSize, apply_completion, complete_cd_path, current_branch, get_home,
-    read_browser_files, save_data, secrets, ssh, truncate_branch,
+    BrowserFile, HistoryItem, NavState, OpenTabs, PanelVis, RecentDir, RemoteSession,
+    RemoteTerminal, SshMode, WindowSize, apply_completion, complete_cd_path, current_branch,
+    get_home, read_browser_files, save_data, ssh, ssh::secrets, truncate_branch,
 };
 
-use crate::{OutItem, OutType, gui};
+use crate::{OutItem, OutType, ui};
 
 /// State specific to the GUI: the current input buffer, the captured terminal
 /// output, and a "please focus the input next frame" flag we use after
@@ -115,6 +115,9 @@ pub struct State {
     /// Paths we've execute commands from. Works in a similar way to bookmarks.
     pub recent_dirs: Vec<RecentDir>,
     pub remote_terminals: Vec<RemoteTerminal>,
+    /// Roots of repos cloned by full URL (written by the CLI's `clone` alias).
+    /// The GUI doesn't use these; it round-trips them so saving doesn't drop them.
+    pub clone_roots: Vec<String>,
     /// Live SSH session per tab (parallel to `cwd`). `Some` once a tab connects
     /// via the Remote panel; while set, that tab's typed commands run on the
     /// remote. Not persisted (a connection can't outlive the process).
@@ -148,13 +151,14 @@ impl Default for State {
             dir_bookmarks: Vec::new(),
             recent_dirs: Vec::new(),
             remote_terminals: Vec::new(),
+            clone_roots: Vec::new(),
             active_remote: vec![None],
             browser_files: Vec::new(),
             state_path: save_data::default_path()
                 .unwrap_or_else(|| PathBuf::from(save_data::FILENAME)),
             branch: vec![branch],
             window_size: None,
-            font_size: gui::DEFAULT_FONT_SIZE,
+            font_size: ui::DEFAULT_FONT_SIZE,
         };
         s.refresh_all_filters();
         s.refresh_browser_files();
@@ -165,7 +169,7 @@ impl Default for State {
 impl State {
     /// Just the `{star}{cwd}` portion of the prompt, used by the live
     /// input row which renders the branch + nav indicators as separately
-    /// coloured labels (see `gui::term_in`).
+    /// coloured labels (see `ui::term_in`).
     pub fn cwd_display(&self) -> String {
         // When the active tab is connected, show the remote location instead of
         // the local cwd so the user knows commands are running remotely.
@@ -256,6 +260,7 @@ impl State {
             &self.recent_dirs,
             &self.history,
             &self.remote_terminals,
+            &self.clone_roots,
             &self.ui.panel_vis,
             self.window_size,
             &open_tabs,
@@ -268,7 +273,7 @@ impl State {
     /// sane range, and persist the change. Wired to the +/- buttons on the
     /// tab strip.
     pub fn adjust_font_size(&mut self, delta: f32) {
-        let next = (self.font_size + delta).clamp(gui::MIN_FONT_SIZE, gui::MAX_FONT_SIZE);
+        let next = (self.font_size + delta).clamp(ui::MIN_FONT_SIZE, ui::MAX_FONT_SIZE);
         if next != self.font_size {
             self.font_size = next;
             let _ = self.save();
@@ -318,12 +323,13 @@ impl State {
             dir_bookmarks: loaded.bookmarks,
             recent_dirs: loaded.recent_dirs,
             remote_terminals: loaded.remote_terminals,
+            clone_roots: loaded.clone_roots,
             active_remote: (0..n).map(|_| None).collect(),
             browser_files: Vec::new(),
             state_path: path,
             branch,
             window_size: loaded.window_size,
-            font_size: loaded.font_size.unwrap_or(gui::DEFAULT_FONT_SIZE),
+            font_size: loaded.font_size.unwrap_or(ui::DEFAULT_FONT_SIZE),
         };
         s.refresh_all_filters();
         s.refresh_browser_files();
@@ -549,6 +555,7 @@ impl State {
             self.cwd(),
             self.home.as_deref(),
             &self.dir_bookmarks,
+            &self.recent_dirs,
         ) else {
             return;
         };
@@ -689,7 +696,10 @@ impl State {
             return;
         };
 
-        self.push_out(format!("Connecting to {user}@{host}:{port} …"), OutType::Prompt);
+        self.push_out(
+            format!("Connecting to {user}@{host}:{port} …"),
+            OutType::Prompt,
+        );
         match ssh::connect(&host, port, &user, &password) {
             Ok(session) => {
                 let i = self.ui.active_tab;
@@ -728,7 +738,11 @@ impl State {
                 Ok(()) => self.push_out(
                     format!(
                         "ssh: switched to {} mode",
-                        if next == SshMode::Pty { "interactive" } else { "exec" }
+                        if next == SshMode::Pty {
+                            "interactive"
+                        } else {
+                            "exec"
+                        }
                     ),
                     OutType::StdOut,
                 ),
@@ -796,6 +810,55 @@ impl State {
         true
     }
 
+    /// `remote list | add <[user@]host[:port]> | del <index>`, mirroring the
+    /// CLI built-in. `add` can't prompt for a password mid-frame, so it
+    /// pre-fills and opens the Remote panel's form for the user to finish.
+    pub fn cmd_remote(&mut self, args: &str) {
+        let (sub, rest) = match args.find(char::is_whitespace) {
+            Some(i) => (&args[..i], args[i..].trim()),
+            None => (args, ""),
+        };
+        match sub {
+            "" | "list" | "ls" => {
+                let listing = ssh::render_remotes(&self.remote_terminals, 0);
+                self.push_out(listing, OutType::StdOut);
+            }
+            "add" => {
+                if rest.is_empty() {
+                    self.push_out(
+                        "remote: usage: remote add [user@]host[:port] [port]",
+                        OutType::StdErr,
+                    );
+                    return;
+                }
+                let (host, port, user) = parse_remote_spec(rest);
+                self.ui.remote_host = host;
+                self.ui.remote_port = port.to_string();
+                self.ui.remote_user = user;
+                self.ui.remote_password.clear();
+                self.ui.remote_edit_idx = None;
+                self.ui.remote_form_open = true;
+                self.ui.panel_vis.remote_terminals = true;
+                self.push_out(
+                    "remote: enter the password in the Remote panel's form, then save",
+                    OutType::StdOut,
+                );
+            }
+            "del" | "rm" | "remove" => match rest.parse::<usize>() {
+                Ok(idx) if idx < self.remote_terminals.len() => self.remove_remote(idx),
+                Ok(idx) => self.push_out(
+                    format!("remote: no saved remote at index {idx}"),
+                    OutType::StdErr,
+                ),
+                Err(_) => self.push_out("remote: usage: remote del <number>", OutType::StdErr),
+            },
+            other => self.push_out(
+                format!("remote: unknown subcommand `{other}` (expected list, add, or del)"),
+                OutType::StdErr,
+            ),
+        }
+    }
+
     /// Delete a saved remote and its keyring password.
     pub fn remove_remote(&mut self, idx: usize) {
         if idx >= self.remote_terminals.len() {
@@ -821,7 +884,11 @@ impl State {
         }
         let user = {
             let u = self.ui.remote_user.trim();
-            if u.is_empty() { "root".to_string() } else { u.to_string() }
+            if u.is_empty() {
+                "root".to_string()
+            } else {
+                u.to_string()
+            }
         };
         let port: u16 = match self.ui.remote_port.trim() {
             "" => 22,
@@ -907,7 +974,7 @@ impl eframe::App for State {
                 });
             }
         }
-        gui::draw(self, ui);
+        ui::draw(self, ui);
     }
 
     /// Persist on close so a resize made without running any command (which

@@ -203,16 +203,23 @@ fn cwd_cmd_history(state: &mut State, ui: &mut Ui) {
         .id_salt("cwd_cmd_history_scroll")
         .auto_shrink([false, false])
         .show(ui, |ui| {
+            // Wrap long commands onto extra rows instead of letting the
+            // widest one stretch the panel across the window. The panel
+            // stays user-resizable via its drag handle.
+            ui.style_mut().wrap_mode = Some(TextWrapMode::Wrap);
+
             for &i in state.ui.cwd_history_filter.iter().rev() {
                 let Some(item) = state.history.get(i) else {
                     continue;
                 };
-                ui.horizontal(|ui| {
-                    let label = format!("{i}: {}", item.text);
-                    if ui.button(label).clicked() {
-                        action = Some(ListAction::FillInput(item.text.clone()));
-                    }
-                });
+
+                let label = format!("{i}: {}", item.text);
+                let btn = egui::Button::new(label)
+                    .wrap()
+                    .min_size(egui::vec2(ui.available_width(), 0.0));
+                if ui.add(btn).clicked() {
+                    action = Some(ListAction::FillInput(item.text.clone()));
+                }
             }
         });
 
@@ -736,7 +743,11 @@ fn remote_terminals(state: &mut State, ui: &mut Ui) {
                     if ui.small_button("Edit").clicked() {
                         action = Some(ListAction::EditRemote(i));
                     }
-                    if ui.small_button("x").on_hover_text("Delete remote").clicked() {
+                    if ui
+                        .small_button("x")
+                        .on_hover_text("Delete remote")
+                        .clicked()
+                    {
                         action = Some(ListAction::RemoveRemote(i));
                     }
                 });

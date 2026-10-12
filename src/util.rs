@@ -2,7 +2,10 @@
 
 use std::{fs, io, path::Path};
 
-use shell::{commands, path_from_args, quiet_command};
+use shell::{
+    SshMode, clone_root, commands, commands::Frontend, find_bookmark, find_recent_dir,
+    path_from_args, quiet_command, ssh,
+};
 
 use crate::{OutType, out_type_for, state::State, util};
 
@@ -18,12 +21,61 @@ pub fn handle_cmd(state: &mut State, cmd: &str, input: &str, args: &str) {
     // While the active tab is connected, route commands to the remote. Only
     // the session-management keywords are intercepted; everything else (exec
     // mode) runs on the remote shell. (PTY-mode input is sent directly from the
-    // input row, not here — see `gui::term_in`.)
+    // input row, not here — see `ui::term_in`.)
     if state.active_remote().is_some() {
         match cmd {
             "exit" | "quit" | "logout" | "disconnect" => state.disconnect_remote(),
-            "mode" => state.toggle_remote_mode(),
-            _ => state.run_remote_exec(input),
+            "mode" => {
+                let want = match args {
+                    "pty" | "interactive" | "shell" => Some(SshMode::Pty),
+                    "exec" | "cmd" => Some(SshMode::Exec),
+                    "" => None,
+                    other => {
+                        state.push_out(
+                            format!("mode: expected `exec` or `pty`, got `{other}`"),
+                            OutType::StdErr,
+                        );
+                        return;
+                    }
+                };
+                // Bare `mode` toggles; `mode <x>` only switches if not already there.
+                if want.is_none() || state.active_remote().map(|s| s.mode()) != want {
+                    state.toggle_remote_mode();
+                }
+            }
+            // Our own help, not the remote's — answer locally.
+            "shelp" => state.push_out(commands::shelp_text(Frontend::Gui), OutType::StdOut),
+            "--version" | "-v" => state.push_out(commands::version_line(), OutType::StdOut),
+            // The shell's Rust built-ins, translated to the equivalent remote
+            // command: the remote shell has never heard of them.
+            "sync" | "logs" => {
+                let mut sink = |kind, msg| state.push_out(msg, out_type_for(kind));
+                let remote_cmd = if cmd == "sync" {
+                    ssh::remote_sync_command(args, &mut sink)
+                } else {
+                    ssh::remote_logs_command(args, &mut sink)
+                };
+                if let Some(c) = remote_cmd {
+                    state.run_remote_exec(&c);
+                }
+            }
+            "rm_targets" | "open" => state.push_out(
+                format!("{cmd}: only runs locally; disconnect first"),
+                OutType::StdErr,
+            ),
+            // Everything else runs on the remote, with shorthands (`pull`,
+            // `run`, bare-name clones) expanded first.
+            _ => {
+                let expanded = commands::expand_input(
+                    input,
+                    state.clone_roots.last().map(String::as_str),
+                    None,
+                );
+                if expanded.echo {
+                    state.push_out(format!("> {}", expanded.line), OutType::Prompt);
+                }
+                state.run_remote_exec(&expanded.line);
+            }
         }
         return;
     }
@@ -32,6 +84,26 @@ pub fn handle_cmd(state: &mut State, cmd: &str, input: &str, args: &str) {
         "exit" | "quit" => {
             state.push_out("(use the window close button to exit)", OutType::StdErr);
         }
+
+        "shelp" => state.push_out(commands::shelp_text(Frontend::Gui), OutType::StdOut),
+
+        "--version" | "-v" => state.push_out(commands::version_line(), OutType::StdOut),
+
+        "remote" => state.cmd_remote(args),
+
+        "open" => {
+            let cwd = state.cwd().to_path_buf();
+            commands::open_dir(&cwd, &mut |kind, msg| {
+                state.push_out(msg, out_type_for(kind));
+            });
+        }
+
+        // The CLI version asks for confirmation on stdin, which the GUI
+        // doesn't route; say so rather than handing `rm_targets` to pwsh.
+        "rm_targets" => state.push_out(
+            "rm_targets: only available in the CLI (it asks for confirmation before deleting)",
+            OutType::StdErr,
+        ),
 
         // `ssh <index>` connects the active tab to a saved remote (same as the
         // per-remote buttons in the tab strip); `ssh [user@]host[:port]`
@@ -131,15 +203,18 @@ pub fn handle_cmd(state: &mut State, cmd: &str, input: &str, args: &str) {
                     }
                 }
             } else {
-                (
-                    Some(path_from_args(
-                        state.home.as_deref(),
-                        state.cwd(),
-                        &state.dir_bookmarks,
-                        args,
-                    )),
-                    None,
-                )
+                let mut target = path_from_args(
+                    state.home.as_deref(),
+                    state.cwd(),
+                    &state.dir_bookmarks,
+                    args,
+                );
+                if !target.is_dir() && !args.is_empty() && !args.starts_with('~') {
+                    if let Some(found) = find_recent_dir(&state.recent_dirs, args) {
+                        target = found;
+                    }
+                }
+                (Some(target), None)
             };
 
             if let Some(target) = target {
@@ -170,43 +245,90 @@ pub fn handle_cmd(state: &mut State, cmd: &str, input: &str, args: &str) {
             }
         }
 
-        "bm" => match args.parse::<usize>() {
-            Ok(idx) => match state.dir_bookmarks.get(idx).cloned() {
-                Some(target) => state.change_dir(target),
-                None => state.push_out(format!("bm: no bookmark at index {idx}"), OutType::StdErr),
-            },
-            Err(_) => state.push_out("bm: usage: bm <number>", OutType::StdErr),
-        },
-
-        _ => {
-            let result = if cfg!(windows) {
-                quiet_command("pwsh")
-                    .args(["-NoProfile", "-NoLogo", "-Command", input])
-                    .current_dir(state.cwd())
-                    .output()
+        "bm" => {
+            let resolved = if let Ok(idx) = args.parse::<usize>() {
+                state.dir_bookmarks.get(idx).cloned()
+            } else if !args.is_empty() {
+                find_bookmark(&state.dir_bookmarks, args)
             } else {
-                quiet_command("sh")
-                    .args(["-c", input])
-                    .current_dir(state.cwd())
-                    .output()
+                None
             };
-            match result {
-                Ok(out) => {
-                    if !out.stdout.is_empty() {
-                        state.push_out(
-                            String::from_utf8_lossy(&out.stdout).into_owned(),
-                            OutType::StdOut,
-                        );
-                    }
-                    if !out.stderr.is_empty() {
-                        state.push_out(
-                            String::from_utf8_lossy(&out.stderr).into_owned(),
-                            OutType::StdErr,
-                        );
-                    }
-                }
-                Err(e) => state.push_out(format!("shell: {e}"), OutType::StdErr),
+            match resolved {
+                Some(target) => state.change_dir(target),
+                None => state.push_out(
+                    format!("bm: no matching bookmark for `{args}`"),
+                    OutType::StdErr,
+                ),
             }
+        }
+
+        // Everything else goes to the system shell, after the shell library's
+        // shorthand rewrites (`pull` -> `git pull`, `run` -> `cargo run`,
+        // bare-name clones, venv python/pip) — the same ones the CLI applies.
+        _ => {
+            let cwd = state.cwd().to_path_buf();
+            let expanded = commands::expand_input(
+                input,
+                state.clone_roots.last().map(String::as_str),
+                Some(&cwd),
+            );
+            if expanded.echo {
+                state.push_out(format!("> {}", expanded.line), OutType::Prompt);
+            }
+
+            // A successful clone from a full URL saves the URL's root, so later
+            // clones from the same place need only the repo name. Only on
+            // success, so a mistyped URL isn't saved.
+            if run_passthrough(state, &expanded.line, &cwd)
+                && let Some(root) = clone_root(&expanded.line)
+            {
+                state.clone_roots.retain(|r| *r != root);
+                state.clone_roots.push(root);
+                if let Err(e) = state.save() {
+                    state.push_out(
+                        format!("warning: failed to save state: {e}"),
+                        OutType::StdErr,
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Run `line` through the system shell (PowerShell 7 on Windows, `sh`
+/// elsewhere) in `dir`, pushing its captured stdout/stderr into the output
+/// pane. Returns whether it ran and exited successfully.
+pub fn run_passthrough(state: &mut State, line: &str, dir: &Path) -> bool {
+    let result = if cfg!(windows) {
+        quiet_command("pwsh")
+            .args(["-NoProfile", "-NoLogo", "-Command", line])
+            .current_dir(dir)
+            .output()
+    } else {
+        quiet_command("sh")
+            .args(["-c", line])
+            .current_dir(dir)
+            .output()
+    };
+    match result {
+        Ok(out) => {
+            if !out.stdout.is_empty() {
+                state.push_out(
+                    String::from_utf8_lossy(&out.stdout).into_owned(),
+                    OutType::StdOut,
+                );
+            }
+            if !out.stderr.is_empty() {
+                state.push_out(
+                    String::from_utf8_lossy(&out.stderr).into_owned(),
+                    OutType::StdErr,
+                );
+            }
+            out.status.success()
+        }
+        Err(e) => {
+            state.push_out(format!("shell: {e}"), OutType::StdErr);
+            false
         }
     }
 }
