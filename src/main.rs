@@ -235,5 +235,13 @@ fn main() {
         ..Default::default()
     };
 
-    eframe::run_native("Shell", options, Box::new(|_cc| Ok(Box::new(state)))).unwrap();
+    eframe::run_native(
+        "Shell",
+        options,
+        Box::new(|cc| {
+            ui::install_fonts(&cc.egui_ctx);
+            Ok(Box::new(state))
+        }),
+    )
+    .unwrap();
 }

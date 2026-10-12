@@ -1,11 +1,13 @@
 use std::{
     path::{Path, PathBuf},
+    sync::Arc,
     time::SystemTime,
 };
 
 use egui::{
-    Align, CentralPanel, Color32, Frame, Key, Layout, Panel, RichText, ScrollArea, TextEdit,
-    TextStyle, TextWrapMode, Ui, WidgetText, text::LayoutJob,
+    Align, CentralPanel, Color32, FontData, FontDefinitions, FontFamily, FontId, Frame, Key,
+    Layout, Panel, RichText, ScrollArea, TextEdit, TextFormat, TextStyle, TextWrapMode, Ui,
+    WidgetText, text::LayoutJob,
 };
 use shell::SshMode;
 
@@ -62,6 +64,68 @@ pub const DEFAULT_GUI_FONT_SIZE: f32 = 11.;
 /// shrunk to an unreadable size or blown up past the window.
 pub const MIN_FONT_SIZE: f32 = 6.;
 pub const MAX_FONT_SIZE: f32 = 48.;
+
+/// Name of the bold font family registered by [install_fonts]; see
+/// [bold_family].
+const BOLD_FAMILY: &str = "bold";
+
+/// Bold system fonts to try, in order. egui's built-in fonts have no bold
+/// weight, so [install_fonts] borrows the first of these that exists. Ubuntu
+/// Bold comes first on Linux as it matches egui's own Ubuntu Light.
+fn bold_font_candidates() -> Vec<PathBuf> {
+    if cfg!(windows) {
+        let windir = std::env::var_os("WINDIR").unwrap_or_else(|| r"C:\Windows".into());
+        let fonts = PathBuf::from(windir).join("Fonts");
+        vec![fonts.join("segoeuib.ttf"), fonts.join("arialbd.ttf")]
+    } else if cfg!(target_os = "macos") {
+        vec![
+            "/System/Library/Fonts/Supplemental/Arial Bold.ttf".into(),
+            "/Library/Fonts/Arial Bold.ttf".into(),
+        ]
+    } else {
+        [
+            "/usr/share/fonts/truetype/ubuntu/Ubuntu-B.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        ]
+        .into_iter()
+        .map(PathBuf::from)
+        .collect()
+    }
+}
+
+/// Register the [bold_family] font family: the first bold system font found
+/// (see [bold_font_candidates]), falling back to the normal proportional
+/// fonts for glyphs it lacks. If none is found the family is just the
+/// proportional fonts, so text drawn in it is still readable, only not bold.
+pub fn install_fonts(ctx: &egui::Context) {
+    let mut defs = FontDefinitions::default();
+    let mut family = defs
+        .families
+        .get(&FontFamily::Proportional)
+        .cloned()
+        .unwrap_or_default();
+    if let Some(bytes) = bold_font_candidates()
+        .into_iter()
+        .find_map(|p| std::fs::read(p).ok())
+    {
+        defs.font_data.insert(
+            BOLD_FAMILY.to_owned(),
+            Arc::new(FontData::from_owned(bytes)),
+        );
+        family.insert(0, BOLD_FAMILY.to_owned());
+    }
+    defs.families
+        .insert(FontFamily::Name(BOLD_FAMILY.into()), family);
+    ctx.set_fonts(defs);
+}
+
+/// The bold font family registered by [install_fonts].
+fn bold_family() -> FontFamily {
+    FontFamily::Name(BOLD_FAMILY.into())
+}
 
 /// Bookmarks column. Narrower than the other side columns: bookmark paths are
 /// truncated to [BOOKMARK_MAX_LEN] chars, so this only needs to fit the
@@ -152,15 +216,29 @@ fn path_job(ui: &Ui, path: &Path, home: Option<&Path>) -> LayoutJob {
 }
 
 /// A Command history / In this dir button label: `"<i>: "`, then the command
-/// `text` with its base command colour-coded (see [cmd_color]).
+/// `text` with its base command bold and colour-coded (see [cmd_color]).
+/// Uncoloured runs take the button's own text colour.
 fn cmd_label(ui: &Ui, i: usize, text: &str) -> LayoutJob {
-    let mut label = vec![Part::plain(format!("{i}: "))];
-    label.extend(cmd_color::parts(text, ui.visuals().dark_mode));
-    path_color::layout_job(
-        &label,
-        TextStyle::Button.resolve(ui.style()),
-        Color32::PLACEHOLDER,
-    )
+    let font = TextStyle::Button.resolve(ui.style());
+    let bold = FontId::new(font.size, bold_family());
+    let mut job = LayoutJob::default();
+    let mut append = |text: &str, font_id: FontId, color: Color32| {
+        let format = TextFormat {
+            font_id,
+            color,
+            ..Default::default()
+        };
+        job.append(text, 0.0, format);
+    };
+    append(&format!("{i}: "), font.clone(), Color32::PLACEHOLDER);
+    // The only coloured run is the base command.
+    for p in cmd_color::parts(text, ui.visuals().dark_mode) {
+        match p.color {
+            Some(c) => append(&p.text, bold.clone(), c),
+            None => append(&p.text, font.clone(), Color32::PLACEHOLDER),
+        }
+    }
+    job
 }
 
 /// Display directory bookmarks as a clickable column. Clicking a row cd's
