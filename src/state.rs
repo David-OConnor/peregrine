@@ -10,7 +10,10 @@ use shell::{
     get_home, read_browser_files, save_data, ssh, ssh::secrets, truncate_branch,
 };
 
-use crate::{OutItem, OutType, files::FileDetails, markdown::MarkdownViewers, path_color, ui};
+use crate::{
+    OutItem, OutType, cmd_color::CmdColors, files::FileDetails, markdown::MarkdownViewers,
+    path_color, ui,
+};
 
 /// State specific to the GUI: the current input buffer, the captured terminal
 /// output, and a "please focus the input next frame" flag we use after
@@ -111,6 +114,9 @@ pub struct State {
     /// Cached.
     pub home: Option<PathBuf>,
     pub history: Vec<HistoryItem>,
+    /// Colours for the base commands in the history panels. Rebuilt from
+    /// `history` by [Self::refresh_cmd_colors].
+    pub cmd_colors: CmdColors,
     /// This initializes to env::current_dir, but is then managed from within
     /// this program. Per tab.
     pub cwd: Vec<PathBuf>,
@@ -164,6 +170,7 @@ impl Default for State {
             ui: StateUi::default(),
             home: get_home(),
             history: Vec::new(),
+            cmd_colors: CmdColors::default(),
             cwd: vec![cwd],
             dir_bookmarks: Vec::new(),
             recent_dirs: Vec::new(),
@@ -181,6 +188,7 @@ impl Default for State {
             md_viewers: MarkdownViewers::default(),
         };
         s.refresh_all_filters();
+        s.refresh_cmd_colors();
         s.refresh_browser_files();
         s
     }
@@ -387,6 +395,7 @@ impl State {
             ui,
             home: get_home(),
             history: loaded.history,
+            cmd_colors: CmdColors::default(),
             cwd,
             dir_bookmarks: loaded.bookmarks,
             recent_dirs: loaded.recent_dirs,
@@ -403,6 +412,7 @@ impl State {
             md_viewers: MarkdownViewers::default(),
         };
         s.refresh_all_filters();
+        s.refresh_cmd_colors();
         s.refresh_browser_files();
         Ok(s)
     }
@@ -553,6 +563,12 @@ impl State {
             })
             .map(|(i, _)| i)
             .collect();
+    }
+
+    /// Re-assign the history panels' command colours after `history`
+    /// changes. See [CmdColors].
+    pub fn refresh_cmd_colors(&mut self) {
+        self.cmd_colors = CmdColors::new(self.history.iter().rev().map(|h| h.text.as_str()));
     }
 
     /// Searches just the command text (not the dir) — that's what the user

@@ -15,7 +15,8 @@ use egui::{Color32, FontId, TextFormat, text::LayoutJob};
 
 /// Hues spread around the colour wheel so any two read as different at a
 /// glance. Kept short on purpose: more entries means near-identical pairs.
-pub(crate) type Palette = [Color32; 8];
+pub(crate) type Palette = [Color32; PALETTE_LEN];
+pub(crate) const PALETTE_LEN: usize = 8;
 
 /// For dark backgrounds: the terminal panes, and the panels in dark mode.
 const PALETTE_DARK: Palette = [

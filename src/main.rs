@@ -187,6 +187,7 @@ pub fn run_command(state: &mut State, input: &str) {
     });
     state.refresh_history_filter();
     state.refresh_cwd_history_filter();
+    state.refresh_cmd_colors();
 
     // Track directories we've run real commands from (everything except `cd`).
     // Persist regardless so the new history entry hits disk.

@@ -40,7 +40,8 @@ fn panel_header(ui: &mut Ui, title: &str, visible: &mut bool) {
 }
 
 use crate::{
-    OutType, ansi, cmd_color,
+    OutType, ansi,
+    cmd_color::CmdColors,
     files::{FileDetails, format_size, open_with_default_app},
     markdown::is_markdown,
     path_color::{self, Part},
@@ -216,9 +217,9 @@ fn path_job(ui: &Ui, path: &Path, home: Option<&Path>) -> LayoutJob {
 }
 
 /// A Command history / In this dir button label: `"<i>: "`, then the command
-/// `text` with its base command bold and colour-coded (see [cmd_color]).
+/// `text` with its base command bold and colour-coded (see [CmdColors]).
 /// Uncoloured runs take the button's own text colour.
-fn cmd_label(ui: &Ui, i: usize, text: &str) -> LayoutJob {
+fn cmd_label(ui: &Ui, colors: &CmdColors, i: usize, text: &str) -> LayoutJob {
     let font = TextStyle::Button.resolve(ui.style());
     let bold = FontId::new(font.size, bold_family());
     let mut job = LayoutJob::default();
@@ -232,7 +233,7 @@ fn cmd_label(ui: &Ui, i: usize, text: &str) -> LayoutJob {
     };
     append(&format!("{i}: "), font.clone(), Color32::PLACEHOLDER);
     // The only coloured run is the base command.
-    for p in cmd_color::parts(text, ui.visuals().dark_mode) {
+    for p in colors.parts(text, ui.visuals().dark_mode) {
         match p.color {
             Some(c) => append(&p.text, bold.clone(), c),
             None => append(&p.text, font.clone(), Color32::PLACEHOLDER),
@@ -351,7 +352,7 @@ fn cwd_cmd_history(state: &mut State, ui: &mut Ui) {
                     continue;
                 };
 
-                let label = cmd_label(ui, i, &item.text);
+                let label = cmd_label(ui, &state.cmd_colors, i, &item.text);
                 let btn = egui::Button::new(label)
                     .wrap()
                     .min_size(egui::vec2(ui.available_width(), 0.0));
@@ -391,7 +392,7 @@ fn cmd_history(state: &mut State, ui: &mut Ui) {
                 let Some(item) = state.history.get(i) else {
                     continue;
                 };
-                let label = cmd_label(ui, i, &item.text);
+                let label = cmd_label(ui, &state.cmd_colors, i, &item.text);
                 let btn = egui::Button::new(label)
                     .wrap()
                     .min_size(egui::vec2(ui.available_width(), 0.0));
