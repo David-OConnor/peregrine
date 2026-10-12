@@ -73,6 +73,13 @@ pub struct StateUi {
     /// `show_dotfiles` covers names starting with `.`.
     pub show_hidden_attr: bool,
     pub show_dotfiles: bool,
+    /// Files-panel text filter: case-insensitive substring match against
+    /// entry names. Empty = show everything. Cleared when the listing moves
+    /// to a different directory (see [State::refresh_browser_files]).
+    pub files_search: String,
+    /// Indices into `State::browser_files` matching `files_search`, kept
+    /// current by [State::refresh_browser_files_filter].
+    pub browser_files_filter: Vec<usize>,
 
     /// Remote-panel "add / edit remote" form state. `remote_form_open` shows
     /// the form; the text fields hold the in-progress entry; `remote_edit_idx`
@@ -108,6 +115,8 @@ impl Default for StateUi {
             nav_forward: vec![Vec::new()],
             show_hidden_attr: true,
             show_dotfiles: true,
+            files_search: String::new(),
+            browser_files_filter: Vec::new(),
             remote_form_open: false,
             remote_host: String::new(),
             remote_port: String::new(),
@@ -144,6 +153,9 @@ pub struct State {
     pub active_remote: Vec<Option<RemoteSession>>,
     /// In the current dir. Note persistent, unlike some of our other lists.
     pub browser_files: Vec<BrowserFile>,
+    /// The dir `browser_files` was last read from, so a refresh can tell a
+    /// move to a new dir (which clears the Files filter) from a re-read.
+    pub browser_dir: PathBuf,
     /// The row selected in the Files panel, with the details its lower pane
     /// shows. Re-read whenever `browser_files` is, and cleared once the path
     /// is no longer in the listing (e.g. after a cd or tab switch).
@@ -200,6 +212,7 @@ impl Default for State {
             clone_roots: Vec::new(),
             active_remote: vec![None],
             browser_files: Vec::new(),
+            browser_dir: PathBuf::new(),
             selected_file: None,
             state_path: save_data::default_path()
                 .unwrap_or_else(|| PathBuf::from(save_data::FILENAME)),
@@ -312,10 +325,16 @@ impl State {
     /// points as [refresh_branch]. Entries the `show_hidden_attr` /
     /// `show_dotfiles` filters exclude are dropped, which also deselects a
     /// now-filtered row. An entry that is both Hidden and a dotfile (e.g.
-    /// `.git`) shows if either filter is on.
+    /// `.git`) shows if either filter is on. Moving to a different dir
+    /// clears the text filter, which only makes sense for the dir it was
+    /// typed in.
     pub fn refresh_browser_files(&mut self) {
         let cwd = self.cwd().to_path_buf();
+        if cwd != self.browser_dir {
+            self.ui.files_search.clear();
+        }
         self.browser_files = read_browser_files(&cwd);
+        self.browser_dir = cwd;
         let (attr, dot) = (self.ui.show_hidden_attr, self.ui.show_dotfiles);
         self.browser_files.retain(|f| {
             let is_dot = f.disp_name.starts_with('.');
@@ -323,6 +342,33 @@ impl State {
         });
         if let Some(sel) = self.selected_file.take() {
             self.select_file(&sel.path);
+        }
+        self.refresh_browser_files_filter();
+    }
+
+    /// Case-insensitive substring match of the Files-panel text filter
+    /// against each listed entry's name. Empty search matches everything.
+    /// Like the hidden/dotfile filters, hiding the selected row deselects it.
+    pub fn refresh_browser_files_filter(&mut self) {
+        let needle = self.ui.files_search.to_lowercase();
+
+        self.ui.browser_files_filter = self
+            .browser_files
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| needle.is_empty() || f.disp_name.to_lowercase().contains(&needle))
+            .map(|(i, _)| i)
+            .collect();
+
+        if let Some(sel) = &self.selected_file {
+            let shown = self
+                .ui
+                .browser_files_filter
+                .iter()
+                .any(|&i| self.browser_files[i].path == sel.path);
+            if !shown {
+                self.selected_file = None;
+            }
         }
     }
 
@@ -439,6 +485,7 @@ impl State {
             clone_roots: loaded.clone_roots,
             active_remote: (0..n).map(|_| None).collect(),
             browser_files: Vec::new(),
+            browser_dir: PathBuf::new(),
             selected_file: None,
             state_path: path,
             branch,

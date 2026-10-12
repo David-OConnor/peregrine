@@ -681,7 +681,8 @@ fn term_in(state: &mut State, ui: &mut Ui) {
 /// sorted first and prefixed with 📁; executable files (Unix +x, or
 /// Windows `.exe`/`.msi`) are coloured green. The listing is refreshed
 /// by [State::refresh_browser_files] on every cwd change and after every
-/// command, so we just read what's already there.
+/// command, so we just read what's already there. The search box under the
+/// hidden/dotfile toggles narrows the listing by name.
 ///
 /// Clicking a row selects it, and the bottom third of the panel shows its
 /// details (see [file_details]). Double-clicking a folder row navigates into
@@ -830,6 +831,12 @@ fn file_browser(state: &mut State, ui: &mut Ui) {
         state.refresh_browser_files();
     }
 
+    // Text filter on names in this dir; cleared on cd (see
+    // [State::refresh_browser_files]).
+    if search_box(ui, &mut state.ui.files_search, "files_search") {
+        state.refresh_browser_files_filter();
+    }
+
     ui.separator();
 
     // Added before the list so it claims the bottom of the panel; the list
@@ -853,7 +860,13 @@ fn file_browser(state: &mut State, ui: &mut Ui) {
             // Rows butt up against each other, like a file manager's list.
             ui.spacing_mut().item_spacing.y = 0.0;
 
-            for f in &state.browser_files {
+            if state.ui.browser_files_filter.is_empty() && !state.ui.files_search.is_empty() {
+                ui.label(RichText::new("No matches.").italics().weak());
+            }
+            for &i in &state.ui.browser_files_filter {
+                let Some(f) = state.browser_files.get(i) else {
+                    continue;
+                };
                 let text = if f.is_folder {
                     format!("📁 {}", f.disp_name)
                 } else {
