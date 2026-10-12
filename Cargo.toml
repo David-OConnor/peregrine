@@ -15,9 +15,12 @@ eframe = "0.34.3"
 # code blocks via syntect (pure-Rust regex, no C deps); the default features
 # load local images the document references.
 egui_commonmark = { version = "0.23.0", features = ["better_syntax_highlighting"] }
-# Image loaders for those pictures. Local files only: no `http`, so viewing a
-# file never makes network requests (remote images show a ⚠ placeholder).
-egui_extras = { version = "0.34.3", features = ["file", "image", "gif", "webp", "svg"] }
+# Image loaders for those pictures. `http` fetches remote images (README
+# badges etc.) on a background thread via ehttp.
+egui_extras = { version = "0.34.3", features = ["file", "http", "image", "gif", "webp", "svg"] }
+# Same parser egui_commonmark uses: the viewer finds `<details>` blocks with it
+# so they can render as collapsible sections. Adds nothing new to the build.
+pulldown-cmark = { version = "0.13", default-features = false }
 # egui_extras decodes only the formats enabled on the `image` crate.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp"] }
 

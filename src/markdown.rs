@@ -5,16 +5,18 @@
 
 use std::{
     fs,
+    ops::Range,
     path::{MAIN_SEPARATOR, Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard},
     time::{Duration, Instant, SystemTime},
 };
 
 use egui::{
-    CentralPanel, Context, Frame, Id, Key, OutputCommand, Panel, RichText, ScrollArea, Ui,
-    ViewportBuilder, ViewportCommand, ViewportId,
+    CentralPanel, CollapsingHeader, Context, Frame, Id, Key, OutputCommand, Panel, RichText,
+    ScrollArea, Ui, ViewportBuilder, ViewportCommand, ViewportId,
 };
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
+use pulldown_cmark::{Event, Options, Parser, Tag};
 
 use crate::files::open_with_default_app;
 
@@ -63,6 +65,8 @@ struct Doc {
     path: PathBuf,
     /// The file's contents, or why it couldn't be read.
     text: Result<String, String>,
+    /// `text` split at its `<details>` blocks; see [split_details].
+    blocks: Vec<Block>,
     /// Modification time of the contents in `text`, to notice edits.
     modified: Option<SystemTime>,
     last_poll: Instant,
@@ -78,6 +82,7 @@ impl Doc {
             id,
             path,
             text: Ok(String::new()),
+            blocks: Vec::new(),
             modified: None,
             last_poll: Instant::now(),
             open: true,
@@ -97,6 +102,10 @@ impl Doc {
                 text.strip_prefix('\u{feff}').unwrap_or(&text).to_string()
             })
             .map_err(|e| format!("Couldn't read {}: {e}", self.path.display()));
+        self.blocks = match &self.text {
+            Ok(text) => split_details(text),
+            Err(_) => Vec::new(),
+        };
     }
 
     /// Re-read the file if its modification time changed since it was read.
@@ -238,9 +247,8 @@ impl Inner {
                         Ok(text) => {
                             ui.style_mut().url_in_tooltip = true;
                             let cache = cache.get_or_insert_with(CommonMarkCache::default);
-                            CommonMarkViewer::new()
-                                .default_implicit_uri_scheme(doc.image_base())
-                                .show(ui, cache, text);
+                            let base = doc.image_base();
+                            show_blocks(ui, &doc.blocks, text, cache, &base, id);
                         }
                         Err(e) => {
                             ui.label(RichText::new(e).color(ui.visuals().error_fg_color));
@@ -249,6 +257,244 @@ impl Inner {
             });
 
         handle_links(doc, to_open, &ctx);
+    }
+}
+
+/// A piece of a document. egui_commonmark prints HTML as raw text, so
+/// `<details>` / `<summary>` blocks are cut out before rendering and shown as
+/// collapsing headers, with the Markdown between them rendered as usual.
+#[derive(Debug, PartialEq)]
+enum Block {
+    /// Markdown to render: a byte range of the document.
+    Markdown(Range<usize>),
+    Details {
+        summary: String,
+        /// The `open` attribute: expanded until the user collapses it.
+        open: bool,
+        /// Ordinal of this `<details>` in the document, for its egui id: it
+        /// stays put however other sections are expanded or collapsed.
+        index: usize,
+        body: Vec<Block>,
+    },
+}
+
+/// A `<details>` that's been opened but not yet closed, in [split_details].
+struct OpenDetails {
+    summary: Option<String>,
+    open: bool,
+    index: usize,
+    body: Vec<Block>,
+}
+
+impl OpenDetails {
+    fn finish(self) -> Block {
+        Block::Details {
+            // GitHub's label for a `<details>` without a `<summary>`.
+            summary: self.summary.unwrap_or_else(|| "Details".to_string()),
+            open: self.open,
+            index: self.index,
+            body: self.body,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum HtmlTag {
+    DetailsOpen { open: bool },
+    DetailsClose,
+    /// A whole `<summary>…</summary>` element, as plain text.
+    Summary(String),
+}
+
+/// Split `text` at the `<details>`, `<summary>` and `</details>` tags in its
+/// top-level HTML blocks. A document without any is one [Block::Markdown].
+/// An unclosed `<details>` runs to the end of the document.
+fn split_details(text: &str) -> Vec<Block> {
+    let mut root = Vec::new();
+    let mut stack: Vec<OpenDetails> = Vec::new();
+    let mut pos = 0;
+    let mut count = 0;
+
+    for (range, tag) in details_tags(text) {
+        let body = stack.last_mut().map_or(&mut root, |d| &mut d.body);
+        push_markdown(body, text, pos..range.start);
+        pos = range.end;
+        match tag {
+            HtmlTag::DetailsOpen { open } => {
+                stack.push(OpenDetails {
+                    summary: None,
+                    open,
+                    index: count,
+                    body: Vec::new(),
+                });
+                count += 1;
+            }
+            HtmlTag::Summary(summary) => {
+                // Only the first `<summary>` labels a `<details>`; a stray
+                // one is dropped.
+                if let Some(d) = stack.last_mut().filter(|d| d.summary.is_none()) {
+                    d.summary = Some(summary);
+                }
+            }
+            HtmlTag::DetailsClose => {
+                if let Some(d) = stack.pop() {
+                    let block = d.finish();
+                    stack.last_mut().map_or(&mut root, |d| &mut d.body).push(block);
+                }
+            }
+        }
+    }
+
+    let body = stack.last_mut().map_or(&mut root, |d| &mut d.body);
+    push_markdown(body, text, pos..text.len());
+    while let Some(d) = stack.pop() {
+        let block = d.finish();
+        stack.last_mut().map_or(&mut root, |d| &mut d.body).push(block);
+    }
+    root
+}
+
+fn push_markdown(blocks: &mut Vec<Block>, text: &str, range: Range<usize>) {
+    if !text[range.clone()].trim().is_empty() {
+        blocks.push(Block::Markdown(range));
+    }
+}
+
+/// The details-related tags in `text`'s HTML blocks, with their byte ranges,
+/// in order. Found with the same parser (and options) egui_commonmark uses,
+/// so a `<details>` in a code block or inline in a paragraph is left alone.
+/// Only top-level blocks count: splitting inside a list or quote would break
+/// it apart.
+fn details_tags(text: &str) -> Vec<(Range<usize>, HtmlTag)> {
+    let options = Options::ENABLE_TABLES
+        | Options::ENABLE_TASKLISTS
+        | Options::ENABLE_STRIKETHROUGH
+        | Options::ENABLE_FOOTNOTES
+        | Options::ENABLE_DEFINITION_LIST
+        | Options::ENABLE_MATH;
+    let mut tags = Vec::new();
+    let mut depth = 0usize;
+    for (event, range) in Parser::new_ext(text, options).into_offset_iter() {
+        match event {
+            Event::Start(tag) => {
+                if depth == 0 && tag == Tag::HtmlBlock {
+                    scan_html(&text[range.clone()], range.start, &mut tags);
+                }
+                depth += 1;
+            }
+            Event::End(_) => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    tags
+}
+
+/// Find details-related tags in the HTML `block`, which starts at byte
+/// `offset` of the document.
+fn scan_html(block: &str, offset: usize, tags: &mut Vec<(Range<usize>, HtmlTag)>) {
+    // ASCII lowercasing keeps byte offsets, so indices into `lower` are valid
+    // in `block` too.
+    let lower = block.to_ascii_lowercase();
+    let mut i = 0;
+    while let Some(found) = lower[i..].find('<') {
+        let at = i + found;
+        let rest = &lower[at..];
+        let (len, tag) = if let Some(end) = tag_end(rest, "<details") {
+            let attrs = &rest["<details".len()..end];
+            let open = attrs
+                .split(|c: char| c.is_ascii_whitespace() || c == '/')
+                .any(|a| a == "open" || a.starts_with("open="));
+            (end + 1, HtmlTag::DetailsOpen { open })
+        } else if let Some(end) = tag_end(rest, "</details") {
+            (end + 1, HtmlTag::DetailsClose)
+        } else if let Some(end) = tag_end(rest, "<summary") {
+            let inner = end + 1;
+            let (inner_end, len) = match rest[inner..].find("</summary") {
+                Some(close) => {
+                    let close = inner + close;
+                    let len = rest[close..].find('>').map_or(rest.len(), |g| close + g + 1);
+                    (close, len)
+                }
+                None => (rest.len(), rest.len()),
+            };
+            let summary = html_to_text(&block[at + inner..at + inner_end]);
+            (len, HtmlTag::Summary(summary))
+        } else {
+            i = at + 1;
+            continue;
+        };
+        tags.push((offset + at..offset + at + len, tag));
+        i = at + len;
+    }
+}
+
+/// If `s` starts with the tag `name` (lowercase, with its `<`), the index of
+/// the tag's closing `>`.
+fn tag_end(s: &str, name: &str) -> Option<usize> {
+    let after = s.strip_prefix(name)?;
+    if !after.starts_with(|c: char| c == '>' || c == '/' || c.is_ascii_whitespace()) {
+        return None; // e.g. `<detailsfoo>`
+    }
+    s.find('>')
+}
+
+/// The text of an HTML fragment, for a `<summary>` label: tags dropped,
+/// common entities decoded, and whitespace collapsed.
+fn html_to_text(html: &str) -> String {
+    let mut text = String::with_capacity(html.len());
+    let mut in_tag = false;
+    for c in html.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' if in_tag => in_tag = false,
+            _ if !in_tag => text.push(c),
+            _ => {}
+        }
+    }
+    let text = text
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&nbsp;", " ")
+        .replace("&amp;", "&");
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Render `blocks`, pieces of the document `text`, in viewer window `window`.
+fn show_blocks(
+    ui: &mut Ui,
+    blocks: &[Block],
+    text: &str,
+    cache: &mut CommonMarkCache,
+    image_base: &str,
+    window: ViewportId,
+) {
+    for (i, block) in blocks.iter().enumerate() {
+        match block {
+            Block::Markdown(range) => {
+                // egui_commonmark ids its tables from `ui.id()` and a counter
+                // that restarts with each `show`, so give each piece its own.
+                ui.push_id(i, |ui| {
+                    CommonMarkViewer::new()
+                        .default_implicit_uri_scheme(image_base)
+                        .show(ui, cache, &text[range.clone()]);
+                });
+            }
+            Block::Details {
+                summary,
+                open,
+                index,
+                body,
+            } => {
+                CollapsingHeader::new(RichText::new(summary).strong())
+                    .id_salt(("md_details", window, *index))
+                    .default_open(*open)
+                    .show(ui, |ui| {
+                        show_blocks(ui, body, text, cache, image_base, window)
+                    });
+            }
+        }
     }
 }
 
@@ -399,6 +645,72 @@ fn handle_links(doc: &mut Doc, to_open: &mut Vec<PathBuf>, ctx: &Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn md<'a>(text: &'a str, block: &Block) -> &'a str {
+        match block {
+            Block::Markdown(r) => text[r.clone()].trim(),
+            _ => panic!("expected Markdown, got {block:?}"),
+        }
+    }
+
+    #[test]
+    fn no_details_is_one_block() {
+        let text = "# Hi\n\nSome `<details>` text.\n\n```\n<details>\n```\n";
+        assert_eq!(split_details(text), vec![Block::Markdown(0..text.len())]);
+    }
+
+    #[test]
+    fn splits_details() {
+        let text = "Intro\n\n<details open>\n<summary>Notes &amp; <b>sources</b></summary>\n\n\
+                    - a\n- b\n\n</details>\n\nOutro\n";
+        let blocks = split_details(text);
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(md(text, &blocks[0]), "Intro");
+        let Block::Details {
+            summary,
+            open,
+            index,
+            body,
+        } = &blocks[1]
+        else {
+            panic!("{:?}", blocks[1]);
+        };
+        assert_eq!(summary, "Notes & sources");
+        assert!(*open);
+        assert_eq!(*index, 0);
+        assert_eq!(body.len(), 1);
+        assert_eq!(md(text, &body[0]), "- a\n- b");
+        assert_eq!(md(text, &blocks[2]), "Outro");
+    }
+
+    #[test]
+    fn nested_and_unclosed_details() {
+        let text =
+            "<details>\n\nouter\n\n<details><summary>In</summary>\n\ninner\n\n</details>\n\ntail\n";
+        let blocks = split_details(text);
+        assert_eq!(blocks.len(), 1);
+        let Block::Details {
+            summary,
+            open,
+            body,
+            ..
+        } = &blocks[0]
+        else {
+            panic!("{:?}", blocks[0]);
+        };
+        assert_eq!(summary, "Details");
+        assert!(!*open);
+        assert_eq!(body.len(), 3);
+        assert_eq!(md(text, &body[0]), "outer");
+        assert!(matches!(&body[1], Block::Details { summary, index: 1, .. } if summary == "In"));
+        assert_eq!(md(text, &body[2]), "tail");
+    }
+
+    #[test]
+    fn details_in_list_is_left_alone() {
+        let text = "- item\n\n  <details>\n\n  x\n\n  </details>\n";
+        assert_eq!(split_details(text), vec![Block::Markdown(0..text.len())]);
+    }
 
     #[test]
     fn detects_markdown() {
