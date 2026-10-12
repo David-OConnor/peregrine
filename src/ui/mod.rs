@@ -1161,13 +1161,7 @@ fn font_size_control(ui: &mut Ui, label: &str, size: f32, what: &str) -> f32 {
     ui.label(label);
     ui.label(format!("{}", size.round() as i32));
     let mut delta = 0.0;
-    if ui
-        .small_button("+")
-        .on_hover_text(format!("Increase {what} font size"))
-        .clicked()
-    {
-        delta = 1.0;
-    }
+
     if ui
         .small_button("-")
         .on_hover_text(format!("Decrease {what} font size"))
@@ -1175,6 +1169,15 @@ fn font_size_control(ui: &mut Ui, label: &str, size: f32, what: &str) -> f32 {
     {
         delta = -1.0;
     }
+
+    if ui
+        .small_button("+")
+        .on_hover_text(format!("Increase {what} font size"))
+        .clicked()
+    {
+        delta = 1.0;
+    }
+
     delta
 }
 
@@ -1187,6 +1190,7 @@ fn font_size_control(ui: &mut Ui, label: &str, size: f32, what: &str) -> f32 {
 /// for the tooltips.
 fn dir_label_len_control(ui: &mut Ui, label: &str, len: &mut usize, what: &str) -> bool {
     ui.label(label);
+
     let resp = ui
         .add(
             DragValue::new(len)
@@ -1198,16 +1202,9 @@ fn dir_label_len_control(ui: &mut Ui, label: &str, len: &mut usize, what: &str) 
             "Max characters of {what} paths to show; longer ones are cut from the \
              front. Drag, or click to type."
         ));
+
     let mut done = (resp.changed() && !resp.dragged()) || resp.drag_stopped();
-    if ui
-        .small_button("+")
-        .on_hover_text(format!("Show more of {what} paths"))
-        .clicked()
-        && *len < MAX_DIR_LABEL_LEN
-    {
-        *len += 1;
-        done = true;
-    }
+
     if ui
         .small_button("-")
         .on_hover_text(format!("Show less of {what} paths"))
@@ -1217,6 +1214,17 @@ fn dir_label_len_control(ui: &mut Ui, label: &str, len: &mut usize, what: &str) 
         *len -= 1;
         done = true;
     }
+
+    if ui
+        .small_button("+")
+        .on_hover_text(format!("Show more of {what} paths"))
+        .clicked()
+        && *len < MAX_DIR_LABEL_LEN
+    {
+        *len += 1;
+        done = true;
+    }
+
     done
 }
 
