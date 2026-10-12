@@ -406,8 +406,8 @@ fn term_out(state: &mut State, ui: &mut Ui) {
         });
 }
 
-/// The input row: prompt label on the left, single-line edit on the right.
-/// Enter submits. When the user is recalling a history entry via Up/Down or
+/// The input row: prompt line on top, with an edit beneath it that wraps long
+/// input onto extra rows. Enter submits. When the user is recalling a history entry via Up/Down or
 /// a recent dir via Left/Right, a green ` his N` / ` cd N` label is
 /// inserted between the cwd and the `$`.
 fn term_in(state: &mut State, ui: &mut Ui) {
@@ -449,75 +449,76 @@ fn term_in(state: &mut State, ui: &mut Ui) {
         ui.label(RichText::new("$").color(COLOR_PROMPT).monospace());
     });
 
+    // The keys we repurpose are consumed *before* the edit is drawn, while it
+    // has focus, so it never sees them: Enter submits, Tab autocompletes,
+    // ↑/↓ walk the global history list, and ←/→ walk recent dirs. A
+    // multi-line edit would otherwise use these for newlines, tab-indents and
+    // moving between wrapped rows. Left/Right only steal the keystroke when
+    // the buffer is empty or a cd recall is already active — otherwise they
+    // stay as normal caret movement.
+    let input_id = ui.make_persistent_id("cli_input");
+    let focused = ui.memory(|m| m.has_focus(input_id));
+    let consume =
+        |ui: &mut Ui, key| focused && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, key));
+    let submitted = consume(ui, Key::Enter);
+    let tab = consume(ui, Key::Tab);
+    let up = !tab && consume(ui, Key::ArrowUp);
+    let down = !tab && consume(ui, Key::ArrowDown);
+    let cd_active = cd_cursor.is_some() || state.ui.cli_input[active].is_empty();
+    let left = !tab && !up && !down && cd_active && consume(ui, Key::ArrowLeft);
+    let right = !tab && !up && !down && !left && cd_active && consume(ui, Key::ArrowRight);
+
     // Input box sits on its own row, directly beneath the prompt line above.
+    // It's multi-line so a long command wraps onto extra rows (and the panel
+    // grows to fit) instead of scrolling off to the right, but it's still one
+    // logical line: Enter never inserts a newline (`return_key(None)`), and
+    // pasted newlines are flattened to spaces below. `lock_focus` stops egui
+    // from using Tab for widget-to-widget focus navigation, since we use it
+    // for path autocompletion.
     let response = ui.add(
-        TextEdit::singleline(&mut state.ui.cli_input[active])
+        TextEdit::multiline(&mut state.ui.cli_input[active])
+            .id(input_id)
+            .desired_rows(1)
             .desired_width(f32::INFINITY)
+            .return_key(None)
+            .lock_focus(true)
             .font(egui::TextStyle::Monospace),
     );
+
+    // Same flattening a single-line edit applies to pastes. It's
+    // char-for-char, so the edit's caret position stays valid.
+    let buf = &mut state.ui.cli_input[active];
+    if buf.contains(['\r', '\n']) {
+        *buf = buf.replace(['\r', '\n'], " ");
+    }
 
     if state.ui.focus_input {
         response.request_focus();
         state.ui.focus_input = false;
     }
 
-    // Stop egui from stealing Tab for widget-to-widget focus navigation:
-    // we use Tab ourselves for path autocompletion below. Locking the
-    // filter tells egui this widget consumes Tab, so focus stays in the
-    // input instead of jumping to the next button.
-    if response.has_focus() {
-        ui.memory_mut(|m| {
-            m.set_focus_lock_filter(
-                response.id,
-                egui::EventFilter {
-                    tab: true,
-                    ..Default::default()
-                },
-            );
-        });
-    }
-
-    // Arrow-key recall: ↑/↓ walks the global history list, ←/→ walks
-    // recent dirs. Up/Down are safe to consume unconditionally (the
-    // single-line TextEdit doesn't use them), but Left/Right only
-    // steal the keystroke when the buffer is empty or a cd recall is
-    // already active — otherwise they stay as normal caret movement.
-    if response.has_focus() || response.lost_focus() {
-        let tab = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Tab));
-        let up = !tab && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::ArrowUp));
-        let down = !tab && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::ArrowDown));
-        if tab {
-            state.autocomplete_input();
-            response.request_focus();
-            // egui's TextEdit keeps its own caret position, which isn't
-            // updated when we replace the buffer behind its back. Move the
-            // caret to the end so it follows the completed path.
-            if let Some(mut edit_state) = TextEdit::load_state(ui.ctx(), response.id) {
-                let end = egui::text::CCursor::new(state.ui.cli_input[active].chars().count());
-                edit_state
-                    .cursor
-                    .set_char_range(Some(egui::text::CCursorRange::one(end)));
-                edit_state.store(ui.ctx(), response.id);
-            }
-        } else if up {
-            state.history_nav(true);
-        } else if down {
-            state.history_nav(false);
-        } else {
-            let cd_active = cd_cursor.is_some() || state.ui.cli_input[active].is_empty();
-            if cd_active {
-                let left = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::ArrowLeft));
-                let right = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::ArrowRight));
-                if left {
-                    state.recent_dir_nav(true);
-                } else if right {
-                    state.recent_dir_nav(false);
-                }
-            }
+    if tab {
+        state.autocomplete_input();
+        // egui's TextEdit keeps its own caret position, which isn't
+        // updated when we replace the buffer behind its back. Move the
+        // caret to the end so it follows the completed path.
+        if let Some(mut edit_state) = TextEdit::load_state(ui.ctx(), response.id) {
+            let end = egui::text::CCursor::new(state.ui.cli_input[active].chars().count());
+            edit_state
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::one(end)));
+            edit_state.store(ui.ctx(), response.id);
         }
+    } else if up {
+        state.history_nav(true);
+    } else if down {
+        state.history_nav(false);
+    } else if left {
+        state.recent_dir_nav(true);
+    } else if right {
+        state.recent_dir_nav(false);
     }
 
-    let submitted = response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
     if submitted {
         let input = std::mem::take(&mut state.ui.cli_input[active]);
         // In interactive (PTY) mode the line goes straight to the remote shell,
