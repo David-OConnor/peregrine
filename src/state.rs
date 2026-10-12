@@ -311,13 +311,16 @@ impl State {
     /// files), after `cd`, tab creation, and tab selection — same trigger
     /// points as [refresh_branch]. Entries the `show_hidden_attr` /
     /// `show_dotfiles` filters exclude are dropped, which also deselects a
-    /// now-filtered row.
+    /// now-filtered row. An entry that is both Hidden and a dotfile (e.g.
+    /// `.git`) shows if either filter is on.
     pub fn refresh_browser_files(&mut self) {
         let cwd = self.cwd().to_path_buf();
         self.browser_files = read_browser_files(&cwd);
         let (attr, dot) = (self.ui.show_hidden_attr, self.ui.show_dotfiles);
-        self.browser_files
-            .retain(|f| (attr || !f.hidden_attr) && (dot || !f.disp_name.starts_with('.')));
+        self.browser_files.retain(|f| {
+            let is_dot = f.disp_name.starts_with('.');
+            (!f.hidden_attr && !is_dot) || (attr && f.hidden_attr) || (dot && is_dot)
+        });
         if let Some(sel) = self.selected_file.take() {
             self.select_file(&sel.path);
         }
