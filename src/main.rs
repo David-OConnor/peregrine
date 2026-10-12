@@ -5,6 +5,7 @@
 // )]
 
 mod ansi;
+mod cmd_color;
 mod files;
 mod markdown;
 mod path_color;

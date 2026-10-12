@@ -38,7 +38,7 @@ fn panel_header(ui: &mut Ui, title: &str, visible: &mut bool) {
 }
 
 use crate::{
-    OutType, ansi,
+    OutType, ansi, cmd_color,
     files::{FileDetails, format_size, open_with_default_app},
     markdown::is_markdown,
     path_color::{self, Part},
@@ -147,6 +147,18 @@ fn path_job(ui: &Ui, path: &Path, home: Option<&Path>) -> LayoutJob {
     path_color::layout_job(
         &parts,
         TextStyle::Body.resolve(ui.style()),
+        Color32::PLACEHOLDER,
+    )
+}
+
+/// A Command history / In this dir button label: `"<i>: "`, then the command
+/// `text` with its base command colour-coded (see [cmd_color]).
+fn cmd_label(ui: &Ui, i: usize, text: &str) -> LayoutJob {
+    let mut label = vec![Part::plain(format!("{i}: "))];
+    label.extend(cmd_color::parts(text, ui.visuals().dark_mode));
+    path_color::layout_job(
+        &label,
+        TextStyle::Button.resolve(ui.style()),
         Color32::PLACEHOLDER,
     )
 }
@@ -261,7 +273,7 @@ fn cwd_cmd_history(state: &mut State, ui: &mut Ui) {
                     continue;
                 };
 
-                let label = format!("{i}: {}", item.text);
+                let label = cmd_label(ui, i, &item.text);
                 let btn = egui::Button::new(label)
                     .wrap()
                     .min_size(egui::vec2(ui.available_width(), 0.0));
@@ -301,7 +313,7 @@ fn cmd_history(state: &mut State, ui: &mut Ui) {
                 let Some(item) = state.history.get(i) else {
                     continue;
                 };
-                let label = format!("{i}: {}", item.text);
+                let label = cmd_label(ui, i, &item.text);
                 let btn = egui::Button::new(label)
                     .wrap()
                     .min_size(egui::vec2(ui.available_width(), 0.0));

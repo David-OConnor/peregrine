@@ -15,7 +15,7 @@ use egui::{Color32, FontId, TextFormat, text::LayoutJob};
 
 /// Hues spread around the colour wheel so any two read as different at a
 /// glance. Kept short on purpose: more entries means near-identical pairs.
-type Palette = [Color32; 8];
+pub(crate) type Palette = [Color32; 8];
 
 /// For dark backgrounds: the terminal panes, and the panels in dark mode.
 const PALETTE_DARK: Palette = [
@@ -41,6 +41,12 @@ const PALETTE_LIGHT: Palette = [
     Color32::from_rgb(205, 35, 35),
 ];
 
+/// The palette for a dark or light background. Also used by
+/// [crate::cmd_color], so commands and directories share one set of hues.
+pub(crate) fn palette(dark: bool) -> &'static Palette {
+    if dark { &PALETTE_DARK } else { &PALETTE_LIGHT }
+}
+
 /// One run of a displayed path. `color` is `None` for text that keeps the
 /// default colour (separators, and any prefix the caller adds).
 pub struct Part {
@@ -63,7 +69,7 @@ fn is_sep(c: char) -> bool {
 
 /// 64-bit FNV-1a. Hand-rolled rather than `DefaultHasher` so a directory keeps
 /// its colour across Rust versions.
-fn fnv1a(s: &str) -> u64 {
+pub(crate) fn fnv1a(s: &str) -> u64 {
     s.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| {
         (h ^ b as u64).wrapping_mul(0x0100_0000_01b3)
     })
@@ -75,7 +81,7 @@ fn fnv1a(s: &str) -> u64 {
 /// one — and is coloured as a single run. `dark` picks the palette for the
 /// background it will be drawn on.
 pub fn parts(display: &str, home: Option<&str>, dark: bool) -> Vec<Part> {
-    let palette = if dark { &PALETTE_DARK } else { &PALETTE_LIGHT };
+    let palette = palette(dark);
     let mut out = Vec::new();
     // The path so far, normalised (`~` for home, `/` separators, and
     // lowercased on Windows), so `~/code` and `C:\Users\me\Code` match.
