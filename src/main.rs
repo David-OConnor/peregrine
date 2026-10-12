@@ -29,6 +29,9 @@ pub enum OutType {
     Prompt,
     StdOut,
     StdErr,
+    /// Stderr from a process that exited successfully (warnings, progress);
+    /// shown amber rather than red. See [OutKind::StderrOk].
+    StdErrOk,
 }
 
 /// Map the shared `commands` module's stream kind onto the GUI's output
@@ -37,6 +40,7 @@ fn out_type_for(kind: OutKind) -> OutType {
     match kind {
         OutKind::Stdout => OutType::StdOut,
         OutKind::Stderr => OutType::StdErr,
+        OutKind::StderrOk => OutType::StdErrOk,
     }
 }
 

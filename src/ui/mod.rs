@@ -5,8 +5,8 @@ use std::{
 };
 
 use egui::{
-    Align, CentralPanel, Color32, FontData, FontDefinitions, FontFamily, FontId, Frame, Key,
-    Layout, Panel, RichText, ScrollArea, TextEdit, TextFormat, TextStyle, TextWrapMode, Ui,
+    Align, CentralPanel, Color32, DragValue, FontData, FontDefinitions, FontFamily, FontId, Frame,
+    Key, Layout, Panel, RichText, ScrollArea, TextEdit, TextFormat, TextStyle, TextWrapMode, Ui,
     WidgetText, text::LayoutJob,
 };
 use shell::SshMode;
@@ -65,6 +65,16 @@ pub const DEFAULT_GUI_FONT_SIZE: f32 = 11.;
 /// shrunk to an unreadable size or blown up past the window.
 pub const MIN_FONT_SIZE: f32 = 6.;
 pub const MAX_FONT_SIZE: f32 = 48.;
+
+/// Default max displayed length (in characters) of a Bookmarks / Recent dirs
+/// path, used when the state file has no saved `DIR_LABEL_LEN`. Longer paths
+/// are truncated from the front (see [path_color::truncate_start]), e.g.
+/// `.../code/Bio/dynamics`.
+pub const DEFAULT_DIR_LABEL_LEN: usize = 22;
+/// Bounds the path-length controls clamp to. The minimum leaves room for a
+/// few characters after the `...`.
+pub const MIN_DIR_LABEL_LEN: usize = 8;
+pub const MAX_DIR_LABEL_LEN: usize = 200;
 
 /// Name of the bold font family registered by [install_fonts]; see
 /// [bold_family].
@@ -129,11 +139,12 @@ fn bold_family() -> FontFamily {
 }
 
 /// Bookmarks column. Narrower than the other side columns: bookmark paths are
-/// truncated to [BOOKMARK_MAX_LEN] chars, so this only needs to fit the
-/// `"<i>: "` prefix plus that path and the trailing `x` button.
+/// truncated (to [DEFAULT_DIR_LABEL_LEN] chars unless the user changes it), so
+/// this only needs to fit the `"<i>: "` prefix plus that path and the trailing
+/// `x` button.
 const BOOKMARK_COL_WIDTH: f32 = 170.;
-/// Recent-dirs column. Paths are truncated to [BOOKMARK_MAX_LEN] chars like
-/// bookmarks; slightly wider to fit the extra `*` (bookmarked) marker.
+/// Recent-dirs column. Paths are truncated like bookmarks; slightly wider to
+/// fit the extra `*` (bookmarked) marker.
 const RECENT_DIRS_COL_WIDTH: f32 = 175.;
 const RIGHT_COL_WIDTH: f32 = 180.;
 const CWD_HIST_COL_WIDTH: f32 = 220.;
@@ -154,6 +165,9 @@ const PANEL_FONT_REDUCTION: f32 = 2.;
 const COLOR_PROMPT: Color32 = Color32::from_rgb(220, 220, 90);
 const COLOR_STDOUT: Color32 = Color32::from_rgb(210, 210, 210);
 const COLOR_STDERR: Color32 = Color32::from_rgb(240, 110, 110);
+// Amber: stderr from a command that succeeded (warnings, progress), so red
+// is reserved for failures.
+const COLOR_STDERR_OK: Color32 = Color32::from_rgb(240, 180, 70);
 // Light green to match the CLI's `his N` highlight.
 const COLOR_HIS: Color32 = Color32::from_rgb(120, 240, 120);
 // Magenta to match the CLI's branch-indicator highlight (`\x1b[95m`).
@@ -184,20 +198,21 @@ enum ListAction {
     RemoveRemote(usize),
 }
 
-/// Max displayed length (in characters) of a bookmark's path. Longer paths
-/// are truncated from the front (see [path_color::truncate_start]) so the
-/// column stays narrow, e.g. `.../code/Bio/dynamics`.
-const BOOKMARK_MAX_LEN: usize = 22;
-
 /// A Bookmarks / Recent dirs button label: `prefix` (the index, plus any
 /// marker), then `path` as `~/...`, colour-coded by directory (see
-/// [path_color]) with its final directory bold, and truncated to
-/// [BOOKMARK_MAX_LEN].
-fn dir_label(ui: &Ui, prefix: String, path: &Path, home: Option<&Path>) -> LayoutJob {
+/// [path_color]) with its final directory bold, and truncated from the front
+/// to `max_len` chars so the column stays narrow.
+fn dir_label(
+    ui: &Ui,
+    prefix: String,
+    path: &Path,
+    home: Option<&Path>,
+    max_len: usize,
+) -> LayoutJob {
     let dark = ui.visuals().dark_mode;
     let parts = path_color::parts(&render_with_tilde(path, home), Some("~"), dark);
     let mut label = vec![Part::plain(prefix)];
-    label.extend(path_color::truncate_start(parts, BOOKMARK_MAX_LEN));
+    label.extend(path_color::truncate_start(parts, max_len));
     let font = TextStyle::Button.resolve(ui.style());
     let bold = FontId::new(font.size, bold_family());
     path_color::layout_job(&label, font, Some(bold), Color32::PLACEHOLDER)
@@ -257,6 +272,7 @@ fn dir_bookmarks(state: &mut State, ui: &mut Ui) {
     ui.separator();
 
     let home = state.home.clone();
+    let max_len = state.bookmark_label_len;
     let mut action: Option<ListAction> = None;
 
     ScrollArea::vertical()
@@ -268,7 +284,7 @@ fn dir_bookmarks(state: &mut State, ui: &mut Ui) {
                     continue;
                 };
                 ui.horizontal(|ui| {
-                    let label = dir_label(ui, format!("{i}: "), bm, home.as_deref());
+                    let label = dir_label(ui, format!("{i}: "), bm, home.as_deref(), max_len);
                     if ui.button(label).clicked() {
                         action = Some(ListAction::ChangeDir(bm.clone()));
                     }
@@ -294,6 +310,7 @@ fn dir_history(state: &mut State, ui: &mut Ui) {
     ui.separator();
 
     let home = state.home.clone();
+    let max_len = state.recent_dir_label_len;
     let mut action: Option<ListAction> = None;
 
     ScrollArea::vertical()
@@ -310,7 +327,13 @@ fn dir_history(state: &mut State, ui: &mut Ui) {
                 } else {
                     ""
                 };
-                let label = dir_label(ui, format!("{i}: {star}"), &r.path, home.as_deref());
+                let label = dir_label(
+                    ui,
+                    format!("{i}: {star}"),
+                    &r.path,
+                    home.as_deref(),
+                    max_len,
+                );
                 if ui.button(label).clicked() {
                     action = Some(ListAction::ChangeDir(r.path.clone()));
                 }
@@ -501,6 +524,7 @@ fn term_out(state: &mut State, ui: &mut Ui) {
                     OutType::Prompt => COLOR_PROMPT,
                     OutType::StdOut => COLOR_STDOUT,
                     OutType::StdErr => COLOR_STDERR,
+                    OutType::StdErrOk => COLOR_STDERR_OK,
                 };
                 // Trim a trailing newline so blank rows don't accumulate
                 // (Command output usually ends with one).
@@ -766,6 +790,44 @@ fn file_browser(state: &mut State, ui: &mut Ui) {
         state.nav_forward();
     } else if let Some(target) = go_to {
         state.change_dir(target);
+    }
+
+    // Listing filters. Each button is highlighted while the entries it
+    // covers are shown. The Hidden attribute is Windows-only, so elsewhere
+    // only the dotfile filter appears.
+    let mut filters_changed = false;
+    ui.horizontal(|ui| {
+        let mut toggle = |ui: &mut Ui, on: &mut bool, label: &str, what: &str| {
+            let hover = if *on {
+                format!("Showing {what}. Click to hide them.")
+            } else {
+                format!("Hiding {what}. Click to show them.")
+            };
+            if ui
+                .add(egui::Button::selectable(*on, label))
+                .on_hover_text(hover)
+                .clicked()
+            {
+                *on = !*on;
+                filters_changed = true;
+            }
+        };
+        #[cfg(windows)]
+        toggle(
+            ui,
+            &mut state.ui.show_hidden_attr,
+            "👁 Hidden",
+            "files and folders with the Hidden attribute",
+        );
+        toggle(
+            ui,
+            &mut state.ui.show_dotfiles,
+            "👁 .dotfiles",
+            "files and folders whose names start with \".\"",
+        );
+    });
+    if filters_changed {
+        state.refresh_browser_files();
     }
 
     ui.separator();
@@ -1103,6 +1165,48 @@ fn font_size_control(ui: &mut Ui, label: &str, size: f32, what: &str) -> f32 {
     delta
 }
 
+/// A `<label> N + -` control for a Bookmarks / Recent dirs path length, like
+/// [font_size_control] except `N` can also be dragged or clicked to type a
+/// value. Updates `len` live, clamped to [MIN_DIR_LABEL_LEN]..=
+/// [MAX_DIR_LABEL_LEN]. Returns true once a change is complete (a button
+/// click, a finished drag, or a committed edit), so the caller can persist it
+/// without saving on every frame of a drag. `what` names the panel's paths,
+/// for the tooltips.
+fn dir_label_len_control(ui: &mut Ui, label: &str, len: &mut usize, what: &str) -> bool {
+    ui.label(label);
+    let resp = ui
+        .add(
+            DragValue::new(len)
+                .range(MIN_DIR_LABEL_LEN..=MAX_DIR_LABEL_LEN)
+                .speed(0.25)
+                .update_while_editing(false),
+        )
+        .on_hover_text(format!(
+            "Max characters of {what} paths to show; longer ones are cut from the \
+             front. Drag, or click to type."
+        ));
+    let mut done = (resp.changed() && !resp.dragged()) || resp.drag_stopped();
+    if ui
+        .small_button("+")
+        .on_hover_text(format!("Show more of {what} paths"))
+        .clicked()
+        && *len < MAX_DIR_LABEL_LEN
+    {
+        *len += 1;
+        done = true;
+    }
+    if ui
+        .small_button("-")
+        .on_hover_text(format!("Show less of {what} paths"))
+        .clicked()
+        && *len > MIN_DIR_LABEL_LEN
+    {
+        *len -= 1;
+        done = true;
+    }
+    done
+}
+
 /// Top-of-window tab strip. Each tab labels itself with its cwd's leaf
 /// folder; clicking selects, `x` closes (disabled when only one tab is
 /// left), and `+` appends a fresh tab inheriting the active tab's cwd.
@@ -1132,6 +1236,8 @@ fn tabs_bar(state: &mut State, ui: &mut Ui) {
 
     let font_size = state.font_size;
     let gui_font_size = state.gui_font_size;
+    let mut bookmark_label_len = state.bookmark_label_len;
+    let mut recent_dir_label_len = state.recent_dir_label_len;
 
     let mut to_select: Option<usize> = None;
     let mut to_close: Option<usize> = None;
@@ -1139,13 +1245,25 @@ fn tabs_bar(state: &mut State, ui: &mut Ui) {
     let mut connect_remote: Option<usize> = None;
     let mut font_delta = 0.0_f32;
     let mut gui_font_delta = 0.0_f32;
+    let mut label_len_done = false;
 
     ui.horizontal(|ui| {
         // Font-size controls sit to the left of the tab strip: one for the
-        // terminal panes, one for the side panels.
+        // terminal panes, one for the side panels. Then the path lengths
+        // for the Bookmarks and Recent dirs panels, which resize separately.
         font_delta = font_size_control(ui, "CLI font size: ", font_size, "terminal");
         ui.separator();
         gui_font_delta = font_size_control(ui, "GUI font size: ", gui_font_size, "panel");
+        ui.separator();
+        label_len_done |=
+            dir_label_len_control(ui, "Bookmark chars: ", &mut bookmark_label_len, "bookmark");
+        ui.separator();
+        label_len_done |= dir_label_len_control(
+            ui,
+            "Recent dir chars: ",
+            &mut recent_dir_label_len,
+            "recent dir",
+        );
         ui.separator();
         // Breathing room either side of the tab section.
         ui.add_space(20.0);
@@ -1192,6 +1310,12 @@ fn tabs_bar(state: &mut State, ui: &mut Ui) {
     }
     if gui_font_delta != 0.0 {
         state.adjust_gui_font_size(gui_font_delta);
+    }
+    // Applied every frame so the panels follow a drag live; saved once done.
+    state.bookmark_label_len = bookmark_label_len;
+    state.recent_dir_label_len = recent_dir_label_len;
+    if label_len_done {
+        let _ = state.save();
     }
     if let Some(i) = to_select {
         state.select_tab(i);

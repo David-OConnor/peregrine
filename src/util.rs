@@ -321,7 +321,7 @@ pub fn run_passthrough(state: &mut State, line: &str, dir: &Path) -> bool {
             if !out.stderr.is_empty() {
                 state.push_out(
                     String::from_utf8_lossy(&out.stderr).into_owned(),
-                    OutType::StdErr,
+                    out_type_for(commands::stderr_kind(out.status)),
                 );
             }
             out.status.success()

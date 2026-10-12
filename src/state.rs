@@ -5,9 +5,9 @@ use std::{
 
 use chrono::Utc;
 use shell::{
-    BrowserFile, FontSizes, HistoryItem, NavState, OpenTabs, PanelVis, RecentDir, RemoteSession,
-    RemoteTerminal, SshMode, WindowSize, apply_completion, complete_cd_path, current_branch,
-    get_home, read_browser_files, save_data, ssh, ssh::secrets, truncate_branch,
+    BrowserFile, DirLabelLens, FontSizes, HistoryItem, NavState, OpenTabs, PanelVis, RecentDir,
+    RemoteSession, RemoteTerminal, SshMode, WindowSize, apply_completion, complete_cd_path,
+    current_branch, get_home, read_browser_files, save_data, ssh, ssh::secrets, truncate_branch,
 };
 
 use crate::{
@@ -67,6 +67,13 @@ pub struct StateUi {
     pub nav_back: Vec<Vec<PathBuf>>,
     pub nav_forward: Vec<Vec<PathBuf>>,
 
+    /// Files-panel listing filters, toggled independently by the buttons
+    /// above the listing; not persisted. `show_hidden_attr` covers entries
+    /// with the Windows Hidden attribute ([BrowserFile::hidden_attr]);
+    /// `show_dotfiles` covers names starting with `.`.
+    pub show_hidden_attr: bool,
+    pub show_dotfiles: bool,
+
     /// Remote-panel "add / edit remote" form state. `remote_form_open` shows
     /// the form; the text fields hold the in-progress entry; `remote_edit_idx`
     /// is `Some(i)` when editing an existing saved remote rather than adding a
@@ -99,6 +106,8 @@ impl Default for StateUi {
             panel_vis: PanelVis::default(),
             nav_back: vec![Vec::new()],
             nav_forward: vec![Vec::new()],
+            show_hidden_attr: true,
+            show_dotfiles: true,
             remote_form_open: false,
             remote_host: String::new(),
             remote_port: String::new(),
@@ -157,9 +166,22 @@ pub struct State {
     /// font size" +/- buttons and persisted alongside `font_size`. The panels'
     /// other text styles scale with it (see `ui::scale_panel_fonts`).
     pub gui_font_size: f32,
+    /// Max displayed path length (in characters) in the Bookmarks and Recent
+    /// dirs panels, set via the controls on the tab strip and persisted
+    /// alongside the font sizes. Longer paths are truncated from the front.
+    pub bookmark_label_len: usize,
+    pub recent_dir_label_len: usize,
     /// Open Markdown viewer windows (double-clicked in the Files panel).
     /// Not persisted.
     pub md_viewers: MarkdownViewers,
+}
+
+/// A saved Bookmarks / Recent dirs path length, or the default when none was
+/// saved, clamped to the range the tab-strip controls allow.
+fn dir_label_len(saved: Option<usize>) -> usize {
+    saved
+        .unwrap_or(ui::DEFAULT_DIR_LABEL_LEN)
+        .clamp(ui::MIN_DIR_LABEL_LEN, ui::MAX_DIR_LABEL_LEN)
 }
 
 impl Default for State {
@@ -185,6 +207,8 @@ impl Default for State {
             window_size: None,
             font_size: ui::DEFAULT_FONT_SIZE,
             gui_font_size: ui::DEFAULT_GUI_FONT_SIZE,
+            bookmark_label_len: ui::DEFAULT_DIR_LABEL_LEN,
+            recent_dir_label_len: ui::DEFAULT_DIR_LABEL_LEN,
             md_viewers: MarkdownViewers::default(),
         };
         s.refresh_all_filters();
@@ -285,10 +309,15 @@ impl State {
     /// Re-read the active tab's cwd into `browser_files`. Called after
     /// every command (a passthrough command may have created/removed
     /// files), after `cd`, tab creation, and tab selection — same trigger
-    /// points as [refresh_branch].
+    /// points as [refresh_branch]. Entries the `show_hidden_attr` /
+    /// `show_dotfiles` filters exclude are dropped, which also deselects a
+    /// now-filtered row.
     pub fn refresh_browser_files(&mut self) {
         let cwd = self.cwd().to_path_buf();
         self.browser_files = read_browser_files(&cwd);
+        let (attr, dot) = (self.ui.show_hidden_attr, self.ui.show_dotfiles);
+        self.browser_files
+            .retain(|f| (attr || !f.hidden_attr) && (dot || !f.disp_name.starts_with('.')));
         if let Some(sel) = self.selected_file.take() {
             self.select_file(&sel.path);
         }
@@ -331,6 +360,10 @@ impl State {
             FontSizes {
                 cli: Some(self.font_size),
                 gui: Some(self.gui_font_size),
+            },
+            DirLabelLens {
+                bookmarks: Some(self.bookmark_label_len),
+                recent_dirs: Some(self.recent_dir_label_len),
             },
             &self.state_path,
         )
@@ -409,6 +442,8 @@ impl State {
             window_size: loaded.window_size,
             font_size: loaded.font_size.cli.unwrap_or(ui::DEFAULT_FONT_SIZE),
             gui_font_size: loaded.font_size.gui.unwrap_or(ui::DEFAULT_GUI_FONT_SIZE),
+            bookmark_label_len: dir_label_len(loaded.dir_label_lens.bookmarks),
+            recent_dir_label_len: dir_label_len(loaded.dir_label_lens.recent_dirs),
             md_viewers: MarkdownViewers::default(),
         };
         s.refresh_all_filters();
