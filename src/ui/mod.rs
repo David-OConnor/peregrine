@@ -5,7 +5,7 @@ use std::{
 
 use egui::{
     Align, CentralPanel, Color32, Frame, Key, Layout, Panel, RichText, ScrollArea, TextEdit,
-    TextWrapMode, Ui,
+    TextStyle, TextWrapMode, Ui, WidgetText, text::LayoutJob,
 };
 use shell::SshMode;
 
@@ -41,6 +41,7 @@ use crate::{
     OutType, ansi,
     files::{FileDetails, format_size, open_with_default_app},
     markdown::is_markdown,
+    path_color::{self, Part},
     render_with_tilde, run_command,
     state::State,
     submit_command,
@@ -53,8 +54,12 @@ pub const WINDOW_HEIGHT: f32 = 900.;
 /// the state file has no saved `FONT_SIZE`. Matches egui's default monospace
 /// size so a fresh install looks unchanged.
 pub const DEFAULT_FONT_SIZE: f32 = 13.;
-/// Bounds the +/- font-size buttons clamp to, so the panes can't be shrunk
-/// to an unreadable size or blown up past the window.
+/// Default body-text size (points) for the side panels, used when the state
+/// file has no saved GUI font size. A little smaller than the terminal panes,
+/// as the panels were before their size was adjustable.
+pub const DEFAULT_GUI_FONT_SIZE: f32 = 11.;
+/// Bounds the +/- font-size buttons (CLI and GUI) clamp to, so text can't be
+/// shrunk to an unreadable size or blown up past the window.
 pub const MIN_FONT_SIZE: f32 = 6.;
 pub const MAX_FONT_SIZE: f32 = 48.;
 
@@ -75,9 +80,10 @@ const REMOTE_COL_WIDTH: f32 = 180.;
 /// narrow they make the window). See [central_reserve].
 pub const MIN_CENTRAL_WIDTH: f32 = 400.;
 
-/// Points shaved off every text style in the side panels (and the top tab
-/// strip), so they read slightly smaller than the main terminal column.
-/// See [shrink_panel_fonts].
+/// Points shaved off every text style in the top tab strip, so it reads
+/// slightly smaller than the main terminal column. See [shrink_panel_fonts].
+/// (The side panels follow the "GUI font size" instead; see
+/// [scale_panel_fonts].)
 const PANEL_FONT_REDUCTION: f32 = 2.;
 
 const COLOR_PROMPT: Color32 = Color32::from_rgb(220, 220, 90);
@@ -114,22 +120,35 @@ enum ListAction {
 }
 
 /// Max displayed length (in characters) of a bookmark's path. Longer paths
-/// are truncated from the front by [truncate_start] so the column stays narrow.
+/// are truncated from the front (see [path_color::truncate_start]) so the
+/// column stays narrow, e.g. `.../code/Bio/dynamics`.
 const BOOKMARK_MAX_LEN: usize = 22;
 
-/// Truncate `s` to at most `max` characters for display in a narrow column,
-/// keeping the tail (the most specific part of a path) and prefixing `...`
-/// when shortened, e.g. `.../code/Bio/dynamics`. Counts by `char` so the
-/// result is never longer than `max` even with multi-byte characters.
-fn truncate_start(s: &str, max: usize) -> String {
-    let count = s.chars().count();
-    if count <= max {
-        return s.to_string();
-    }
-    // Reserve 3 chars for the leading ellipsis.
-    let keep = max.saturating_sub(3);
-    let tail: String = s.chars().skip(count - keep).collect();
-    format!("...{tail}")
+/// A Bookmarks / Recent dirs button label: `prefix` (the index, plus any
+/// marker), then `path` as `~/...`, colour-coded by directory (see
+/// [path_color]) and truncated to [BOOKMARK_MAX_LEN].
+fn dir_label(ui: &Ui, prefix: String, path: &Path, home: Option<&Path>) -> LayoutJob {
+    let dark = ui.visuals().dark_mode;
+    let parts = path_color::parts(&render_with_tilde(path, home), Some("~"), dark);
+    let mut label = vec![Part::plain(prefix)];
+    label.extend(path_color::truncate_start(parts, BOOKMARK_MAX_LEN));
+    path_color::layout_job(
+        &label,
+        TextStyle::Button.resolve(ui.style()),
+        Color32::PLACEHOLDER,
+    )
+}
+
+/// `path` as `~/...`, colour-coded by directory (see [path_color]), in the
+/// body font. Uncoloured runs take the label's own text colour.
+fn path_job(ui: &Ui, path: &Path, home: Option<&Path>) -> LayoutJob {
+    let dark = ui.visuals().dark_mode;
+    let parts = path_color::parts(&render_with_tilde(path, home), Some("~"), dark);
+    path_color::layout_job(
+        &parts,
+        TextStyle::Body.resolve(ui.style()),
+        Color32::PLACEHOLDER,
+    )
 }
 
 /// Display directory bookmarks as a clickable column. Clicking a row cd's
@@ -160,8 +179,7 @@ fn dir_bookmarks(state: &mut State, ui: &mut Ui) {
                     continue;
                 };
                 ui.horizontal(|ui| {
-                    let path = render_with_tilde(bm, home.as_deref());
-                    let label = format!("{i}: {}", truncate_start(&path, BOOKMARK_MAX_LEN));
+                    let label = dir_label(ui, format!("{i}: "), bm, home.as_deref());
                     if ui.button(label).clicked() {
                         action = Some(ListAction::ChangeDir(bm.clone()));
                     }
@@ -203,8 +221,7 @@ fn dir_history(state: &mut State, ui: &mut Ui) {
                 } else {
                     ""
                 };
-                let path = render_with_tilde(&r.path, home.as_deref());
-                let label = format!("{i}: {star}{}", truncate_start(&path, BOOKMARK_MAX_LEN));
+                let label = dir_label(ui, format!("{i}: {star}"), &r.path, home.as_deref());
                 if ui.button(label).clicked() {
                     action = Some(ListAction::ChangeDir(r.path.clone()));
                 }
@@ -416,13 +433,22 @@ fn term_in(state: &mut State, ui: &mut Ui) {
     set_mono_size(ui, state.font_size);
     let active = state.ui.active_tab;
     let (his_cursor, cd_cursor) = state.active_nav_cursors();
-    let cwd_part = state.cwd_display();
+    // Locally, the cwd's directories are colour-coded (see [path_color]), with
+    // the `*` and separators left in the prompt colour.
+    let cwd_parts = if state.is_remote() {
+        vec![Part::plain(state.cwd_display())]
+    } else {
+        let mut parts = vec![Part::plain(state.cwd_star())];
+        parts.extend(state.cwd_color_parts());
+        parts
+    };
     let branch = state.branch[active].clone();
     // While remote, the cwd label already shows `user@host`; don't also show
     // the (stale) local git branch.
     let show_branch = !state.is_remote();
     ui.horizontal(|ui| {
-        ui.label(RichText::new(cwd_part).color(COLOR_PROMPT).monospace());
+        let mono = TextStyle::Monospace.resolve(ui.style());
+        ui.label(path_color::layout_job(&cwd_parts, mono, COLOR_PROMPT));
         if let Some(b) = branch {
             if show_branch {
                 ui.label(
@@ -557,6 +583,11 @@ fn file_browser(state: &mut State, ui: &mut Ui) {
 
     panel_header(ui, "Files", &mut state.ui.panel_vis.file_browser);
 
+    // The directory being listed, colour-coded like the other panels' paths.
+    // Wraps rather than widening the panel when it's long.
+    let cwd_job = path_job(ui, state.cwd(), state.home.as_deref());
+    ui.add(egui::Label::new(cwd_job).wrap());
+
     // Browser-style navigation row. Up goes to the parent dir; Back/Forward
     // walk the per-tab history maintained in `State::change_dir`. Buttons are
     // disabled when there's nowhere to go in that direction.
@@ -646,6 +677,7 @@ fn file_browser(state: &mut State, ui: &mut Ui) {
         });
 
     let selected = state.selected_file.as_ref().map(|d| d.path.as_path());
+    let dark = ui.visuals().dark_mode;
     let mut action: Option<ListAction> = None;
 
     ScrollArea::vertical()
@@ -662,7 +694,13 @@ fn file_browser(state: &mut State, ui: &mut Ui) {
                     f.disp_name.clone()
                 };
                 let mut rich = RichText::new(text).monospace();
-                if !f.is_folder && f.is_executable {
+                if f.is_folder {
+                    // Same colour this folder has in any path shown elsewhere.
+                    let path = render_with_tilde(&f.path, home.as_deref());
+                    if let Some(c) = path_color::last_color(&path, Some("~"), dark) {
+                        rich = rich.color(c);
+                    }
+                } else if f.is_executable {
                     rich = rich.color(COLOR_EXECUTABLE);
                 }
                 // Full width so the whole row is clickable and the selection
@@ -703,7 +741,7 @@ fn file_details(details: Option<&FileDetails>, home: Option<&Path>, ui: &mut Ui)
     };
 
     // One "Label  value" line per field, wrapping when the value is long.
-    let field = |ui: &mut Ui, label: &str, value: String| {
+    let field = |ui: &mut Ui, label: &str, value: WidgetText| {
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new(label).weak());
             ui.label(value);
@@ -722,19 +760,19 @@ fn file_details(details: Option<&FileDetails>, home: Option<&Path>, ui: &mut Ui)
             ui.style_mut().wrap_mode = Some(TextWrapMode::Wrap);
 
             ui.label(RichText::new(&d.name).strong());
-            field(ui, "Type", d.type_name.clone());
+            field(ui, "Type", d.type_name.clone().into());
             if let Some(size) = d.size {
-                field(ui, "Size", format_size(size));
+                field(ui, "Size", format_size(size).into());
             }
             if let Some(n) = d.item_count {
                 let s = if n == 1 { "" } else { "s" };
-                field(ui, "Contains", format!("{n} item{s}"));
+                field(ui, "Contains", format!("{n} item{s}").into());
             }
             if let Some(t) = d.modified {
-                field(ui, "Modified", time(t));
+                field(ui, "Modified", time(t).into());
             }
             if let Some(t) = d.created {
-                field(ui, "Created", time(t));
+                field(ui, "Created", time(t).into());
             }
             let attrs: Vec<&str> = [
                 (d.readonly, "Read-only"),
@@ -745,12 +783,12 @@ fn file_details(details: Option<&FileDetails>, home: Option<&Path>, ui: &mut Ui)
             .filter_map(|(on, name)| on.then_some(name))
             .collect();
             if !attrs.is_empty() {
-                field(ui, "Attributes", attrs.join(", "));
+                field(ui, "Attributes", attrs.join(", ").into());
             }
             if let Some(target) = &d.link_target {
-                field(ui, "Link to", render_with_tilde(target, home));
+                field(ui, "Link to", path_job(ui, target, home).into());
             }
-            field(ui, "Path", render_with_tilde(&d.path, home));
+            field(ui, "Path", path_job(ui, &d.path, home).into());
         });
 }
 
@@ -937,6 +975,30 @@ fn panel_vis_eq(a: &shell::PanelVis, b: &shell::PanelVis) -> bool {
         && a.file_browser == b.file_browser
 }
 
+/// A `<label> N + -` font-size control for the tab strip: the label, the
+/// current size, then buttons to step it. Returns the step asked for (+1, -1,
+/// or 0); `what` names the text it scales, for the tooltips.
+fn font_size_control(ui: &mut Ui, label: &str, size: f32, what: &str) -> f32 {
+    ui.label(label);
+    ui.label(format!("{}", size.round() as i32));
+    let mut delta = 0.0;
+    if ui
+        .small_button("+")
+        .on_hover_text(format!("Increase {what} font size"))
+        .clicked()
+    {
+        delta = 1.0;
+    }
+    if ui
+        .small_button("-")
+        .on_hover_text(format!("Decrease {what} font size"))
+        .clicked()
+    {
+        delta = -1.0;
+    }
+    delta
+}
+
 /// Top-of-window tab strip. Each tab labels itself with its cwd's leaf
 /// folder; clicking selects, `x` closes (disabled when only one tab is
 /// left), and `+` appends a fresh tab inheriting the active tab's cwd.
@@ -965,32 +1027,21 @@ fn tabs_bar(state: &mut State, ui: &mut Ui) {
         .collect();
 
     let font_size = state.font_size;
+    let gui_font_size = state.gui_font_size;
 
     let mut to_select: Option<usize> = None;
     let mut to_close: Option<usize> = None;
     let mut add_new = false;
     let mut connect_remote: Option<usize> = None;
     let mut font_delta = 0.0_f32;
+    let mut gui_font_delta = 0.0_f32;
 
     ui.horizontal(|ui| {
-        // Font-size controls sit to the left of the tab strip: a label, the
-        // current size, then +/- buttons that scale the terminal panes.
-        ui.label("Font size: ");
-        ui.label(format!("{}", font_size.round() as i32));
-        if ui
-            .small_button("+")
-            .on_hover_text("Increase terminal font size")
-            .clicked()
-        {
-            font_delta = 1.0;
-        }
-        if ui
-            .small_button("-")
-            .on_hover_text("Decrease terminal font size")
-            .clicked()
-        {
-            font_delta = -1.0;
-        }
+        // Font-size controls sit to the left of the tab strip: one for the
+        // terminal panes, one for the side panels.
+        font_delta = font_size_control(ui, "CLI font size: ", font_size, "terminal");
+        ui.separator();
+        gui_font_delta = font_size_control(ui, "GUI font size: ", gui_font_size, "panel");
         ui.separator();
 
         for (i, leaf) in labels.iter().enumerate() {
@@ -1023,6 +1074,9 @@ fn tabs_bar(state: &mut State, ui: &mut Ui) {
     if font_delta != 0.0 {
         state.adjust_font_size(font_delta);
     }
+    if gui_font_delta != 0.0 {
+        state.adjust_gui_font_size(gui_font_delta);
+    }
     if let Some(i) = to_select {
         state.select_tab(i);
     }
@@ -1050,11 +1104,26 @@ fn central_reserve(ui: &Ui, existing_max: f32) -> f32 {
 }
 
 /// Shrink every text style in `ui` by [PANEL_FONT_REDUCTION] points. Called at
-/// the top of each side panel's content closure so it only affects that
-/// panel's child `ui`, leaving the main terminal column at the default size.
+/// the top of the tab strip's content closure so it only affects that panel's
+/// child `ui`, leaving the main terminal column at the default size.
 fn shrink_panel_fonts(ui: &mut Ui) {
     for font_id in ui.style_mut().text_styles.values_mut() {
         font_id.size = (font_id.size - PANEL_FONT_REDUCTION).max(1.0);
+    }
+}
+
+/// Scale every text style in `ui` so body text is `size` points (the "GUI font
+/// size"), keeping their proportions: headings stay larger, small text
+/// smaller. Called at the top of each side panel's content closure so it only
+/// affects that panel's child `ui`.
+fn scale_panel_fonts(ui: &mut Ui, size: f32) {
+    let styles = &mut ui.style_mut().text_styles;
+    let Some(body) = styles.get(&TextStyle::Body).map(|f| f.size) else {
+        return;
+    };
+    let factor = size / body;
+    for font_id in styles.values_mut() {
+        font_id.size = (font_id.size * factor).max(1.0);
     }
 }
 
@@ -1084,6 +1153,9 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
             panel_toggles(state, ui);
         });
 
+    // The side panels' text follows the "GUI font size" control.
+    let gui_font_size = state.gui_font_size;
+
     if state.ui.panel_vis.bookmarks {
         let max = central_reserve(ui, f32::INFINITY);
         Panel::left("bookmarks_panel")
@@ -1091,7 +1163,7 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
             .default_size(BOOKMARK_COL_WIDTH)
             .max_size(max)
             .show_inside(ui, |ui| {
-                shrink_panel_fonts(ui);
+                scale_panel_fonts(ui, gui_font_size);
                 dir_bookmarks(state, ui);
             });
     }
@@ -1103,7 +1175,7 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
             .default_size(RECENT_DIRS_COL_WIDTH)
             .max_size(max)
             .show_inside(ui, |ui| {
-                shrink_panel_fonts(ui);
+                scale_panel_fonts(ui, gui_font_size);
                 dir_history(state, ui);
             });
     }
@@ -1115,7 +1187,7 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
             .default_size(BROWSER_COL_WIDTH)
             .max_size(max)
             .show_inside(ui, |ui| {
-                shrink_panel_fonts(ui);
+                scale_panel_fonts(ui, gui_font_size);
                 file_browser(state, ui);
             });
     }
@@ -1127,7 +1199,7 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
             .default_size(REMOTE_COL_WIDTH)
             .max_size(max)
             .show_inside(ui, |ui| {
-                shrink_panel_fonts(ui);
+                scale_panel_fonts(ui, gui_font_size);
                 remote_terminals(state, ui);
             });
     }
@@ -1143,7 +1215,7 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
             .default_size(RIGHT_COL_WIDTH)
             .max_size(max)
             .show_inside(ui, |ui| {
-                shrink_panel_fonts(ui);
+                scale_panel_fonts(ui, gui_font_size);
                 cmd_history(state, ui);
             });
     }
@@ -1155,7 +1227,7 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
             .default_size(CWD_HIST_COL_WIDTH)
             .max_size(max)
             .show_inside(ui, |ui| {
-                shrink_panel_fonts(ui);
+                scale_panel_fonts(ui, gui_font_size);
                 cwd_cmd_history(state, ui);
             });
     }

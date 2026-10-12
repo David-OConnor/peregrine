@@ -5,12 +5,12 @@ use std::{
 
 use chrono::Utc;
 use shell::{
-    BrowserFile, HistoryItem, NavState, OpenTabs, PanelVis, RecentDir, RemoteSession,
+    BrowserFile, FontSizes, HistoryItem, NavState, OpenTabs, PanelVis, RecentDir, RemoteSession,
     RemoteTerminal, SshMode, WindowSize, apply_completion, complete_cd_path, current_branch,
     get_home, read_browser_files, save_data, ssh, ssh::secrets, truncate_branch,
 };
 
-use crate::{OutItem, OutType, files::FileDetails, markdown::MarkdownViewers, ui};
+use crate::{OutItem, OutType, files::FileDetails, markdown::MarkdownViewers, path_color, ui};
 
 /// State specific to the GUI: the current input buffer, the captured terminal
 /// output, and a "please focus the input next frame" flag we use after
@@ -144,8 +144,13 @@ pub struct State {
     /// first frame reports a size (and on a fresh file with no saved value).
     pub window_size: Option<WindowSize>,
     /// Font size (in points) for the terminal input/output panes, adjusted via
-    /// the +/- buttons on the tab strip and persisted to the state file.
+    /// the "CLI font size" +/- buttons on the tab strip and persisted to the
+    /// state file.
     pub font_size: f32,
+    /// Body-text size (in points) for the side panels, adjusted via the "GUI
+    /// font size" +/- buttons and persisted alongside `font_size`. The panels'
+    /// other text styles scale with it (see `ui::scale_panel_fonts`).
+    pub gui_font_size: f32,
     /// Open Markdown viewer windows (double-clicked in the Files panel).
     /// Not persisted.
     pub md_viewers: MarkdownViewers,
@@ -172,6 +177,7 @@ impl Default for State {
             branch: vec![branch],
             window_size: None,
             font_size: ui::DEFAULT_FONT_SIZE,
+            gui_font_size: ui::DEFAULT_GUI_FONT_SIZE,
             md_viewers: MarkdownViewers::default(),
         };
         s.refresh_all_filters();
@@ -199,10 +205,25 @@ impl State {
             };
             return format!("{}:{}{}", remote.label(), cwd, mode);
         }
+        format!("{}{}", self.cwd_star(), self.cwd().display())
+    }
+
+    /// `*` when the active tab's cwd is bookmarked, else empty. Shown before
+    /// the cwd in the prompt.
+    pub fn cwd_star(&self) -> &'static str {
         let cwd = self.cwd();
-        let bookmarked = self.dir_bookmarks.iter().any(|p| p.as_path() == cwd);
-        let star = if bookmarked { "*" } else { "" };
-        format!("{star}{}", cwd.display())
+        if self.dir_bookmarks.iter().any(|p| p.as_path() == cwd) {
+            "*"
+        } else {
+            ""
+        }
+    }
+
+    /// The active tab's local cwd, split into colour-coded runs (see
+    /// [path_color]) for drawing on the black terminal panes.
+    pub fn cwd_color_parts(&self) -> Vec<path_color::Part> {
+        let home = self.home.as_ref().map(|h| h.display().to_string());
+        path_color::parts(&self.cwd().display().to_string(), home.as_deref(), true)
     }
 
     /// Whether the active tab has a live SSH session (used by the input row to
@@ -212,9 +233,9 @@ impl State {
     }
 
     /// Full prompt prefix used when echoing a command into the output
-    /// pane. Embeds an ANSI magenta escape around the branch slot so the
-    /// output pane's ANSI parser colours it the same as the live input
-    /// row's branch label. `nav` adds a ` his N` / ` cd N` indicator
+    /// pane. Embeds ANSI escapes around the cwd's directories and the branch
+    /// slot so the output pane's ANSI parser colours them the same as the
+    /// live input row does. `nav` adds a ` his N` / ` cd N` indicator
     /// after the branch when a recall is active (see [NavState]).
     pub fn prompt(&self, nav: &NavState) -> String {
         let i = self.ui.active_tab;
@@ -228,9 +249,17 @@ impl State {
                 .map(|b| format!(" \x1b[95mbranch: {}\x1b[0m", truncate_branch(b, 10)))
                 .unwrap_or_default()
         };
+        // Locally, colour-code the cwd like the input row does; the output
+        // pane's ANSI parser turns the escapes back into colours.
+        let cwd_part = if self.is_remote() {
+            self.cwd_display()
+        } else {
+            let parts = self.cwd_color_parts();
+            format!("{}{}", self.cwd_star(), path_color::to_ansi(&parts))
+        };
         format!(
             "{}{}{}{}",
-            self.cwd_display(),
+            cwd_part,
             branch_part,
             nav.his_indicator(),
             nav.cd_indicator(),
@@ -291,18 +320,30 @@ impl State {
             &self.ui.panel_vis,
             self.window_size,
             &open_tabs,
-            Some(self.font_size),
+            FontSizes {
+                cli: Some(self.font_size),
+                gui: Some(self.gui_font_size),
+            },
             &self.state_path,
         )
     }
 
     /// Adjust the terminal-pane font size by `delta` points, clamped to a
-    /// sane range, and persist the change. Wired to the +/- buttons on the
-    /// tab strip.
+    /// sane range, and persist the change. Wired to the "CLI font size" +/-
+    /// buttons on the tab strip.
     pub fn adjust_font_size(&mut self, delta: f32) {
         let next = (self.font_size + delta).clamp(ui::MIN_FONT_SIZE, ui::MAX_FONT_SIZE);
         if next != self.font_size {
             self.font_size = next;
+            let _ = self.save();
+        }
+    }
+
+    /// As [Self::adjust_font_size], for the side panels' "GUI font size".
+    pub fn adjust_gui_font_size(&mut self, delta: f32) {
+        let next = (self.gui_font_size + delta).clamp(ui::MIN_FONT_SIZE, ui::MAX_FONT_SIZE);
+        if next != self.gui_font_size {
+            self.gui_font_size = next;
             let _ = self.save();
         }
     }
@@ -357,7 +398,8 @@ impl State {
             state_path: path,
             branch,
             window_size: loaded.window_size,
-            font_size: loaded.font_size.unwrap_or(ui::DEFAULT_FONT_SIZE),
+            font_size: loaded.font_size.cli.unwrap_or(ui::DEFAULT_FONT_SIZE),
+            gui_font_size: loaded.font_size.gui.unwrap_or(ui::DEFAULT_GUI_FONT_SIZE),
             md_viewers: MarkdownViewers::default(),
         };
         s.refresh_all_filters();

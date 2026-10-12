@@ -7,6 +7,7 @@
 mod ansi;
 mod files;
 mod markdown;
+mod path_color;
 mod state;
 mod ui;
 mod util;
