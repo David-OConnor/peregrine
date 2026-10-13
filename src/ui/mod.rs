@@ -5,10 +5,10 @@ use std::{
 };
 
 use egui::{
-    Align, CentralPanel, Color32, DragValue, FontData, FontDefinitions, FontFamily, FontId, Frame,
-    Key, Layout, Modal, Panel, RichText, ScrollArea, TextEdit, TextFormat, TextStyle, TextWrapMode,
-    Ui, WidgetText,
-    text::{CCursor, CCursorRange, LayoutJob},
+    Align, CentralPanel, Color32, DragValue, FontData, FontDefinitions, FontFamily, FontId,
+    FontSelection, Frame, Key, Layout, Modal, Panel, RichText, ScrollArea, TextEdit, TextFormat,
+    TextStyle, TextWrapMode, Ui, WidgetText,
+    text::{CCursor, CCursorRange, LayoutJob, TextWrapping},
 };
 use shell::{DirList, SshMode};
 
@@ -158,8 +158,6 @@ const BROWSER_COL_WIDTH: f32 = 200.;
 /// GUI font size). See [file_browser].
 const FILES_COL_MIN_CHARS: f32 = 26.;
 const REMOTE_COL_WIDTH: f32 = 180.;
-/// PATH column. Wide enough for a typical install dir without wrapping much.
-const PATH_COL_WIDTH: f32 = 260.;
 
 /// The main terminal output/input column must always keep at least this many
 /// points of width, no matter how wide the user drags the side panels (or how
@@ -171,6 +169,14 @@ pub const MIN_CENTRAL_WIDTH: f32 = 400.;
 /// (The side panels follow the "GUI font size" instead; see
 /// [scale_panel_fonts].)
 const PANEL_FONT_REDUCTION: f32 = 2.;
+
+/// Width of every tab in the top strip, its `x` included. Longer labels are
+/// cut off at the edge (no ellipsis). See [tab_button].
+const TAB_WIDTH: f32 = 100.;
+
+/// Max characters of a running command shown beside the input row; the rest
+/// is in its hover text.
+const RUNNING_LABEL_LEN: usize = 40;
 
 const COLOR_PROMPT: Color32 = Color32::from_rgb(220, 220, 90);
 const COLOR_STDOUT: Color32 = Color32::from_rgb(210, 210, 210);
@@ -603,6 +609,8 @@ fn term_in(state: &mut State, ui: &mut Ui) {
     // While remote, the cwd label already shows `user@host`; don't also show
     // the (stale) local git branch.
     let show_branch = !state.is_remote();
+    let running = state.running_here().map(|cmd| cmd.line.clone());
+    let mut stop = false;
     ui.horizontal(|ui| {
         let mono = TextStyle::Monospace.resolve(ui.style());
         ui.label(path_color::layout_job(&cwd_parts, mono, None, COLOR_PROMPT));
@@ -629,7 +637,28 @@ fn term_in(state: &mut State, ui: &mut Ui) {
                     .monospace(),
             );
         }
-        ui.label(RichText::new("$").color(COLOR_PROMPT).monospace());
+        // While a command runs, the input goes to its stdin instead.
+        match &running {
+            Some(line) => {
+                let short = match line.char_indices().nth(RUNNING_LABEL_LEN) {
+                    Some((i, _)) => format!("{}...", &line[..i]),
+                    None => line.clone(),
+                };
+                ui.label(
+                    RichText::new(format!("running: {short}"))
+                        .color(COLOR_STDERR_OK)
+                        .monospace(),
+                )
+                .on_hover_text(line);
+                stop = ui
+                    .button("Stop")
+                    .on_hover_text("End the command and everything it started (Ctrl+C)")
+                    .clicked();
+            }
+            None => {
+                ui.label(RichText::new("$").color(COLOR_PROMPT).monospace());
+            }
+        }
     });
 
     // The keys we repurpose are consumed *before* the edit is drawn, while it
@@ -650,6 +679,45 @@ fn term_in(state: &mut State, ui: &mut Ui) {
     let cd_active = cd_cursor.is_some() || state.ui.cli_input[active].is_empty();
     let left = !tab && !up && !down && cd_active && consume(ui, Key::ArrowLeft);
     let right = !tab && !up && !down && !left && cd_active && consume(ui, Key::ArrowRight);
+    // → (or End) with the caret at the end accepts the greyed history
+    // suggestion, as in the CLI.
+    let caret_at_end = TextEdit::load_state(ui.ctx(), input_id)
+        .and_then(|s| s.cursor.char_range())
+        .is_none_or(|r| {
+            r.is_empty() && r.primary.index == state.ui.cli_input[active].chars().count()
+        });
+    let hint = if focused && caret_at_end && running.is_none() {
+        state.input_hint()
+    } else {
+        None
+    };
+    let accept_hint = hint.is_some()
+        && !tab
+        && !up
+        && !down
+        && !left
+        && !right
+        && (consume(ui, Key::ArrowRight) || consume(ui, Key::End));
+
+    // Ctrl+C stops a running command, as in a terminal, unless there's text
+    // selected for it to copy (egui sends it as a Copy event, not a key).
+    if running.is_some()
+        && focused
+        && ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy)))
+    {
+        let input_selected = TextEdit::load_state(ui.ctx(), input_id)
+            .and_then(|s| s.cursor.char_range())
+            .is_some_and(|r| !r.is_empty());
+        let label_selected = ui
+            .ctx()
+            .with_plugin(|s: &mut egui::text_selection::LabelSelectionState| s.has_selection())
+            .unwrap_or(false);
+        stop |= !input_selected && !label_selected;
+    }
+    if stop {
+        state.stop_running();
+        state.ui.focus_input = true;
+    }
 
     // Input box sits on its own row, directly beneath the prompt line above.
     // It's multi-line so a long command wraps onto extra rows (and the panel
@@ -658,15 +726,30 @@ fn term_in(state: &mut State, ui: &mut Ui) {
     // pasted newlines are flattened to spaces below. `lock_focus` stops egui
     // from using Tab for widget-to-widget focus navigation, since we use it
     // for path autocompletion.
-    let response = ui.add(
-        TextEdit::multiline(&mut state.ui.cli_input[active])
-            .id(input_id)
-            .desired_rows(1)
-            .desired_width(f32::INFINITY)
-            .return_key(None)
-            .lock_focus(true)
-            .font(egui::TextStyle::Monospace),
-    );
+    let output = TextEdit::multiline(&mut state.ui.cli_input[active])
+        .id(input_id)
+        .desired_rows(1)
+        .desired_width(f32::INFINITY)
+        .return_key(None)
+        .lock_focus(true)
+        .font(egui::TextStyle::Monospace)
+        .show(ui);
+    let response = output.response;
+
+    // Grey ghost text for the history suggestion, painted just after the
+    // end of the typed text. Clipped to the whole box: the edit's own text
+    // clip rect ends where the typed text does.
+    if let Some(hint) = hint.as_ref().filter(|_| !accept_hint) {
+        let end = egui::text::CCursor::new(state.ui.cli_input[active].chars().count());
+        let pos = output.galley_pos + output.galley.pos_from_cursor(end).min.to_vec2();
+        ui.painter().with_clip_rect(response.rect).text(
+            pos,
+            egui::Align2::LEFT_TOP,
+            hint,
+            TextStyle::Monospace.resolve(ui.style()),
+            ui.visuals().weak_text_color(),
+        );
+    }
 
     // Same flattening a single-line edit applies to pastes. It's
     // char-for-char, so the edit's caret position stays valid.
@@ -680,11 +763,15 @@ fn term_in(state: &mut State, ui: &mut Ui) {
         state.ui.focus_input = false;
     }
 
-    if tab {
-        state.autocomplete_input();
+    if tab || accept_hint {
+        if tab {
+            state.autocomplete_input();
+        } else if let Some(hint) = &hint {
+            state.ui.cli_input[active].push_str(hint);
+        }
         // egui's TextEdit keeps its own caret position, which isn't
         // updated when we replace the buffer behind its back. Move the
-        // caret to the end so it follows the completed path.
+        // caret to the end so it follows the completed text.
         if let Some(mut edit_state) = TextEdit::load_state(ui.ctx(), response.id) {
             let end = egui::text::CCursor::new(state.ui.cli_input[active].chars().count());
             edit_state
@@ -714,6 +801,8 @@ fn term_in(state: &mut State, ui: &mut Ui) {
 
         if pty {
             state.send_remote_line(&input);
+        } else if running.is_some() {
+            state.send_running_line(&input);
         } else {
             submit_command(state, &input);
         }
@@ -1617,9 +1706,10 @@ fn panel_toggles(state: &mut State, ui: &mut Ui) {
         ui.toggle_value(&mut v.recent_dirs, "Recent dirs");
         ui.toggle_value(&mut v.file_browser, "Files");
         ui.toggle_value(&mut v.remote_terminals, "Remote");
-        ui.toggle_value(&mut v.path_editor, "PATH");
         ui.toggle_value(&mut v.recent_cmds, "Cmd history");
         ui.toggle_value(&mut v.recent_cmds_in_dir, "Cmds this dir");
+        // Opens a window of its own rather than a side panel.
+        ui.toggle_value(&mut v.path_editor, "PATH");
     });
 }
 
@@ -1709,9 +1799,59 @@ fn dir_label_len_control(ui: &mut Ui, label: &str, len: &mut usize, what: &str) 
     done
 }
 
+/// One [TAB_WIDTH]-wide tab of the top strip. The label is laid out by hand
+/// so it can be cut off at the edge with no ellipsis (egui's own truncation
+/// always adds one); the full label is in the hover text when cut. With
+/// `closable`, an `x` sits over the tab's right end. Returns the tab's
+/// response and whether the `x` was clicked.
+fn tab_button(ui: &mut Ui, text: &str, selected: bool, closable: bool) -> (egui::Response, bool) {
+    let close_width = if closable {
+        ui.spacing().interact_size.y
+    } else {
+        0.
+    };
+    let label_width = TAB_WIDTH - 2. * ui.spacing().button_padding.x - close_width;
+    // The font a plain-text button label would get. PLACEHOLDER colour lets
+    // the button apply its own (selected/hovered).
+    let mut job = LayoutJob::simple_singleline(
+        text.to_owned(),
+        FontSelection::Default.resolve_with_fallback(ui.style(), TextStyle::Button.into()),
+        Color32::PLACEHOLDER,
+    );
+    job.wrap = TextWrapping {
+        overflow_character: None,
+        ..TextWrapping::truncate_at_width(label_width.max(0.))
+    };
+    let galley = ui.ctx().fonts_mut(|f| f.layout_job(job));
+    let cut = galley.elided;
+
+    let button = egui::Button::selectable(selected, WidgetText::from(galley))
+        .min_size(egui::vec2(TAB_WIDTH, 0.));
+    // Left-align the label; horizontal layouts centre button text.
+    let layout = ui.layout().with_main_align(Align::Min);
+    let mut tab = ui.with_layout(layout, |ui| ui.add(button)).inner;
+    if cut {
+        tab = tab.on_hover_text(text);
+    }
+
+    let close_clicked = closable && {
+        let rect = tab.rect;
+        let close_rect =
+            egui::Rect::from_min_max(egui::pos2(rect.right() - close_width, rect.top()), rect.max);
+        ui.put(
+            close_rect,
+            egui::Button::new("x").frame_when_inactive(false),
+        )
+        .on_hover_text("Close tab")
+        .clicked()
+    };
+    (tab, close_clicked)
+}
+
 /// Top-of-window tab strip. Each tab labels itself with its cwd's leaf
-/// folder; clicking selects, `x` closes (disabled when only one tab is
-/// left), and `+` appends a fresh tab inheriting the active tab's cwd.
+/// folder; clicking selects, the active tab's `x` (or middle-clicking any
+/// tab) closes it (unavailable when only one tab is left), and `+` appends a
+/// fresh tab inheriting the active tab's cwd.
 fn tabs_bar(state: &mut State, ui: &mut Ui) {
     // Snapshot the data we need so the inner closure doesn't fight the
     // borrow checker with the mutable `state` we mutate at the end.
@@ -1772,21 +1912,15 @@ fn tabs_bar(state: &mut State, ui: &mut Ui) {
 
         for (i, leaf) in labels.iter().enumerate() {
             let text = format!("{i}: {leaf}");
-            // Tighter spacing within a tab so its `x` hugs the name.
-            ui.scope(|ui| {
-                ui.spacing_mut().item_spacing.x = 1.0;
-                let tab = ui.selectable_label(i == active, text);
-                if tab.clicked() {
-                    to_select = Some(i);
-                }
-                // Middle-click closes, same as the `x`.
-                if n > 1 && tab.middle_clicked() {
-                    to_close = Some(i);
-                }
-                if n > 1 && ui.small_button("x").on_hover_text("Close tab").clicked() {
-                    to_close = Some(i);
-                }
-            });
+            // Only the active tab shows its `x`, Firefox-style.
+            let (tab, close_clicked) = tab_button(ui, &text, i == active, n > 1 && i == active);
+            if tab.clicked() {
+                to_select = Some(i);
+            }
+            // Middle-click closes, same as the `x`.
+            if close_clicked || (n > 1 && tab.middle_clicked()) {
+                to_close = Some(i);
+            }
             ui.separator();
         }
         if ui.button("+ tab").on_hover_text("New tab").clicked() {
@@ -1957,10 +2091,16 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
     let vis_before = state.ui.panel_vis;
 
     // Run the command submitted last frame. That frame already painted its
-    // echo, so the user sees what they ran while this blocks.
+    // echo, so the user sees what they ran while a blocking built-in runs.
     if let Some(input) = state.ui.pending_cmd.take() {
-        run_command(state, &input);
+        let ctx = ui.ctx().clone();
+        run_command(state, &input, &ctx);
     }
+
+    // Bring in output from shell commands running in the background, and
+    // wrap up any that have finished. Their reader threads request a repaint
+    // whenever there's news.
+    state.pump_running();
 
     // Pump any live PTY output into the active tab's pane. While a PTY session
     // is active, keep requesting repaints so streamed output (e.g. `top`) keeps
@@ -2036,19 +2176,6 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
         state.ui.panel_widths.remote_terminals = Some(r.response.rect.width());
     }
 
-    if state.ui.panel_vis.path_editor {
-        let max = central_reserve(ui, f32::INFINITY);
-        let r = Panel::left("path_editor_panel")
-            .resizable(true)
-            .default_size(prev.path_editor.unwrap_or(PATH_COL_WIDTH))
-            .max_size(max)
-            .show_inside(ui, |ui| {
-                scale_panel_fonts(ui, gui_font_size);
-                path_panel::path_panel(state, ui);
-            });
-        state.ui.panel_widths.path_editor = Some(r.response.rect.width());
-    }
-
     if state.ui.panel_vis.recent_cmds {
         // Long commands wrap inside the panel (see [cmd_history]) rather
         // than widening it, so it stays at whatever width it's dragged to.
@@ -2110,6 +2237,9 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
     // Markdown viewer windows are child viewports: they only stay open while
     // the main window's pass keeps showing them.
     state.md_viewers.show(ui.ctx());
+
+    // Likewise the PATH editor's window.
+    path_panel::path_window(state, ui.ctx());
 
     stale_dir_popup(state, ui.ctx());
 

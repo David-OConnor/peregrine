@@ -30,8 +30,8 @@ Note: in PTY mode the GUI streams output but is not a full terminal emulator —
 `sudo`, REPLs) works well; cursor-addressed full-screen apps render best in the CLI's PTY mode.
 
 ## PATH
-The **PATH** panel (off by default; turn it on in the panel toggles) edits PATH one directory per row, like Windows'
-"Edit environment variable" dialog. Pick what to edit at the top:
+The **PATH** window (off by default; open it with the **PATH** toggle, last in the panel toggles) edits PATH one
+directory per row, like Windows' "Edit environment variable" dialog. Pick what to edit at the top:
 
 - **User**: your account's PATH. On Windows, the `HKEY_CURRENT_USER\Environment` `Path` value. On Linux and macOS, a
   block the panel keeps in a shell startup file (`~/.bashrc` by default; `~/.zshrc` if your shell is zsh), which adds
@@ -43,6 +43,10 @@ The **PATH** panel (off by default; turn it on in the panel toggles) edits PATH 
   saved through the admin password prompt. A System PATH without `system32` (Windows) or `/usr/bin` is refused.
 - **This app**: the PATH commands run from this app use, like `export PATH=...` in a terminal: it lasts until the app
   exits.
+
+The search box above the list filters it as you type, ignoring case: an entry stays if its path matches, or if its
+dir has an executable whose name matches. Those executables are listed under it, struck through where one in a dir
+searched earlier runs instead, so searching a command name shows every copy on PATH and which one wins.
 
 Double-click a row to edit it; missing directories are shown in amber and duplicates struck through. **+ Current dir** adds the
 active tab's directory. **Edit as text** edits the list one entry per line, and splits a pasted PATH string. Saving

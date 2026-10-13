@@ -4,7 +4,7 @@ use std::{fs, io, path::Path};
 
 use shell::{
     DirList, SshMode, clone_root, commands, commands::Frontend, find_bookmark, find_recent_dir,
-    path_from_args, quiet_command, ssh,
+    path_from_args, ssh,
 };
 
 use crate::{OutType, out_type_for, state::State, util};
@@ -17,7 +17,7 @@ pub fn read_file(path: &Path) -> io::Result<String> {
 
 /// Note: In `shell`, this is in the `commands` module. To prevent possible confusion, we don't
 /// have an additoinal `commands` module in this program.
-pub fn handle_cmd(state: &mut State, cmd: &str, input: &str, args: &str) {
+pub fn handle_cmd(state: &mut State, cmd: &str, input: &str, args: &str, ctx: &egui::Context) {
     // While the active tab is connected, route commands to the remote. Only
     // the session-management keywords are intercepted; everything else (exec
     // mode) runs on the remote shell. (PTY-mode input is sent directly from the
@@ -250,59 +250,9 @@ pub fn handle_cmd(state: &mut State, cmd: &str, input: &str, args: &str) {
                 state.push_out(format!("> {}", expanded.line), OutType::Prompt);
             }
 
-            // A successful clone from a full URL saves the URL's root, so later
-            // clones from the same place need only the repo name. Only on
-            // success, so a mistyped URL isn't saved.
-            if run_passthrough(state, &expanded.line, &cwd)
-                && let Some(root) = clone_root(&expanded.line)
-            {
-                state.clone_roots.retain(|r| *r != root);
-                state.clone_roots.push(root);
-                if let Err(e) = state.save() {
-                    state.push_out(
-                        format!("warning: failed to save state: {e}"),
-                        OutType::StdErr,
-                    );
-                }
-            }
-        }
-    }
-}
-
-/// Run `line` through the system shell (PowerShell 7 on Windows, `sh`
-/// elsewhere) in `dir`, pushing its captured stdout/stderr into the output
-/// pane. Returns whether it ran and exited successfully.
-pub fn run_passthrough(state: &mut State, line: &str, dir: &Path) -> bool {
-    let result = if cfg!(windows) {
-        quiet_command("pwsh")
-            .args(["-NoProfile", "-NoLogo", "-Command", line])
-            .current_dir(dir)
-            .output()
-    } else {
-        quiet_command("sh")
-            .args(["-c", line])
-            .current_dir(dir)
-            .output()
-    };
-    match result {
-        Ok(out) => {
-            if !out.stdout.is_empty() {
-                state.push_out(
-                    String::from_utf8_lossy(&out.stdout).into_owned(),
-                    OutType::StdOut,
-                );
-            }
-            if !out.stderr.is_empty() {
-                state.push_out(
-                    String::from_utf8_lossy(&out.stderr).into_owned(),
-                    out_type_for(commands::stderr_kind(out.status)),
-                );
-            }
-            out.status.success()
-        }
-        Err(e) => {
-            state.push_out(format!("shell: {e}"), OutType::StdErr);
-            false
+            // A clone from a full URL saves the URL's root once it succeeds.
+            let root = clone_root(&expanded.line);
+            state.start_running(&expanded.line, &cwd, root, ctx);
         }
     }
 }

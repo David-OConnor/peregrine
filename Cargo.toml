@@ -42,11 +42,14 @@ ignore = "0.4.33"
 # new to the build. The PATH panel (see `src/path_env.rs`) reads and writes
 # the User and System `Path` registry values, broadcasts the change as
 # Windows' own dialog does, and runs itself elevated (`ShellExecuteExW`
-# "runas") to write the System one.
+# "runas") to write the System one. Shell commands (see `src/running.rs`) run
+# in a job object, so Stop ends everything they started.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
+    "Win32_Security",
     "Win32_Storage_FileSystem",
     "Win32_System_Diagnostics_Debug",
+    "Win32_System_JobObjects",
     "Win32_System_Registry",
     "Win32_System_Threading",
     "Win32_System_WindowsProgramming",

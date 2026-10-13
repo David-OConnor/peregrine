@@ -7,18 +7,19 @@ use chrono::Utc;
 use shell::{
     BrowserFile, DirLabelLens, DirList, FilesPanelPrefs, FontSizes, HistoryItem, NavState,
     OpenTabs, PanelVis, PanelWidths, RecentDir, RemoteSession, RemoteTerminal, SshMode, WindowSize,
-    apply_completion, complete_cd_path, current_branch, get_home, read_browser_files,
-    remove_missing_recent_dirs, remove_saved_dir, save_data, ssh, ssh::secrets, stale_dir_list,
-    truncate_branch,
+    apply_completion, current_branch, get_home, read_browser_files, remove_missing_recent_dirs,
+    remove_saved_dir, save_data, ssh, ssh::secrets, stale_dir_list, truncate_branch,
 };
 
 use crate::{
     OutItem, OutType,
     cmd_color::CmdColors,
+    completion,
     deep_search::{self, DeepSearch},
     files::FileDetails,
     markdown::MarkdownViewers,
     path_color,
+    running::RunningCmd,
     ui::{self, path_panel::PathPanel},
 };
 
@@ -39,8 +40,11 @@ pub struct StateUi {
     pub focus_input: bool,
     /// A submitted command that's been echoed but not yet run. Set by
     /// `submit_command` and taken at the start of the next frame, so the echo
-    /// paints before the (blocking) command starts.
+    /// paints before a built-in that blocks (`sync`, say) starts.
     pub pending_cmd: Option<String>,
+    /// The input at a Tab whose completion was ambiguous and added nothing.
+    /// A second Tab on the same input lists the candidates, as the CLI does.
+    pub tab_list_pending: Option<String>,
 
     /// Search text for each sidebar panel. Empty = "show everything". Updated
     /// in-place by the panel's TextEdit.
@@ -138,6 +142,7 @@ impl Default for StateUi {
             active_tab: 0,
             focus_input: true,
             pending_cmd: None,
+            tab_list_pending: None,
             bookmarks_search: String::new(),
             recent_dirs_search: String::new(),
             history_search: String::new(),
@@ -206,6 +211,9 @@ pub struct State {
     /// via the Remote panel; while set, that tab's typed commands run on the
     /// remote. Not persisted (a connection can't outlive the process).
     pub active_remote: Vec<Option<RemoteSession>>,
+    /// The shell command running in each tab, if any (parallel to `cwd`).
+    /// While set, that tab's typed lines go to its stdin. See [RunningCmd].
+    pub running: Vec<Option<RunningCmd>>,
     /// In the current dir. Note persistent, unlike some of our other lists.
     pub browser_files: Vec<BrowserFile>,
     /// The dir `browser_files` was last read from, so a refresh can tell a
@@ -271,6 +279,7 @@ impl Default for State {
             remote_terminals: Vec::new(),
             clone_roots: Vec::new(),
             active_remote: vec![None],
+            running: vec![None],
             browser_files: Vec::new(),
             browser_dir: PathBuf::new(),
             selected_file: None,
@@ -647,6 +656,7 @@ impl State {
             remote_terminals: loaded.remote_terminals,
             clone_roots: loaded.clone_roots,
             active_remote: (0..n).map(|_| None).collect(),
+            running: (0..n).map(|_| None).collect(),
             browser_files: Vec::new(),
             browser_dir: PathBuf::new(),
             selected_file: None,
@@ -673,7 +683,11 @@ impl State {
     }
 
     pub fn push_out(&mut self, text: impl Into<String>, type_: OutType) {
-        let i = self.ui.active_tab;
+        self.push_out_to(self.ui.active_tab, text, type_);
+    }
+
+    /// [Self::push_out] to tab `i`, which needn't be the active one.
+    pub fn push_out_to(&mut self, i: usize, text: impl Into<String>, type_: OutType) {
         self.ui.out[i].push(OutItem {
             text: text.into(),
             type_,
@@ -696,6 +710,7 @@ impl State {
         self.branch.push(inherited_branch);
         // New tabs start local; a connection isn't inherited.
         self.active_remote.push(None);
+        self.running.push(None);
 
         self.ui.active_tab = self.cwd.len() - 1;
         self.ui.focus_input = true;
@@ -721,6 +736,8 @@ impl State {
         if let Some(session) = self.active_remote.remove(idx) {
             session.disconnect();
         }
+        // Dropping a command still running there stops it.
+        self.running.remove(idx);
 
         if self.ui.active_tab >= self.cwd.len() {
             self.ui.active_tab = self.cwd.len() - 1;
@@ -882,23 +899,47 @@ impl State {
         }
     }
 
-    /// Complete the active input row using the shared `cd` path completer.
+    /// Complete the active input row, as the CLI's Tab does (see
+    /// [completion::complete]): extend it to the candidates' shared prefix,
+    /// or, when that adds nothing, list the candidates on a second Tab.
     pub fn autocomplete_input(&mut self) {
         let i = self.ui.active_tab;
         let live = self.ui.cli_input[i].clone();
-        let Some(result) = complete_cd_path(
+        let Some(result) = completion::complete(
             &live,
             live.len(),
             self.cwd(),
             self.home.as_deref(),
             &self.dir_bookmarks,
             &self.recent_dirs,
+            &self.clone_roots,
         ) else {
             return;
         };
-        if let Some(text) = apply_completion(&live, live.len(), &result) {
+        // As in rustyline, only take the shared prefix when it adds to the
+        // input: case-insensitive and fuzzy candidates can share less than
+        // was typed.
+        let applied = apply_completion(&live, live.len(), &result)
+            .filter(|text| result.candidates.len() == 1 || text.len() > live.len());
+        if let Some(text) = applied {
             self.ui.cli_input[i] = text;
+            self.ui.tab_list_pending = None;
+        } else if result.candidates.len() > 1 {
+            if self.ui.tab_list_pending.as_deref() == Some(live.as_str()) {
+                let prompt = self.prompt(&self.ui.history_nav[i]);
+                self.push_out(format!("{prompt}> {live}"), OutType::Prompt);
+                self.push_out(completion::candidate_list(&result), OutType::StdOut);
+                self.ui.tab_list_pending = None;
+            } else {
+                self.ui.tab_list_pending = Some(live);
+            }
         }
+    }
+
+    /// The greyed history suggestion for the active input row (see
+    /// [completion::history_hint]); → accepts it.
+    pub fn input_hint(&self) -> Option<String> {
+        completion::history_hint(&self.history, &self.ui.cli_input[self.ui.active_tab])
     }
 
     /// Reset the active tab's recall state back to the live input. Called
@@ -1044,6 +1085,93 @@ impl State {
     // --- SSH ------------------------------------------------------------
 
     /// The active tab's live SSH session, if any.
+    /// The command running in the active tab, if any.
+    pub fn running_here(&self) -> Option<&RunningCmd> {
+        self.running[self.ui.active_tab].as_ref()
+    }
+
+    /// Run `line` in the system shell in `dir`, in the background, with its
+    /// output streaming into the active tab's pane. `clone_root` is saved to
+    /// `clone_roots` if it succeeds.
+    pub fn start_running(
+        &mut self,
+        line: &str,
+        dir: &Path,
+        clone_root: Option<String>,
+        ctx: &egui::Context,
+    ) {
+        let i = self.ui.active_tab;
+        if self.running[i].is_some() {
+            self.push_out(
+                "a command is already running in this tab: stop it (Ctrl+C), or use another tab",
+                OutType::StdErr,
+            );
+            return;
+        }
+        match RunningCmd::start(line, dir, self.ui.out[i].len(), ctx) {
+            Ok(mut cmd) => {
+                cmd.clone_root = clone_root;
+                self.running[i] = Some(cmd);
+            }
+            Err(e) => self.push_out(format!("shell: {e}"), OutType::StdErr),
+        }
+    }
+
+    /// Stop the command running in the active tab.
+    pub fn stop_running(&mut self) {
+        if let Some(cmd) = self.running[self.ui.active_tab].as_mut() {
+            cmd.stop();
+        }
+    }
+
+    /// Send a line typed into the active tab to its running command's stdin,
+    /// echoing it into the pane as a terminal would.
+    pub fn send_running_line(&mut self, line: &str) {
+        let i = self.ui.active_tab;
+        if let Some(cmd) = self.running[i].as_mut() {
+            cmd.send_line(line);
+            self.push_out(line, OutType::Prompt);
+        }
+    }
+
+    /// Bring each tab's running command's new output into its pane, and wrap
+    /// up any that have finished. Called once per frame.
+    pub fn pump_running(&mut self) {
+        for i in 0..self.running.len() {
+            let Some(success) = self.running[i]
+                .as_mut()
+                .and_then(|cmd| cmd.poll(&mut self.ui.out[i]))
+            else {
+                continue;
+            };
+            let Some(cmd) = self.running[i].take() else {
+                continue;
+            };
+
+            // A successful clone from a full URL saves the URL's root, so later
+            // clones from the same place need only the repo name. Only on
+            // success, so a mistyped URL isn't saved.
+            if success && let Some(root) = cmd.clone_root.clone() {
+                self.clone_roots.retain(|r| *r != root);
+                self.clone_roots.push(root);
+                if let Err(e) = self.save() {
+                    self.push_out_to(
+                        i,
+                        format!("warning: failed to save state: {e}"),
+                        OutType::StdErr,
+                    );
+                }
+            }
+
+            // The command may have switched branches or changed files. A
+            // background tab gets both refreshed when it's selected.
+            if i == self.ui.active_tab {
+                self.refresh_branch();
+                self.refresh_browser_files();
+            }
+        }
+    }
+
     pub fn active_remote(&self) -> Option<&RemoteSession> {
         self.active_remote[self.ui.active_tab].as_ref()
     }
@@ -1383,5 +1511,10 @@ impl eframe::App for State {
     /// Disambiguated to the inherent `save` — `eframe::App` also has a `save`.
     fn on_exit(&mut self) {
         let _ = State::save(self);
+        // Commands still running would otherwise carry on with nothing to
+        // show their output or stop them.
+        for cmd in &mut self.running {
+            cmd.take();
+        }
     }
 }

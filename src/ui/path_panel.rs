@@ -1,6 +1,7 @@
 //! The PATH panel: edits the PATH each [Scope] keeps (see `crate::path_env`)
 //! one directory per row, like Windows' "Edit environment variable" dialog,
-//! though PATH itself is a single string.
+//! though PATH itself is a single string. It's shown in a window of its own
+//! (see [path_window]) rather than as a side panel.
 
 use std::{
     collections::HashMap,
@@ -8,17 +9,21 @@ use std::{
 };
 
 use egui::{
-    Align, Button, CollapsingHeader, ComboBox, Frame, Key, Panel, RichText, ScrollArea, TextEdit,
-    TextStyle, TextWrapMode, Ui, WidgetText,
-    text::{CCursor, CCursorRange},
+    Align, Button, CentralPanel, CollapsingHeader, Color32, ComboBox, Context, Frame, Key, Panel,
+    Response, RichText, ScrollArea, Sense, Stroke, TextEdit, TextFormat, TextStyle, TextWrapMode,
+    Ui, ViewportBuilder, ViewportClass, ViewportId, WidgetText,
+    text::{CCursor, CCursorRange, LayoutJob},
 };
 
-use super::{panel_header, plural};
+use super::{panel_header, plural, scale_panel_fonts};
 use crate::{
     OutType,
     path_env::{self, DirPrograms, Scope},
     state::State,
 };
+
+const WINDOW_SIZE: [f32; 2] = [640., 760.];
+const MIN_WINDOW_SIZE: [f32; 2] = [360., 420.];
 
 /// What the list marks an entry with.
 struct EntryStatus {
@@ -194,6 +199,10 @@ impl ScopeEdit {
     }
 }
 
+/// An executable in a PATH dir, with the file that runs instead when its
+/// name is typed, if one does (see [runs_instead]).
+type Program = (String, Option<PathBuf>);
+
 /// What the details pane shows for the selected entry.
 struct Details {
     scope: Scope,
@@ -208,23 +217,15 @@ struct Details {
     /// The executables in the selected dir. Each has the file that runs
     /// instead when its name is typed, if one does: one of the same name in
     /// a dir searched earlier.
-    programs: Vec<(String, Option<PathBuf>)>,
+    programs: Vec<Program>,
 }
 
 impl Details {
     /// The details for the last of `order`, the entries searched up to and
     /// including the selected one. Dirs are read through `cache`, keyed by
     /// [path_env::key].
-    fn build(
-        scope: Scope,
-        order: Vec<String>,
-        cache: &mut HashMap<String, Result<DirPrograms, String>>,
-    ) -> Self {
-        for e in &order {
-            cache.entry(path_env::key(e)).or_insert_with(|| {
-                DirPrograms::read(Path::new(&path_env::expand(e))).map_err(|err| err.to_string())
-            });
-        }
+    fn build(scope: Scope, order: Vec<String>, cache: &mut DirCache) -> Self {
+        read_dirs(&order, cache);
         let entry = order.last().cloned().unwrap_or_default();
         let key = path_env::key(&entry);
         let expanded = path_env::expand(&entry);
@@ -250,33 +251,11 @@ impl Details {
             }
         };
 
-        // The dirs searched first, leaving out copies of this one: the list
-        // marks a duplicate entry as such.
-        let earlier: Vec<(PathBuf, &DirPrograms)> = order[..order.len() - 1]
-            .iter()
-            .filter(|e| path_env::key(e) != key)
-            .filter_map(|e| {
-                let programs = cache[&path_env::key(e)].as_ref().ok()?;
-                Some((PathBuf::from(path_env::expand(e)), programs))
-            })
-            .collect();
+        let earlier = earlier_dirs(&order[..order.len() - 1], &key, cache);
         let programs = this
             .names
             .iter()
-            .map(|name| {
-                let cmd = path_env::command_name(name);
-                // An earlier dir's program of this name, or on Windows, one
-                // here whose extension PATHEXT tries first.
-                let instead = earlier
-                    .iter()
-                    .find_map(|(d, p)| p.runs(&cmd).map(|f| d.join(f)))
-                    .or_else(|| {
-                        this.runs(&cmd)
-                            .filter(|f| *f != name.as_str())
-                            .map(|f| dir.join(f))
-                    });
-                (name.clone(), instead)
-            })
+            .map(|name| (name.clone(), runs_instead(name, &dir, this, &earlier)))
             .collect();
         Self {
             scope,
@@ -285,6 +264,122 @@ impl Details {
             expanded,
             problem: None,
             programs,
+        }
+    }
+}
+
+/// Each PATH dir's executables, as read, by [path_env::key]; or why it
+/// couldn't be read.
+type DirCache = HashMap<String, Result<DirPrograms, String>>;
+
+/// Read the dirs of those `entries` not in `cache` yet into it.
+fn read_dirs<'a>(entries: impl IntoIterator<Item = &'a String>, cache: &mut DirCache) {
+    for e in entries {
+        cache.entry(path_env::key(e)).or_insert_with(|| {
+            DirPrograms::read(Path::new(&path_env::expand(e))).map_err(|err| err.to_string())
+        });
+    }
+}
+
+/// The dirs of `entries`, those searched before the one keyed `key`, with
+/// their executables as read into `cache`. Leaves out unreadable ones, and
+/// copies of the `key` dir itself: the list marks a duplicate entry as such.
+fn earlier_dirs<'a>(
+    entries: impl IntoIterator<Item = &'a String>,
+    key: &str,
+    cache: &'a DirCache,
+) -> Vec<(PathBuf, &'a DirPrograms)> {
+    entries
+        .into_iter()
+        .filter(|e| path_env::key(e) != key)
+        .filter_map(|e| {
+            let programs = cache.get(&path_env::key(e))?.as_ref().ok()?;
+            Some((PathBuf::from(path_env::expand(e)), programs))
+        })
+        .collect()
+}
+
+/// The file that runs instead of executable `name` (in `dir`, whose
+/// executables are `this`) when its command is typed, if one does: an
+/// earlier dir's of the same name, or on Windows, one beside it whose
+/// extension PATHEXT tries first.
+fn runs_instead(
+    name: &str,
+    dir: &Path,
+    this: &DirPrograms,
+    earlier: &[(PathBuf, &DirPrograms)],
+) -> Option<PathBuf> {
+    let cmd = path_env::command_name(name);
+    earlier
+        .iter()
+        .find_map(|(d, p)| p.runs(&cmd).map(|f| d.join(f)))
+        .or_else(|| this.runs(&cmd).filter(|f| *f != name).map(|f| dir.join(f)))
+}
+
+/// Which of a scope's entries match the panel's search: those whose path
+/// contains it, or whose dir holds an executable whose name does, ignoring
+/// case.
+struct SearchHits {
+    /// What these were found for, to tell when they're out of date: the
+    /// scope, the search (lowercased), the entries searched before the
+    /// scope's (see [path_env::searched_before]) and its own.
+    scope: Scope,
+    needle: String,
+    ahead: Vec<String>,
+    entries: Vec<String>,
+    /// Per entry, `None` if it doesn't match. Otherwise its executables
+    /// that match, if any, each with the file that runs instead of it, if
+    /// one does (see [runs_instead]).
+    rows: Vec<Option<Vec<Program>>>,
+}
+
+impl SearchHits {
+    /// Search `entries` for `needle`, reading each dir into `cache` first.
+    fn find(
+        scope: Scope,
+        needle: String,
+        ahead: Vec<String>,
+        entries: Vec<String>,
+        cache: &mut DirCache,
+    ) -> Self {
+        read_dirs(ahead.iter().chain(&entries), cache);
+        let rows = entries
+            .iter()
+            .enumerate()
+            .map(|(i, e)| {
+                let expanded = path_env::expand(e);
+                let path_match =
+                    e.to_lowercase().contains(&needle) || expanded.to_lowercase().contains(&needle);
+                let key = path_env::key(e);
+                let programs = match cache.get(&key) {
+                    Some(Ok(this)) => {
+                        let matching: Vec<&String> = this
+                            .names
+                            .iter()
+                            .filter(|n| n.to_lowercase().contains(&needle))
+                            .collect();
+                        let earlier = if matching.is_empty() {
+                            Vec::new()
+                        } else {
+                            earlier_dirs(ahead.iter().chain(&entries[..i]), &key, cache)
+                        };
+                        let dir = PathBuf::from(&expanded);
+                        matching
+                            .into_iter()
+                            .map(|n| (n.clone(), runs_instead(n, &dir, this, &earlier)))
+                            .collect()
+                    }
+                    _ => Vec::new(),
+                };
+                (path_match || !programs.is_empty()).then_some(programs)
+            })
+            .collect();
+        Self {
+            scope,
+            needle,
+            ahead,
+            entries,
+            rows,
         }
     }
 }
@@ -300,11 +395,16 @@ pub struct PathPanel {
     edits: [Option<ScopeEdit>; 3],
     /// The details pane's, for the selected entry. See [Self::update_details].
     details: Option<Details>,
-    /// Each dir's executables as read for the details pane, by
-    /// [path_env::key]; dropped on Reload.
-    programs: HashMap<String, Result<DirPrograms, String>>,
+    /// Each dir's executables as read for the details pane and the search;
+    /// dropped on Reload.
+    programs: DirCache,
     /// The details pane's filter on executable names.
     program_filter: String,
+    /// The search box above the list. See [SearchHits].
+    search: String,
+    /// The entries matching `search`, while it's not blank. See
+    /// [Self::update_search].
+    hits: Option<SearchHits>,
 }
 
 impl Default for PathPanel {
@@ -316,6 +416,8 @@ impl Default for PathPanel {
             details: None,
             programs: HashMap::new(),
             program_filter: String::new(),
+            search: String::new(),
+            hits: None,
         }
     }
 }
@@ -350,6 +452,35 @@ impl PathPanel {
         }
         self.details = Some(Details::build(scope, order, &mut self.programs));
         true
+    }
+
+    /// Bring `hits` up to date with the search and the shown scope's
+    /// entries. The first search reads every dir in the list (once; see
+    /// `programs`).
+    fn update_search(&mut self) {
+        let needle = self.search.trim().to_lowercase();
+        if needle.is_empty() {
+            self.hits = None;
+            return;
+        }
+        let scope = self.scope;
+        let ahead = match path_env::searched_before(scope) {
+            Some(s) => self.edit(s).entries.clone(),
+            None => Vec::new(),
+        };
+        let entries = self.edit(scope).entries.clone();
+        let current = self.hits.as_ref().is_some_and(|h| {
+            h.scope == scope && h.needle == needle && h.ahead == ahead && h.entries == entries
+        });
+        if !current {
+            self.hits = Some(SearchHits::find(
+                scope,
+                needle,
+                ahead,
+                entries,
+                &mut self.programs,
+            ));
+        }
     }
 
     fn is_dirty(&self, scope: Scope) -> bool {
@@ -434,16 +565,49 @@ enum Request {
     OpenDir(PathBuf),
 }
 
+/// The PATH panel's window, while its toggle (`panel_vis.path_editor`) is
+/// on. Call once per pass of the main window: egui closes a child window
+/// that isn't shown in its parent's pass. An immediate viewport, unlike the
+/// Markdown viewers' deferred ones, so it can draw straight from `state`.
+pub fn path_window(state: &mut State, ctx: &Context) {
+    if !state.ui.panel_vis.path_editor {
+        return;
+    }
+    let builder = ViewportBuilder::default()
+        .with_title("PATH")
+        .with_inner_size(WINDOW_SIZE)
+        .with_min_inner_size(MIN_WINDOW_SIZE);
+    let id = ViewportId::from_hash_of("path_editor_window");
+    ctx.show_viewport_immediate(id, builder, |ui, class| {
+        if ui.input(|i| i.viewport().close_requested()) {
+            state.ui.panel_vis.path_editor = false;
+            return;
+        }
+        CentralPanel::default().show_inside(ui, |ui| {
+            scale_panel_fonts(ui, state.gui_font_size);
+            // Without native multi-window support egui draws this as a
+            // window inside the main one, with no close button of its own.
+            if class == ViewportClass::EmbeddedWindow {
+                panel_header(ui, "PATH", &mut state.ui.panel_vis.path_editor);
+            }
+            path_panel(state, ui);
+        });
+    });
+    // Closed just now: one more pass of the main window stops showing it.
+    if !state.ui.panel_vis.path_editor {
+        ctx.request_repaint();
+    }
+}
+
 /// The PATH panel. Pick a scope at the top; its entries are listed in PATH
 /// order, the first searched first. Click a row to select it, double-click
 /// to edit it in place (Enter or clicking away keeps the change, Escape
 /// drops it). Missing dirs and duplicates are marked. Changes are kept
 /// apart per scope until saved.
-pub fn path_panel(state: &mut State, ui: &mut Ui) {
+fn path_panel(state: &mut State, ui: &mut Ui) {
     // Measured before anything is laid out, so the details pane is a third
     // of the whole panel, as in the Files panel.
     let details_height = ui.available_height() / 3.0;
-    panel_header(ui, "PATH", &mut state.ui.panel_vis.path_editor);
 
     let cwd = state.cwd().to_path_buf();
     let home = state.home.clone();
@@ -466,6 +630,7 @@ pub fn path_panel(state: &mut State, ui: &mut Ui) {
             // Re-read the dirs too, in case programs were installed.
             p.programs.clear();
             p.details = None;
+            p.hits = None;
         }
         Some(Request::ChangeDir(dir)) => state.change_dir(dir),
         Some(Request::OpenDir(dir)) => shell::commands::open_dir(&dir, &mut |kind, msg| {
@@ -548,6 +713,22 @@ fn draw(
     if let Some(why) = &read_only {
         ui.add(egui::Label::new(RichText::new(why).color(ui.visuals().warn_fg_color)).wrap());
     }
+
+    // Filters the list as it's typed. Off while the list is edited as text,
+    // which shows it all.
+    let text_mode = panel.edit(scope).text.is_some();
+    ui.add_enabled(
+        !text_mode,
+        TextEdit::singleline(&mut panel.search)
+            .hint_text("Search dirs and executables...")
+            .desired_width(f32::INFINITY)
+            .id_salt("path_search"),
+    )
+    .on_hover_text(
+        "Show only the entries whose path contains this, or whose dir has an \
+         executable whose name does. Ignores case.",
+    );
+    let searching = !panel.search.trim().is_empty();
     ui.separator();
 
     // The details claim the bottom of the panel, then the buttons the space
@@ -557,6 +738,8 @@ fn draw(
 
     let edit = panel.edit(scope);
     let editable = read_only.is_none();
+    // Set when an entry is added, so the search can't hide it.
+    let mut clear_search = false;
     Panel::bottom("path_panel_controls")
         .resizable(false)
         .frame(Frame::new().inner_margin(egui::Margin::symmetric(0, 4)))
@@ -574,6 +757,7 @@ fn draw(
                         .clicked()
                     {
                         edit.add(String::new(), true);
+                        clear_search = true;
                     }
                     if ui
                         .add_enabled(rows, Button::new("+ Current dir"))
@@ -581,6 +765,7 @@ fn draw(
                         .clicked()
                     {
                         edit.add(dir_entry(scope, cwd, home), false);
+                        clear_search = true;
                     }
                     if ui
                         .add_enabled(sel.is_some(), Button::new("Edit"))
@@ -597,16 +782,26 @@ fn draw(
                     {
                         edit.delete_selected();
                     }
+                    // Moving past rows the search hides would look like
+                    // nothing happened.
+                    let (up_hover, down_hover) = if searching {
+                        ("Clear the search to reorder", "Clear the search to reorder")
+                    } else {
+                        ("Move up. Earlier entries are searched first.", "Move down")
+                    };
+                    let can_move = |ok: bool| ok && !searching;
                     if ui
-                        .add_enabled(sel.is_some_and(|i| i > 0), Button::new("⬆"))
-                        .on_hover_text("Move up. Earlier entries are searched first.")
+                        .add_enabled(can_move(sel.is_some_and(|i| i > 0)), Button::new("⬆"))
+                        .on_hover_text(up_hover)
+                        .on_disabled_hover_text(up_hover)
                         .clicked()
                     {
                         edit.move_selected(-1);
                     }
                     if ui
-                        .add_enabled(sel.is_some_and(|i| i + 1 < n), Button::new("⬇"))
-                        .on_hover_text("Move down")
+                        .add_enabled(can_move(sel.is_some_and(|i| i + 1 < n)), Button::new("⬇"))
+                        .on_hover_text(down_hover)
+                        .on_disabled_hover_text(down_hover)
                         .clicked()
                     {
                         edit.move_selected(1);
@@ -676,6 +871,15 @@ fn draw(
             }
         });
 
+    if clear_search {
+        panel.search.clear();
+    }
+    // After the buttons, which may have changed the entries.
+    panel.update_search();
+    let edit = panel.edits[scope as usize]
+        .as_mut()
+        .expect("read above by `edit`");
+
     if let Some(text) = edit.text.as_mut() {
         let mut changed = false;
         ScrollArea::vertical()
@@ -697,13 +901,14 @@ fn draw(
         return request;
     }
 
-    entry_list(edit, editable, ui);
+    entry_list(edit, panel.hits.as_ref(), editable, ui);
     request
 }
 
 /// The scope's entries, one selectable row each, or an edit box for the row
-/// being edited.
-fn entry_list(edit: &mut ScopeEdit, editable: bool, ui: &mut Ui) {
+/// being edited. While searching, only the rows in `hits` are shown (and
+/// one being edited), each followed by its executables that matched.
+fn entry_list(edit: &mut ScopeEdit, hits: Option<&SearchHits>, editable: bool, ui: &mut Ui) {
     let mut select = None;
     let mut start_edit = None;
     // Set when the edit box loses focus: `true` to keep the new text, `false`
@@ -722,6 +927,7 @@ fn entry_list(edit: &mut ScopeEdit, editable: bool, ui: &mut Ui) {
             if edit.entries.is_empty() {
                 ui.label(RichText::new("No entries.").italics().weak());
             }
+            let mut shown = 0;
             for (i, entry) in edit.entries.iter().enumerate() {
                 if let Some(r) = edit.editing.as_mut().filter(|r| r.idx == i) {
                     if let Some(apply) = row_edit_box(ui, r) {
@@ -730,8 +936,16 @@ fn entry_list(edit: &mut ScopeEdit, editable: bool, ui: &mut Ui) {
                     if scroll_to == Some(i) {
                         ui.scroll_to_cursor(Some(Align::Center));
                     }
+                    shown += 1;
                     continue;
                 }
+                // `None` when not searching; `Some(None)` for a row the
+                // search leaves out.
+                let hit = hits.map(|h| h.rows.get(i).and_then(Option::as_ref));
+                if hit == Some(None) {
+                    continue;
+                }
+                shown += 1;
                 let st = &edit.status[i];
                 let visuals = ui.visuals();
                 let mut text = RichText::new(entry).monospace();
@@ -762,6 +976,15 @@ fn entry_list(edit: &mut ScopeEdit, editable: bool, ui: &mut Ui) {
                 } else if resp.clicked() {
                     select = Some(i);
                 }
+                if let Some(Some(programs)) = hit
+                    && !programs.is_empty()
+                    && matched_programs(ui, programs).clicked()
+                {
+                    select = Some(i);
+                }
+            }
+            if hits.is_some() && shown == 0 && !edit.entries.is_empty() {
+                ui.label(RichText::new("No matches.").italics());
             }
         });
 
@@ -851,7 +1074,7 @@ fn details_pane(panel: &mut PathPanel, height: f32, ui: &mut Ui) -> Option<Reque
             );
 
             let needle = panel.program_filter.to_lowercase();
-            let rows: Vec<&(String, Option<PathBuf>)> = d
+            let rows: Vec<&Program> = d
                 .programs
                 .iter()
                 .filter(|(name, _)| needle.is_empty() || name.to_lowercase().contains(&needle))
@@ -883,6 +1106,50 @@ fn details_pane(panel: &mut PathPanel, height: f32, ui: &mut Ui) -> Option<Reque
                 });
         });
     request
+}
+
+/// Under a row the search matched, the executables in its dir that it
+/// matched: the first few, then how many more. One a dir searched earlier
+/// hides is struck through; the hover says what runs instead.
+fn matched_programs(ui: &mut Ui, programs: &[Program]) -> Response {
+    const SHOWN: usize = 6;
+    let plain = TextFormat {
+        font_id: TextStyle::Monospace.resolve(ui.style()),
+        color: Color32::PLACEHOLDER,
+        italics: true,
+        ..Default::default()
+    };
+    let struck = TextFormat {
+        strikethrough: Stroke::new(1.0_f32, ui.visuals().text_color()),
+        ..plain.clone()
+    };
+    let mut job = LayoutJob::default();
+    // Indented under the row.
+    job.append("  ", 0.0, plain.clone());
+    for (k, (name, instead)) in programs.iter().take(SHOWN).enumerate() {
+        if k > 0 {
+            job.append("  ", 0.0, plain.clone());
+        }
+        let format = if instead.is_some() { &struck } else { &plain };
+        job.append(name, 0.0, format.clone());
+    }
+    if programs.len() > SHOWN {
+        job.append(&format!("  +{} more", programs.len() - SHOWN), 0.0, plain);
+    }
+    let resp = ui.add(egui::Label::new(job).wrap().sense(Sense::click()));
+    let hidden: Vec<String> = programs
+        .iter()
+        .filter_map(|(name, instead)| {
+            let f = instead.as_ref()?;
+            let cmd = path_env::command_name(name);
+            Some(format!("{name}: `{cmd}` runs {} instead", f.display()))
+        })
+        .collect();
+    if hidden.is_empty() {
+        resp
+    } else {
+        resp.on_hover_text(hidden.join("\n"))
+    }
 }
 
 /// A row's tooltip: what's notable about its entry, if anything.
@@ -929,4 +1196,80 @@ fn row_edit_box(ui: &mut Ui, r: &mut RowEdit) -> Option<bool> {
     out.response
         .lost_focus()
         .then(|| !ui.input(|i| i.key_pressed(Key::Escape)))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::*;
+
+    /// Make an executable called `name` (plus `.exe` on Windows) in `dir`.
+    fn program(dir: &Path, name: &str) -> String {
+        let file = if cfg!(windows) {
+            format!("{name}.exe")
+        } else {
+            name.to_owned()
+        };
+        fs::write(dir.join(&file), "").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(dir.join(&file), fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        file
+    }
+
+    /// The search matches a dir by its path or its executables' names,
+    /// ignoring case, and an executable a dir searched earlier also has is
+    /// marked as hidden by that one.
+    #[test]
+    fn search_hits() {
+        let root = std::env::temp_dir().join(format!("shell_gui_search_{}", std::process::id()));
+        let (first, second) = (root.join("First"), root.join("Second"));
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        let tool = program(&first, "Tool");
+        program(&second, "Tool");
+        let other = program(&second, "other");
+        let entries: Vec<String> = [&first, &second]
+            .iter()
+            .map(|d| d.display().to_string())
+            .collect();
+        let mut cache = DirCache::new();
+
+        let hits = SearchHits::find(
+            Scope::Session,
+            "tool".into(),
+            vec![],
+            entries.clone(),
+            &mut cache,
+        );
+        assert_eq!(hits.rows[0], Some(vec![(tool.clone(), None)]));
+        assert_eq!(
+            hits.rows[1],
+            Some(vec![(tool.clone(), Some(first.join(&tool)))])
+        );
+
+        // A path match lists no executables; a dir matching neither way is
+        // left out.
+        let hits = SearchHits::find(
+            Scope::Session,
+            "second".into(),
+            vec![],
+            entries.clone(),
+            &mut cache,
+        );
+        assert_eq!(hits.rows, [None, Some(vec![])]);
+        let hits = SearchHits::find(
+            Scope::Session,
+            "OTH".to_lowercase(),
+            vec![],
+            entries,
+            &mut cache,
+        );
+        assert_eq!(hits.rows, [None, Some(vec![(other, None)])]);
+
+        let _ = fs::remove_dir_all(&root);
+    }
 }
