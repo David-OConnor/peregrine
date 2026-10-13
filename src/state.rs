@@ -89,6 +89,13 @@ pub struct StateUi {
     /// Indices into `State::browser_files` matching `files_search`, kept
     /// current by [State::refresh_browser_files_filter].
     pub browser_files_filter: Vec<usize>,
+    /// The Files-panel row being renamed in place, if any.
+    pub rename: Option<FileRename>,
+    /// A click on the already-selected Files row, and the time (egui's
+    /// `InputState::time`) it was released. It becomes a rename once a
+    /// double-click can no longer follow, so double-clicking the selected
+    /// row still opens it. Dropped by any other press in the meantime.
+    pub rename_pending: Option<(PathBuf, f64)>,
 
     /// Remote-panel "add / edit remote" form state. `remote_form_open` shows
     /// the form; the text fields hold the in-progress entry; `remote_edit_idx`
@@ -128,6 +135,8 @@ impl Default for StateUi {
             show_dotfiles: true,
             files_search: String::new(),
             browser_files_filter: Vec::new(),
+            rename: None,
+            rename_pending: None,
             remote_form_open: false,
             remote_host: String::new(),
             remote_port: String::new(),
@@ -136,6 +145,16 @@ impl Default for StateUi {
             remote_edit_idx: None,
         }
     }
+}
+
+/// A Files-panel row being renamed in place (see [State::start_rename]).
+pub struct FileRename {
+    pub path: PathBuf,
+    /// The name as edited so far.
+    pub name: String,
+    /// Set once the edit box has taken focus with the name selected, which
+    /// happens the first frame it's drawn.
+    pub focused: bool,
 }
 
 pub struct State {
@@ -343,6 +362,8 @@ impl State {
         let cwd = self.cwd().to_path_buf();
         if cwd != self.browser_dir {
             self.ui.files_search.clear();
+            self.ui.rename = None;
+            self.ui.rename_pending = None;
         }
         self.browser_files = read_browser_files(&cwd);
         self.browser_dir = cwd;
@@ -359,7 +380,8 @@ impl State {
 
     /// Case-insensitive substring match of the Files-panel text filter
     /// against each listed entry's name. Empty search matches everything.
-    /// Like the hidden/dotfile filters, hiding the selected row deselects it.
+    /// Like the hidden/dotfile filters, hiding the selected row deselects it
+    /// (and cancels renaming it).
     pub fn refresh_browser_files_filter(&mut self) {
         let needle = self.ui.files_search.to_lowercase();
 
@@ -381,6 +403,18 @@ impl State {
                 self.selected_file = None;
             }
         }
+        // Likewise an in-place rename of a row that's gone (deleted by a
+        // command, say) is abandoned.
+        if let Some(r) = &self.ui.rename {
+            let shown = self
+                .ui
+                .browser_files_filter
+                .iter()
+                .any(|&i| self.browser_files[i].path == r.path);
+            if !shown {
+                self.ui.rename = None;
+            }
+        }
     }
 
     /// Select the Files-panel row for `path` and read its details. Leaves
@@ -391,6 +425,45 @@ impl State {
             .iter()
             .find(|f| f.path == path)
             .and_then(FileDetails::read);
+    }
+
+    /// Swap the Files-panel row for `path` to an edit box holding its name.
+    pub fn start_rename(&mut self, path: &Path) {
+        self.ui.rename = self
+            .browser_files
+            .iter()
+            .find(|f| f.path == path)
+            .map(|f| FileRename {
+                path: f.path.clone(),
+                name: f.disp_name.clone(),
+                focused: false,
+            });
+    }
+
+    /// Finish an in-place rename, applying the edited name. A blank or
+    /// unchanged name leaves the entry as it was; a failure is reported in
+    /// the output pane. The renamed entry stays selected if it was.
+    pub fn commit_rename(&mut self) {
+        let Some(r) = self.ui.rename.take() else {
+            return;
+        };
+        if r.name.trim().is_empty() {
+            return;
+        }
+        match crate::files::rename_entry(&r.path, &r.name) {
+            Ok(new_path) if new_path != r.path => {
+                let selected = self.selected_file.as_ref().is_some_and(|d| d.path == r.path);
+                self.refresh_browser_files();
+                if selected {
+                    self.select_file(&new_path);
+                }
+            }
+            Ok(_) => {}
+            Err(e) => self.push_out(
+                format!("rename: can't rename {}: {e}", r.path.display()),
+                OutType::StdErr,
+            ),
+        }
     }
 
     /// Snapshot of the active tab's recall cursors. Returned by value so

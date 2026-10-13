@@ -225,9 +225,98 @@ pub fn open_with_default_app(path: &Path) -> io::Result<()> {
     shell::quiet_command(program).arg(path).spawn().map(|_| ())
 }
 
+/// Rename `path` to `new_name` within its own directory, as a file manager's
+/// in-place rename does, returning the new path. Surrounding spaces are
+/// trimmed (and on Windows, trailing dots, which it would drop anyway).
+///
+/// A name with a path separator is refused, since it would move the entry
+/// rather than rename it; so is one that's taken, since `fs::rename` silently
+/// replaces an existing file. A change of case alone is allowed: on a
+/// case-insensitive filesystem the "existing" entry is this one.
+pub fn rename_entry(path: &Path, new_name: &str) -> io::Result<PathBuf> {
+    let mut name = new_name.trim();
+    if cfg!(windows) {
+        name = name.trim_end_matches(['.', ' ']);
+    }
+    let seps: &[char] = if cfg!(windows) { &['/', '\\'] } else { &['/'] };
+    if name.is_empty() || name == "." || name == ".." || name.contains(seps) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("\"{new_name}\" isn't a valid name"),
+        ));
+    }
+    let (Some(parent), Some(old_name)) = (path.parent(), path.file_name()) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "can't rename a filesystem root",
+        ));
+    };
+    if old_name == name {
+        return Ok(path.to_path_buf());
+    }
+
+    let new_path = parent.join(name);
+    // Another entry with exactly this name, or (on a case-insensitive
+    // filesystem) one that differs from it in more than case.
+    let exact = fs::read_dir(parent)?
+        .flatten()
+        .any(|e| e.file_name() == name);
+    let case_only = old_name.to_string_lossy().to_lowercase() == name.to_lowercase();
+    if exact || (!case_only && fs::symlink_metadata(&new_path).is_ok()) {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("{name} already exists"),
+        ));
+    }
+
+    fs::rename(path, &new_path)?;
+    Ok(new_path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A fresh, empty scratch dir for one test.
+    fn scratch(test: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "shell_gui_{test}_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn renames_in_place() {
+        let dir = scratch("renames_in_place");
+        let a = dir.join("a.txt");
+        fs::write(&a, "a").unwrap();
+        fs::write(dir.join("b.txt"), "b").unwrap();
+
+        // Taken names and separators are refused; nothing moves.
+        assert!(rename_entry(&a, "b.txt").is_err());
+        assert!(rename_entry(&a, "sub/c.txt").is_err());
+        assert!(rename_entry(&a, "  ").is_err());
+        assert_eq!(fs::read_to_string(dir.join("b.txt")).unwrap(), "b");
+
+        let c = rename_entry(&a, " c.md ").unwrap();
+        assert_eq!(c, dir.join("c.md"));
+        assert!(!a.exists());
+        assert_eq!(fs::read_to_string(&c).unwrap(), "a");
+
+        // A change of case alone works on any filesystem.
+        let upper = rename_entry(&c, "C.md").unwrap();
+        let names: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        assert!(names.contains(&upper.file_name().unwrap().to_owned()));
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn formats_sizes() {

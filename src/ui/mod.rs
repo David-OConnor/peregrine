@@ -7,7 +7,8 @@ use std::{
 use egui::{
     Align, CentralPanel, Color32, DragValue, FontData, FontDefinitions, FontFamily, FontId, Frame,
     Key, Layout, Panel, RichText, ScrollArea, TextEdit, TextFormat, TextStyle, TextWrapMode, Ui,
-    WidgetText, text::LayoutJob,
+    WidgetText,
+    text::{CCursor, CCursorRange, LayoutJob},
 };
 use shell::SshMode;
 
@@ -46,7 +47,7 @@ use crate::{
     markdown::is_markdown,
     path_color::{self, Part},
     render_with_tilde, run_command,
-    state::State,
+    state::{FileRename, State},
     submit_command,
 };
 
@@ -348,7 +349,7 @@ fn dir_history(state: &mut State, ui: &mut Ui) {
 fn cwd_cmd_history(state: &mut State, ui: &mut Ui) {
     panel_header(
         ui,
-        "Cmds in this dir",
+        "Cmds this dir",
         &mut state.ui.panel_vis.recent_cmds_in_dir,
     );
 
@@ -404,8 +405,8 @@ fn cmd_history(state: &mut State, ui: &mut Ui) {
         .auto_shrink([false, false])
         .show(ui, |ui| {
             // Force every widget in this column to wrap rather than
-            // expand horizontally — the panel itself is capped at 200px
-            // wide, so long command lines need to break onto extra rows.
+            // expand horizontally, so long command lines break onto extra
+            // rows instead of stretching the panel.
             ui.style_mut().wrap_mode = Some(TextWrapMode::Wrap);
 
             // Newest first.
@@ -689,11 +690,15 @@ fn term_in(state: &mut State, ui: &mut Ui) {
 /// it (same path as clicking a bookmark or recent dir); double-clicking a
 /// Markdown file opens it in a viewer window (see `crate::markdown`); any
 /// other file opens with the OS's default associated program (see
-/// [open_with_default_app]).
+/// [open_with_default_app]). Clicking the already-selected row again renames
+/// it in place (see [rename_box]): Enter or clicking away applies the new
+/// name, Escape cancels.
 fn file_browser(state: &mut State, ui: &mut Ui) {
     // Measured before anything is laid out, so the details pane is a third
     // of the whole panel rather than of what's left under the header.
     let details_height = ui.available_height() / 3.0;
+    // The whole pane, for the mouse Back/Forward buttons below.
+    let pane_rect = ui.max_rect();
 
     panel_header(ui, "Files", &mut state.ui.panel_vis.file_browser);
 
@@ -783,6 +788,14 @@ fn file_browser(state: &mut State, ui: &mut Ui) {
             go_to = downloads.clone();
         }
     });
+    // Mouse buttons 4/5 (Back/Forward) act like ⬅/➡ while the pointer is
+    // anywhere over this pane.
+    if ui.rect_contains_pointer(pane_rect) {
+        ui.input(|i| {
+            go_back |= i.pointer.button_pressed(egui::PointerButton::Extra1);
+            go_forward |= i.pointer.button_pressed(egui::PointerButton::Extra2);
+        });
+    }
     if go_up {
         state.nav_up();
     } else if go_back {
@@ -795,8 +808,10 @@ fn file_browser(state: &mut State, ui: &mut Ui) {
 
     // Listing filters. Each button is highlighted while the entries it
     // covers are shown. The Hidden attribute is Windows-only, so elsewhere
-    // only the dotfile filter appears.
+    // only the dotfile filter appears. The Open button after them does what
+    // the `open` command does: shows this dir in the OS's file manager.
     let mut filters_changed = false;
+    let mut open_clicked = false;
     ui.horizontal(|ui| {
         let mut toggle = |ui: &mut Ui, on: &mut bool, label: &str, what: &str| {
             let hover = if *on {
@@ -826,9 +841,22 @@ fn file_browser(state: &mut State, ui: &mut Ui) {
             "👁 .dotfiles",
             "files and folders whose names start with \".\"",
         );
+        if ui
+            .button("📂 Open")
+            .on_hover_text("Open this folder in the system file manager")
+            .clicked()
+        {
+            open_clicked = true;
+        }
     });
     if filters_changed {
         state.refresh_browser_files();
+    }
+    if open_clicked {
+        let cwd = state.cwd().to_path_buf();
+        shell::commands::open_dir(&cwd, &mut |kind, msg| {
+            state.push_out(msg, crate::out_type_for(kind));
+        });
     }
 
     // Text filter on names in this dir; cleared on cd (see
@@ -849,9 +877,37 @@ fn file_browser(state: &mut State, ui: &mut Ui) {
             file_details(state.selected_file.as_ref(), state.home.as_deref(), ui);
         });
 
+    // Explorer-style rename: a click on the already-selected row starts one,
+    // once it's clear the click isn't the first half of a double-click. Any
+    // other press in the meantime calls it off.
+    let (now, pressed) = ui.input(|i| (i.time, i.pointer.any_pressed()));
+    let dbl_click_delay = ui
+        .ctx()
+        .options(|o| o.input_options.max_double_click_delay);
+    if pressed {
+        state.ui.rename_pending = None;
+    }
+    if let Some((path, t)) = state.ui.rename_pending.clone() {
+        let wait = t + dbl_click_delay - now;
+        if wait > 0.0 {
+            ui.ctx().request_repaint_after_secs(wait as f32);
+        } else {
+            state.ui.rename_pending = None;
+            if state.selected_file.as_ref().is_some_and(|d| d.path == path) {
+                state.start_rename(&path);
+            }
+        }
+    }
+
     let selected = state.selected_file.as_ref().map(|d| d.path.as_path());
     let dark = ui.visuals().dark_mode;
     let mut action: Option<ListAction> = None;
+    // A click on the selected row, which may become a rename (see above).
+    let mut clicked_selected: Option<PathBuf> = None;
+    // Set when the rename box loses focus: `true` to apply the new name,
+    // `false` if Escape cancelled it. Kept apart from `action` so a click on
+    // another row in the same frame can't drop the rename.
+    let mut rename_done: Option<bool> = None;
 
     ScrollArea::vertical()
         .id_salt("file_browser_scroll")
@@ -867,6 +923,12 @@ fn file_browser(state: &mut State, ui: &mut Ui) {
                 let Some(f) = state.browser_files.get(i) else {
                     continue;
                 };
+                if let Some(r) = state.ui.rename.as_mut().filter(|r| r.path == f.path) {
+                    if let Some(apply) = rename_box(ui, r, f.is_folder) {
+                        rename_done = Some(apply);
+                    }
+                    continue;
+                }
                 let text = if f.is_folder {
                     format!("📁 {}", f.disp_name)
                 } else {
@@ -899,12 +961,63 @@ fn file_browser(state: &mut State, ui: &mut Ui) {
                         ListAction::OpenFile(f.path.clone())
                     });
                 } else if resp.clicked() {
-                    action = Some(ListAction::SelectFile(f.path.clone()));
+                    if selected == Some(f.path.as_path()) {
+                        clicked_selected = Some(f.path.clone());
+                    } else {
+                        action = Some(ListAction::SelectFile(f.path.clone()));
+                    }
                 }
             }
         });
 
+    match rename_done {
+        Some(true) => state.commit_rename(),
+        Some(false) => state.ui.rename = None,
+        None => {}
+    }
+    if let Some(path) = clicked_selected {
+        state.ui.rename_pending = Some((path, now));
+        ui.ctx().request_repaint_after_secs(dbl_click_delay as f32);
+    }
     apply_action(state, action);
+}
+
+/// The edit box that stands in for a Files row while it's being renamed.
+/// Returns `Some(true)` once editing ends with Enter or a click elsewhere,
+/// and `Some(false)` if Escape cancelled it.
+fn rename_box(ui: &mut Ui, r: &mut FileRename, is_folder: bool) -> Option<bool> {
+    let id = ui.make_persistent_id("file_rename");
+    ui.horizontal(|ui| {
+        if is_folder {
+            ui.label(RichText::new("📁").monospace());
+        }
+        let mut out = TextEdit::singleline(&mut r.name)
+            .id(id)
+            .font(TextStyle::Monospace)
+            .desired_width(f32::INFINITY)
+            .show(ui);
+        if !r.focused {
+            // Like Explorer, select the name but not its extension, so typing
+            // replaces just the name; a folder's whole name is selected.
+            r.focused = true;
+            out.response.request_focus();
+            let end = if is_folder {
+                r.name.chars().count()
+            } else {
+                Path::new(&r.name)
+                    .file_stem()
+                    .map_or(0, |s| s.to_string_lossy().chars().count())
+            };
+            out.state
+                .cursor
+                .set_char_range(Some(CCursorRange::two(CCursor::new(0), CCursor::new(end))));
+            out.state.store(ui.ctx(), id);
+        }
+        out.response
+            .lost_focus()
+            .then(|| !ui.input(|i| i.key_pressed(Key::Escape)))
+    })
+    .inner
 }
 
 /// The Files panel's lower pane: type, size, dates and attributes of the
@@ -1132,14 +1245,13 @@ fn remote_form(state: &mut State, ui: &mut Ui) {
 /// active StateUi.
 fn panel_toggles(state: &mut State, ui: &mut Ui) {
     ui.horizontal(|ui| {
-        ui.label("Panels:");
         let v = &mut state.ui.panel_vis;
         ui.toggle_value(&mut v.bookmarks, "Bookmarks");
         ui.toggle_value(&mut v.recent_dirs, "Recent dirs");
         ui.toggle_value(&mut v.file_browser, "Files");
         ui.toggle_value(&mut v.remote_terminals, "Remote");
         ui.toggle_value(&mut v.recent_cmds, "Cmd history");
-        ui.toggle_value(&mut v.recent_cmds_in_dir, "In this dir");
+        ui.toggle_value(&mut v.recent_cmds_in_dir, "Cmds this dir");
     });
 }
 
@@ -1474,11 +1586,9 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
     }
 
     if state.ui.panel_vis.recent_cmds {
-        // Cap the cmd-history panel at 200px wide so long commands don't
-        // blow out its column; rows wrap inside it instead. `max_size`
-        // still allows shrinking via the drag handle, and the central
-        // reserve keeps it from crowding out the terminal column.
-        let max = central_reserve(ui, RIGHT_COL_WIDTH);
+        // Long commands wrap inside the panel (see [cmd_history]) rather
+        // than widening it, so it stays at whatever width it's dragged to.
+        let max = central_reserve(ui, f32::INFINITY);
         let r = Panel::right("cmd_history_panel")
             .resizable(true)
             .default_size(prev.recent_cmds.unwrap_or(RIGHT_COL_WIDTH))
