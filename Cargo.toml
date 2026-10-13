@@ -26,13 +26,25 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 
 shell = { path = "../shell" }
 
+# Files panel Deep search (see `src/deep_search.rs`): ripgrep's own library
+# crates, so results match what `rg` finds. `ignore` is its parallel,
+# .gitignore-aware directory walker; `grep-searcher` and `grep-regex` its
+# line-oriented search.
+grep-matcher = "0.1.9"
+grep-regex = "0.1.14"
+grep-searcher = "0.1.17"
+ignore = "0.4.33"
+
 # Files panel (see `src/files.rs`): `ShellExecuteW` opens a file with its default
 # program, as an Explorer double-click does; `SHGetFileInfoW` gives Explorer's
-# type name ("Text Document") for the details pane. Same version `shell` uses,
-# so this adds nothing new to the build.
+# type name ("Text Document") for the details pane; the drive functions list
+# "This PC" for the drive menu. Same version `shell` uses, so this adds nothing
+# new to the build.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Storage_FileSystem",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_WindowsProgramming",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }

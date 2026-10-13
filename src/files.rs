@@ -2,7 +2,7 @@
 //! the details shown for the selected row.
 
 use std::{
-    fs, io,
+    env, fs, io,
     path::{Path, PathBuf},
     time::SystemTime,
 };
@@ -66,6 +66,33 @@ impl FileDetails {
             link_target,
         })
     }
+
+    /// [Self::read] for a file Deep search found, which (being in a subdir,
+    /// usually) has no row in the listing to read from.
+    pub fn read_file(path: &Path) -> Option<Self> {
+        let md = fs::metadata(path).ok()?;
+        Self::read(&BrowserFile {
+            path: path.to_path_buf(),
+            disp_name: path.file_name()?.to_string_lossy().into_owned(),
+            is_folder: false,
+            is_executable: is_executable(path, &md),
+            hidden_attr: false,
+        })
+    }
+}
+
+/// Same test `shell` uses for the listing's [BrowserFile::is_executable]:
+/// Unix +x, or on Windows an `.exe` or `.msi`.
+#[cfg(unix)]
+fn is_executable(_path: &Path, md: &fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    md.permissions().mode() & 0o111 != 0
+}
+
+#[cfg(not(unix))]
+fn is_executable(path: &Path, _md: &fs::Metadata) -> bool {
+    path.extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("exe") || e.eq_ignore_ascii_case("msi"))
 }
 
 #[cfg(windows)]
@@ -271,6 +298,208 @@ pub fn rename_entry(path: &Path, new_name: &str) -> io::Result<PathBuf> {
 
     fs::rename(path, &new_path)?;
     Ok(new_path)
+}
+
+/// One of the Files panel's jump-to buttons.
+pub struct Shortcut {
+    pub glyph: &'static str,
+    pub hover: &'static str,
+    /// `None` when it can't be worked out (no home dir); the button is then
+    /// shown disabled, so the row's layout doesn't shift.
+    pub dir: Option<PathBuf>,
+}
+
+/// The Files panel's jump-to buttons that go to an ordinary dir, in display
+/// order. Home, Desktop and Downloads are the same everywhere; the others are
+/// each OS's counterpart of the same place (see [app_data], [programs] and
+/// [trash_dir]). Windows has no single root, and its Recycle Bin isn't a
+/// listable dir, so there those two are the drive menu ([drives]) and
+/// [open_recycle_bin] instead, and aren't listed here.
+pub fn shortcuts(home: Option<&Path>) -> Vec<Shortcut> {
+    let in_home = |sub: &str| home.map(|h| h.join(sub));
+    #[allow(unused_mut)]
+    let mut list = vec![
+        Shortcut {
+            glyph: "🏠",
+            hover: "Home directory",
+            dir: home.map(Path::to_path_buf),
+        },
+        app_data(home),
+        Shortcut {
+            glyph: "🖥",
+            hover: "Desktop",
+            dir: in_home("Desktop"),
+        },
+        Shortcut {
+            glyph: "📥",
+            hover: "Downloads",
+            dir: in_home("Downloads"),
+        },
+        programs(),
+    ];
+    #[cfg(not(windows))]
+    list.extend([
+        Shortcut {
+            glyph: "🖴",
+            hover: "Filesystem root (/)",
+            dir: Some(PathBuf::from("/")),
+        },
+        Shortcut {
+            glyph: "🗑",
+            hover: "Trash",
+            dir: trash_dir(home),
+        },
+    ]);
+    list
+}
+
+/// Per-user app data: `AppData` on Windows, `~/Library` on macOS, and the
+/// XDG tree `~/.local` elsewhere. (A Mac may have a `~/.local` too, but only
+/// from Unix tools like pipx; its own apps keep everything in `~/Library`.)
+fn app_data(home: Option<&Path>) -> Shortcut {
+    let (hover, sub) = if cfg!(windows) {
+        ("AppData", "AppData")
+    } else if cfg!(target_os = "macos") {
+        ("~/Library", "Library")
+    } else {
+        ("~/.local", ".local")
+    };
+    Shortcut {
+        glyph: "⚙",
+        hover,
+        dir: home.map(|h| h.join(sub)),
+    }
+}
+
+/// Where installed programs live: `Program Files` on Windows (from
+/// `%ProgramFiles%`, so it's the native one on a 64-bit OS), `/Applications`
+/// on macOS, and `/usr` elsewhere.
+fn programs() -> Shortcut {
+    let (hover, dir) = if cfg!(windows) {
+        let dir = env::var_os("ProgramFiles")
+            .map_or_else(|| PathBuf::from(r"C:\Program Files"), PathBuf::from);
+        ("Program Files", dir)
+    } else if cfg!(target_os = "macos") {
+        ("Applications", PathBuf::from("/Applications"))
+    } else {
+        ("/usr", PathBuf::from("/usr"))
+    };
+    Shortcut {
+        glyph: "📦",
+        hover,
+        dir: Some(dir),
+    }
+}
+
+/// The dir holding trashed items under their own names: `~/.Trash` on macOS,
+/// and elsewhere the freedesktop.org trash's `files` dir, in
+/// `$XDG_DATA_HOME` (`~/.local/share` by default). The latter only exists
+/// once something has been trashed.
+#[cfg(not(windows))]
+fn trash_dir(home: Option<&Path>) -> Option<PathBuf> {
+    if cfg!(target_os = "macos") {
+        return home.map(|h| h.join(".Trash"));
+    }
+    // The spec says to ignore a relative `$XDG_DATA_HOME`.
+    let data = env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| home.map(|h| h.join(".local/share")))?;
+    Some(data.join("Trash/files"))
+}
+
+/// Show the Recycle Bin in Explorer. It can't be listed like a dir: Windows
+/// keeps one hidden `$Recycle.Bin` per drive, holding each item under a
+/// generated name, with its real name and location in a separate file.
+#[cfg(windows)]
+pub fn open_recycle_bin() -> io::Result<()> {
+    open_with_default_app(Path::new("shell:RecycleBinFolder"))
+}
+
+/// A drive, as Explorer's "This PC" lists it.
+#[cfg(windows)]
+pub struct Drive {
+    /// e.g. `C:\`.
+    pub root: PathBuf,
+    /// 🖴 local disk, 💾 removable, 💿 optical or 🖧 network.
+    pub glyph: &'static str,
+    /// Explorer's name for it: its volume label, or failing that its kind,
+    /// then the letter, e.g. "Data (D:)" or "Local Disk (C:)".
+    pub name: String,
+}
+
+/// Every drive letter in use, A to Z.
+#[cfg(windows)]
+pub fn drives() -> Vec<Drive> {
+    use windows_sys::Win32::{
+        Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives},
+        System::WindowsProgramming::{DRIVE_CDROM, DRIVE_REMOTE, DRIVE_REMOVABLE},
+    };
+
+    // SAFETY: no arguments; returns a bitmask of the letters in use, A = bit 0.
+    let mask = unsafe { GetLogicalDrives() };
+    (0..26u8)
+        .filter(|i| mask & (1 << i) != 0)
+        .map(|i| {
+            let letter = char::from(b'A' + i);
+            let root = PathBuf::from(format!(r"{letter}:\"));
+            let wide = to_wide(&root);
+            // SAFETY: `wide` is NUL-terminated and outlives the call.
+            let kind = unsafe { GetDriveTypeW(wide.as_ptr()) };
+            let (glyph, kind_name) = match kind {
+                DRIVE_REMOVABLE => ("💾", "Removable Disk"),
+                DRIVE_CDROM => ("💿", "CD Drive"),
+                DRIVE_REMOTE => ("🖧", "Network Drive"),
+                _ => ("🖴", "Local Disk"),
+            };
+            // An unreachable server or a disc spinning up can each stall for
+            // seconds, so only drives that answer at once are asked.
+            let label = if matches!(kind, DRIVE_CDROM | DRIVE_REMOTE) {
+                None
+            } else {
+                volume_label(&wide)
+            };
+            let name = format!("{} ({letter}:)", label.as_deref().unwrap_or(kind_name));
+            Drive { root, glyph, name }
+        })
+        .collect()
+}
+
+/// The volume label of the drive at `root` (a NUL-terminated `X:\`). `None`
+/// if it has none, or (e.g. an empty card reader) no media.
+#[cfg(windows)]
+fn volume_label(root: &[u16]) -> Option<String> {
+    use std::ptr::null_mut;
+
+    use windows_sys::Win32::{
+        Storage::FileSystem::GetVolumeInformationW,
+        System::Diagnostics::Debug::{SEM_FAILCRITICALERRORS, SetThreadErrorMode},
+    };
+
+    // MAX_PATH + 1, the documented maximum.
+    let mut buf = [0u16; 261];
+    let mut old_mode = 0;
+    // SAFETY: `root` is NUL-terminated and `buf`'s length is passed with it;
+    // the other out-params are documented as optional (null). The error mode
+    // stops a drive with no media from popping up a "no disk" dialog, and is
+    // restored afterwards.
+    let ok = unsafe {
+        SetThreadErrorMode(SEM_FAILCRITICALERRORS, &mut old_mode);
+        let ok = GetVolumeInformationW(
+            root.as_ptr(),
+            buf.as_mut_ptr(),
+            buf.len() as u32,
+            null_mut(),
+            null_mut(),
+            null_mut(),
+            null_mut(),
+            0,
+        );
+        SetThreadErrorMode(old_mode, null_mut());
+        ok
+    };
+    let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    (ok != 0 && len > 0).then(|| String::from_utf16_lossy(&buf[..len]))
 }
 
 #[cfg(test)]

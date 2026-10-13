@@ -6,6 +6,7 @@
 
 mod ansi;
 mod cmd_color;
+mod deep_search;
 mod files;
 mod markdown;
 mod path_color;

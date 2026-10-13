@@ -43,7 +43,8 @@ fn panel_header(ui: &mut Ui, title: &str, visible: &mut bool) {
 use crate::{
     OutType, ansi,
     cmd_color::CmdColors,
-    files::{FileDetails, format_size, open_with_default_app},
+    deep_search::{DeepSearch, MAX_MATCHES, Row},
+    files::{self, FileDetails, format_size, open_with_default_app},
     markdown::is_markdown,
     path_color::{self, Part},
     render_with_tilde, run_command,
@@ -150,6 +151,10 @@ const RECENT_DIRS_COL_WIDTH: f32 = 175.;
 const RIGHT_COL_WIDTH: f32 = 180.;
 const CWD_HIST_COL_WIDTH: f32 = 220.;
 const BROWSER_COL_WIDTH: f32 = 200.;
+/// The Files list splits into two columns once the panel is wide enough for
+/// each to fit this many monospace characters (so the threshold follows the
+/// GUI font size). See [file_browser].
+const FILES_COL_MIN_CHARS: f32 = 26.;
 const REMOTE_COL_WIDTH: f32 = 180.;
 
 /// The main terminal output/input column must always keep at least this many
@@ -683,7 +688,8 @@ fn term_in(state: &mut State, ui: &mut Ui) {
 /// Windows `.exe`/`.msi`) are coloured green. The listing is refreshed
 /// by [State::refresh_browser_files] on every cwd change and after every
 /// command, so we just read what's already there. The search box under the
-/// hidden/dotfile toggles narrows the listing by name.
+/// hidden/dotfile toggles narrows the listing by name. When the panel is wide
+/// enough (see [FILES_COL_MIN_CHARS]) the list is laid out in two columns.
 ///
 /// Clicking a row selects it, and the bottom third of the panel shows its
 /// details (see [file_details]). Double-clicking a folder row navigates into
@@ -714,22 +720,21 @@ fn file_browser(state: &mut State, ui: &mut Ui) {
     let can_up = state.cwd().parent().is_some();
     let can_back = !state.ui.nav_back[i].is_empty();
     let can_forward = !state.ui.nav_forward[i].is_empty();
-    // Common-destination shortcuts. Home comes straight from `state.home`;
-    // Desktop/Downloads are the conventional sub-dirs that exist on both
-    // Windows and Linux; AppData is added on Windows only. Each is only
-    // enabled when the target actually exists, so we never `cd` into a
-    // missing dir and push a diagnostic.
+    // Common-destination shortcuts (see [files::shortcuts]): 🏠 Home,
+    // ⚙ app data, 🖥 Desktop, 📥 Downloads, 📦 programs, 🖴 root, 🗑 trash.
+    // Each is only enabled when the target actually exists, so we never `cd`
+    // into a missing dir and push a diagnostic. On Windows, 🖴 is a menu of
+    // drives and 🗑 opens the Recycle Bin in Explorer.
     let home = state.home.clone();
-    let desktop = home.as_ref().map(|h| h.join("Desktop"));
-    // AppData is Windows-only, so its button only exists there.
-    #[cfg(windows)]
-    let appdata = home.as_ref().map(|h| h.join("AppData"));
-    let downloads = home.as_ref().map(|h| h.join("Downloads"));
+    let shortcuts = files::shortcuts(home.as_deref());
     let mut go_up = false;
     let mut go_back = false;
     let mut go_forward = false;
     let mut go_to: Option<PathBuf> = None;
-    ui.horizontal(|ui| {
+    #[cfg(windows)]
+    let mut open_bin = false;
+    // Wraps so the shortcuts drop to a second row in a narrow panel.
+    ui.horizontal_wrapped(|ui| {
         if ui
             .add_enabled(can_up, egui::Button::new("⬆"))
             .on_hover_text("Parent directory")
@@ -751,43 +756,46 @@ fn file_browser(state: &mut State, ui: &mut Ui) {
         {
             go_forward = true;
         }
-        // Glyph buttons: 🏠 Home, ⚙ AppData (Windows), 🖥 Desktop, 📥 Downloads.
-        let home_ok = home.as_ref().is_some_and(|h| h.is_dir());
-        if ui
-            .add_enabled(home_ok, egui::Button::new("🏠"))
-            .on_hover_text("Home directory")
-            .clicked()
-        {
-            go_to = home.clone();
+        for s in shortcuts {
+            let ok = s.dir.as_ref().is_some_and(|d| d.is_dir());
+            if ui
+                .add_enabled(ok, egui::Button::new(s.glyph))
+                .on_hover_text(s.hover)
+                .clicked()
+            {
+                go_to = s.dir;
+            }
         }
         #[cfg(windows)]
         {
-            let appdata_ok = appdata.as_ref().is_some_and(|d| d.is_dir());
+            // Read afresh each frame the menu is open, so a USB stick
+            // plugged in meanwhile shows up. A drive with no media is still
+            // listed, as in Explorer; picking it reports the `cd` error.
+            ui.menu_button("🖴", |ui| {
+                for d in files::drives() {
+                    if ui.button(format!("{} {}", d.glyph, d.name)).clicked() {
+                        go_to = Some(d.root);
+                    }
+                }
+            })
+            .response
+            .on_hover_text("This PC: devices and drives");
             if ui
-                .add_enabled(appdata_ok, egui::Button::new("⚙"))
-                .on_hover_text("AppData")
+                .button("🗑")
+                .on_hover_text("Recycle Bin (opens in Explorer)")
                 .clicked()
             {
-                go_to = appdata.clone();
+                open_bin = true;
             }
         }
-        let desktop_ok = desktop.as_ref().is_some_and(|d| d.is_dir());
-        if ui
-            .add_enabled(desktop_ok, egui::Button::new("🖥"))
-            .on_hover_text("Desktop")
-            .clicked()
-        {
-            go_to = desktop.clone();
-        }
-        let downloads_ok = downloads.as_ref().is_some_and(|d| d.is_dir());
-        if ui
-            .add_enabled(downloads_ok, egui::Button::new("📥"))
-            .on_hover_text("Downloads")
-            .clicked()
-        {
-            go_to = downloads.clone();
-        }
     });
+    #[cfg(windows)]
+    if open_bin && let Err(e) = files::open_recycle_bin() {
+        state.push_out(
+            format!("open: failed to open the Recycle Bin: {e}"),
+            OutType::StdErr,
+        );
+    }
     // Mouse buttons 4/5 (Back/Forward) act like ⬅/➡ while the pointer is
     // anywhere over this pane.
     if ui.rect_contains_pointer(pane_rect) {
@@ -838,11 +846,11 @@ fn file_browser(state: &mut State, ui: &mut Ui) {
         toggle(
             ui,
             &mut state.ui.show_dotfiles,
-            "👁 .dotfiles",
+            "👁 .dot",
             "files and folders whose names start with \".\"",
         );
         if ui
-            .button("📂 Open")
+            .button("📂 Native browser")
             .on_hover_text("Open this folder in the system file manager")
             .clicked()
         {
@@ -864,6 +872,7 @@ fn file_browser(state: &mut State, ui: &mut Ui) {
     if search_box(ui, &mut state.ui.files_search, "files_search") {
         state.refresh_browser_files_filter();
     }
+    deep_search_bar(state, ui);
 
     ui.separator();
 
@@ -876,6 +885,14 @@ fn file_browser(state: &mut State, ui: &mut Ui) {
         .show_inside(ui, |ui| {
             file_details(state.selected_file.as_ref(), state.home.as_deref(), ui);
         });
+
+    // While a Deep search is set, its results stand in for the listing.
+    if let Some(search) = &state.deep_search {
+        let selected = state.selected_file.as_ref().map(|d| d.path.as_path());
+        let action = deep_search_results(search, &state.ui.files_search, selected, ui);
+        apply_action(state, action);
+        return;
+    }
 
     // Explorer-style rename: a click on the already-selected row starts one,
     // once it's clear the click isn't the first half of a double-click. Any
@@ -919,15 +936,15 @@ fn file_browser(state: &mut State, ui: &mut Ui) {
             if state.ui.browser_files_filter.is_empty() && !state.ui.files_search.is_empty() {
                 ui.label(RichText::new("No matches.").italics().weak());
             }
-            for &i in &state.ui.browser_files_filter {
+            let mut row = |ui: &mut Ui, i: usize| {
                 let Some(f) = state.browser_files.get(i) else {
-                    continue;
+                    return;
                 };
                 if let Some(r) = state.ui.rename.as_mut().filter(|r| r.path == f.path) {
                     if let Some(apply) = rename_box(ui, r, f.is_folder) {
                         rename_done = Some(apply);
                     }
-                    continue;
+                    return;
                 }
                 let text = if f.is_folder {
                     format!("📁 {}", f.disp_name)
@@ -945,7 +962,7 @@ fn file_browser(state: &mut State, ui: &mut Ui) {
                     rich = rich.color(COLOR_EXECUTABLE);
                 }
                 // Full width so the whole row is clickable and the selection
-                // highlight spans the panel. Long names are truncated; the
+                // highlight spans the column. Long names are truncated; the
                 // details pane shows the full name.
                 let row = egui::Button::selectable(selected == Some(f.path.as_path()), rich)
                     .truncate()
@@ -967,6 +984,30 @@ fn file_browser(state: &mut State, ui: &mut Ui) {
                         action = Some(ListAction::SelectFile(f.path.clone()));
                     }
                 }
+            };
+
+            // Two columns once each fits FILES_COL_MIN_CHARS characters.
+            let font = TextStyle::Monospace.resolve(ui.style());
+            let char_width = ui.ctx().fonts_mut(|f| f.glyph_width(&font, '0'));
+            let col_gap = ui.spacing().item_spacing.x;
+            let two_cols = ui.available_width() >= 2.0 * FILES_COL_MIN_CHARS * char_width + col_gap;
+            let rows = &state.ui.browser_files_filter;
+            if two_cols {
+                // Filled down the left column first, then the right, like
+                // `ls`, so the folders stay together at the top left.
+                let (left, right) = rows.split_at(rows.len().div_ceil(2));
+                ui.columns(2, |cols| {
+                    for &i in left {
+                        row(&mut cols[0], i);
+                    }
+                    for &i in right {
+                        row(&mut cols[1], i);
+                    }
+                });
+            } else {
+                for &i in rows {
+                    row(ui, i);
+                }
             }
         });
 
@@ -986,7 +1027,9 @@ fn file_browser(state: &mut State, ui: &mut Ui) {
 /// Returns `Some(true)` once editing ends with Enter or a click elsewhere,
 /// and `Some(false)` if Escape cancelled it.
 fn rename_box(ui: &mut Ui, r: &mut FileRename, is_folder: bool) -> Option<bool> {
-    let id = ui.make_persistent_id("file_rename");
+    // Not derived from `ui`'s id, so it survives the row moving between the
+    // list's columns (e.g. when a refresh changes the row count).
+    let id = egui::Id::new("file_rename");
     ui.horizontal(|ui| {
         if is_folder {
             ui.label(RichText::new("📁").monospace());
@@ -1018,6 +1061,213 @@ fn rename_box(ui: &mut Ui, r: &mut FileRename, is_folder: bool) -> Option<bool> 
             .then(|| !ui.input(|i| i.key_pressed(Key::Escape)))
     })
     .inner
+}
+
+/// How long Deep search waits after the last keystroke before searching, so
+/// it doesn't walk the whole tree once per letter typed.
+const DEEP_SEARCH_DELAY: f64 = 0.3;
+
+/// The Files panel's Deep search box and its regex toggle (see
+/// `crate::deep_search`). A search starts once typing pauses for
+/// [DEEP_SEARCH_DELAY], or at once on Enter, which also re-runs an unchanged
+/// one; clearing the box ends it. Also takes in the running search's latest
+/// results.
+fn deep_search_bar(state: &mut State, ui: &mut Ui) {
+    let now = ui.input(|i| i.time);
+    let mut run_now = false;
+    ui.horizontal(|ui| {
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let regex = &mut state.ui.deep_search_regex;
+            if ui
+                .add(egui::Button::selectable(*regex, ".*"))
+                .on_hover_text("Treat the Deep search as a regular expression, not plain text")
+                .clicked()
+            {
+                *regex = !*regex;
+                run_now = true;
+            }
+            let resp = ui
+                .add(
+                    TextEdit::singleline(&mut state.ui.deep_search)
+                        .hint_text("Deep search...")
+                        .desired_width(f32::INFINITY)
+                        .id_salt("deep_search"),
+                )
+                .on_hover_text(
+                    "Search the contents of every file in this folder and its subfolders, \
+                     as ripgrep does: hidden and .gitignored files are skipped. \
+                     Case-insensitive unless the search has a capital letter.",
+                );
+            if resp.changed() {
+                if state.ui.deep_search.is_empty() {
+                    run_now = true;
+                } else {
+                    state.ui.deep_search_edited = Some(now);
+                }
+            }
+            if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                run_now = true;
+            }
+        });
+    });
+
+    if run_now {
+        state.start_deep_search(ui.ctx());
+    } else if let Some(t) = state.ui.deep_search_edited {
+        let wait = t + DEEP_SEARCH_DELAY - now;
+        if wait > 0.0 {
+            ui.ctx().request_repaint_after_secs(wait as f32);
+        } else {
+            state.start_deep_search(ui.ctx());
+        }
+    }
+    if let Some(s) = &mut state.deep_search {
+        s.poll();
+    }
+}
+
+/// `n` and the noun for it, e.g. `1 file`, `3 files`.
+fn plural(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
+/// The Files list while a Deep search is set: a status line, then each file
+/// with matches (its path relative to the searched dir, and how many) above
+/// its matching lines, numbered, with the matches highlighted. `name_filter`
+/// (the panel's Search box) narrows the files by that path. Clicking a row
+/// selects its file; double-clicking opens it, as in the listing.
+fn deep_search_results(
+    search: &DeepSearch,
+    name_filter: &str,
+    selected: Option<&Path>,
+    ui: &mut Ui,
+) -> Option<ListAction> {
+    if let Some(e) = &search.error {
+        ui.label(RichText::new(format!("Invalid search: {e}")).color(ui.visuals().error_fg_color));
+        return None;
+    }
+    let rel = |p: &Path| {
+        p.strip_prefix(&search.root)
+            .unwrap_or(p)
+            .display()
+            .to_string()
+    };
+
+    let rows: Vec<Row> = if name_filter.is_empty() {
+        search.rows.clone()
+    } else {
+        let needle = name_filter.to_lowercase();
+        let keep: Vec<bool> = search
+            .hits
+            .iter()
+            .map(|h| rel(&h.path).to_lowercase().contains(&needle))
+            .collect();
+        search
+            .rows
+            .iter()
+            .copied()
+            .filter(|&(Row::File(i) | Row::Line(i, _))| keep[i])
+            .collect()
+    };
+
+    let counts = format!(
+        "{} in {}",
+        plural(search.n_matches, "match", "matches"),
+        plural(search.hits.len(), "file", "files")
+    );
+    ui.horizontal_wrapped(|ui| {
+        let status = if !search.done() {
+            ui.spinner();
+            format!("Searching... {counts}")
+        } else if search.hits.is_empty() {
+            "No matches.".to_owned()
+        } else if search.n_matches >= MAX_MATCHES {
+            format!("{counts}. Stopped at {MAX_MATCHES} matches.")
+        } else {
+            counts
+        };
+        ui.label(RichText::new(status).italics().weak());
+    });
+
+    // Every row is one line of monospace text, so only the visible ones need
+    // laying out, however many matches there are.
+    let font = TextStyle::Monospace.resolve(ui.style());
+    let row_height = ui
+        .spacing()
+        .interact_size
+        .y
+        .max(ui.text_style_height(&TextStyle::Monospace) + 2.0 * ui.spacing().button_padding.y);
+    let visuals = ui.visuals();
+    let (weak, hl_text, hl_back) = (
+        visuals.weak_text_color(),
+        visuals.selection.stroke.color,
+        visuals.selection.bg_fill,
+    );
+    let mut action = None;
+
+    ui.scope(|ui| {
+        // Rows butt up against each other, like the listing's.
+        ui.spacing_mut().item_spacing.y = 0.0;
+        ScrollArea::vertical()
+            .id_salt("deep_search_scroll")
+            .auto_shrink([false, false])
+            .show_rows(ui, row_height, rows.len(), |ui, range| {
+                for &row in &rows[range] {
+                    let (Row::File(i) | Row::Line(i, _)) = row;
+                    let hit = &search.hits[i];
+                    let text: WidgetText = match row {
+                        Row::File(_) => {
+                            let text = format!("{} ({})", rel(&hit.path), hit.lines.len());
+                            RichText::new(text).monospace().strong().into()
+                        }
+                        Row::Line(_, j) => {
+                            let m = &hit.lines[j];
+                            // Line numbers right-aligned within the file.
+                            let width =
+                                hit.lines.last().map_or(1, |l| l.line_num.to_string().len());
+                            let plain = TextFormat {
+                                font_id: font.clone(),
+                                color: Color32::PLACEHOLDER,
+                                ..Default::default()
+                            };
+                            let mut job = LayoutJob::default();
+                            job.append(
+                                &format!("  {:>width$}: ", m.line_num),
+                                0.0,
+                                TextFormat {
+                                    color: weak,
+                                    ..plain.clone()
+                                },
+                            );
+                            let mut at = 0;
+                            for r in &m.ranges {
+                                job.append(&m.text[at..r.start], 0.0, plain.clone());
+                                let hl = TextFormat {
+                                    color: hl_text,
+                                    background: hl_back,
+                                    ..plain.clone()
+                                };
+                                job.append(&m.text[r.clone()], 0.0, hl);
+                                at = r.end;
+                            }
+                            job.append(&m.text[at..], 0.0, plain);
+                            job.into()
+                        }
+                    };
+                    let is_selected = matches!(row, Row::File(_)) && selected == Some(&hit.path);
+                    let button = egui::Button::selectable(is_selected, text)
+                        .truncate()
+                        .min_size(egui::vec2(ui.available_width(), row_height));
+                    let resp = ui.add(button);
+                    if resp.double_clicked() {
+                        action = Some(ListAction::OpenFile(hit.path.clone()));
+                    } else if resp.clicked() {
+                        action = Some(ListAction::SelectFile(hit.path.clone()));
+                    }
+                }
+            });
+    });
+    action
 }
 
 /// The Files panel's lower pane: type, size, dates and attributes of the

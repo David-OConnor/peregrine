@@ -12,8 +12,8 @@ use shell::{
 };
 
 use crate::{
-    OutItem, OutType, cmd_color::CmdColors, files::FileDetails, markdown::MarkdownViewers,
-    path_color, ui,
+    OutItem, OutType, cmd_color::CmdColors, deep_search::DeepSearch, files::FileDetails,
+    markdown::MarkdownViewers, path_color, ui,
 };
 
 /// State specific to the GUI: the current input buffer, the captured terminal
@@ -96,6 +96,16 @@ pub struct StateUi {
     /// double-click can no longer follow, so double-clicking the selected
     /// row still opens it. Dropped by any other press in the meantime.
     pub rename_pending: Option<(PathBuf, f64)>,
+    /// Files-panel Deep search text, looked for in the contents of every
+    /// file under the listed dir (see [State::start_deep_search]). Empty =
+    /// off, and the panel lists the dir as usual. Cleared on cd, like
+    /// `files_search`.
+    pub deep_search: String,
+    /// When `deep_search` was last edited (egui's `InputState::time`), until
+    /// the search it calls for starts once typing pauses.
+    pub deep_search_edited: Option<f64>,
+    /// Treat `deep_search` as a regex rather than literal text.
+    pub deep_search_regex: bool,
 
     /// Remote-panel "add / edit remote" form state. `remote_form_open` shows
     /// the form; the text fields hold the in-progress entry; `remote_edit_idx`
@@ -137,6 +147,9 @@ impl Default for StateUi {
             browser_files_filter: Vec::new(),
             rename: None,
             rename_pending: None,
+            deep_search: String::new(),
+            deep_search_edited: None,
+            deep_search_regex: false,
             remote_form_open: false,
             remote_host: String::new(),
             remote_port: String::new(),
@@ -190,6 +203,9 @@ pub struct State {
     /// shows. Re-read whenever `browser_files` is, and cleared once the path
     /// is no longer in the listing (e.g. after a cd or tab switch).
     pub selected_file: Option<FileDetails>,
+    /// The Files panel's Deep search for `ui.deep_search`, running or done.
+    /// While set, the panel lists its results instead of `browser_files`.
+    pub deep_search: Option<DeepSearch>,
     /// Where bookmarks + recent dirs are persisted.
     pub state_path: PathBuf,
     /// Cached git branch for each tab's cwd (parallel to `cwd`). `None`
@@ -244,6 +260,7 @@ impl Default for State {
             browser_files: Vec::new(),
             browser_dir: PathBuf::new(),
             selected_file: None,
+            deep_search: None,
             state_path: save_data::default_path()
                 .unwrap_or_else(|| PathBuf::from(save_data::FILENAME)),
             branch: vec![branch],
@@ -356,14 +373,17 @@ impl State {
     /// `show_dotfiles` filters exclude are dropped, which also deselects a
     /// now-filtered row. An entry that is both Hidden and a dotfile (e.g.
     /// `.git`) shows if either filter is on. Moving to a different dir
-    /// clears the text filter, which only makes sense for the dir it was
-    /// typed in.
+    /// clears the text filter and Deep search, which only make sense for the
+    /// dir they were typed in.
     pub fn refresh_browser_files(&mut self) {
         let cwd = self.cwd().to_path_buf();
         if cwd != self.browser_dir {
             self.ui.files_search.clear();
             self.ui.rename = None;
             self.ui.rename_pending = None;
+            self.ui.deep_search.clear();
+            self.ui.deep_search_edited = None;
+            self.deep_search = None;
         }
         self.browser_files = read_browser_files(&cwd);
         self.browser_dir = cwd;
@@ -381,7 +401,8 @@ impl State {
     /// Case-insensitive substring match of the Files-panel text filter
     /// against each listed entry's name. Empty search matches everything.
     /// Like the hidden/dotfile filters, hiding the selected row deselects it
-    /// (and cancels renaming it).
+    /// (and cancels renaming it), unless Deep search results are shown
+    /// instead and it's one of those.
     pub fn refresh_browser_files_filter(&mut self) {
         let needle = self.ui.files_search.to_lowercase();
 
@@ -394,11 +415,14 @@ impl State {
             .collect();
 
         if let Some(sel) = &self.selected_file {
-            let shown = self
-                .ui
-                .browser_files_filter
-                .iter()
-                .any(|&i| self.browser_files[i].path == sel.path);
+            let shown = match &self.deep_search {
+                Some(s) => s.has_file(&sel.path),
+                None => self
+                    .ui
+                    .browser_files_filter
+                    .iter()
+                    .any(|&i| self.browser_files[i].path == sel.path),
+            };
             if !shown {
                 self.selected_file = None;
             }
@@ -418,13 +442,40 @@ impl State {
     }
 
     /// Select the Files-panel row for `path` and read its details. Leaves
-    /// nothing selected if `path` isn't in the current listing.
+    /// nothing selected if `path` isn't in the current listing, or while
+    /// Deep search results are shown, isn't one of those.
     pub fn select_file(&mut self, path: &Path) {
-        self.selected_file = self
-            .browser_files
-            .iter()
-            .find(|f| f.path == path)
-            .and_then(FileDetails::read);
+        self.selected_file = match &self.deep_search {
+            Some(s) if s.has_file(path) => FileDetails::read_file(path),
+            Some(_) => None,
+            None => self
+                .browser_files
+                .iter()
+                .find(|f| f.path == path)
+                .and_then(FileDetails::read),
+        };
+    }
+
+    /// Start a Deep search of the active tab's cwd for `ui.deep_search`,
+    /// replacing (and stopping) any earlier one; an empty search just ends
+    /// it, returning the panel to the dir listing. `ctx` is repainted as
+    /// results come in. The selection is kept only if it's still shown.
+    pub fn start_deep_search(&mut self, ctx: &egui::Context) {
+        let query = &self.ui.deep_search;
+        self.deep_search = (!query.is_empty()).then(|| {
+            DeepSearch::start(
+                self.cwd().to_path_buf(),
+                query,
+                self.ui.deep_search_regex,
+                ctx.clone(),
+            )
+        });
+        self.ui.deep_search_edited = None;
+        self.ui.rename = None;
+        self.ui.rename_pending = None;
+        if let Some(sel) = self.selected_file.take() {
+            self.select_file(&sel.path);
+        }
     }
 
     /// Swap the Files-panel row for `path` to an edit box holding its name.
@@ -573,6 +624,7 @@ impl State {
             browser_files: Vec::new(),
             browser_dir: PathBuf::new(),
             selected_file: None,
+            deep_search: None,
             state_path: path,
             branch,
             window_size: loaded.window_size,
