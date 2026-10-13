@@ -12,8 +12,12 @@ use shell::{
 };
 
 use crate::{
-    OutItem, OutType, cmd_color::CmdColors, deep_search::DeepSearch, files::FileDetails,
-    markdown::MarkdownViewers, path_color, ui,
+    OutItem, OutType,
+    cmd_color::CmdColors,
+    deep_search::{self, DeepSearch},
+    files::FileDetails,
+    markdown::MarkdownViewers,
+    path_color, ui,
 };
 
 /// State specific to the GUI: the current input buffer, the captured terminal
@@ -96,16 +100,16 @@ pub struct StateUi {
     /// double-click can no longer follow, so double-clicking the selected
     /// row still opens it. Dropped by any other press in the meantime.
     pub rename_pending: Option<(PathBuf, f64)>,
-    /// Files-panel Deep search text, looked for in the contents of every
-    /// file under the listed dir (see [State::start_deep_search]). Empty =
-    /// off, and the panel lists the dir as usual. Cleared on cd, like
-    /// `files_search`.
+    /// Files-panel Deep search text, looked for in the contents (or names)
+    /// of every file under the listed dir (see [State::start_deep_search]).
+    /// Empty = off, and the panel lists the dir as usual. Cleared on cd,
+    /// like `files_search`.
     pub deep_search: String,
     /// When `deep_search` was last edited (egui's `InputState::time`), until
     /// the search it calls for starts once typing pauses.
     pub deep_search_edited: Option<f64>,
-    /// Treat `deep_search` as a regex rather than literal text.
-    pub deep_search_regex: bool,
+    /// Regex or not, names or contents: the toggles beside the box.
+    pub deep_search_opts: deep_search::Options,
 
     /// Remote-panel "add / edit remote" form state. `remote_form_open` shows
     /// the form; the text fields hold the in-progress entry; `remote_edit_idx`
@@ -149,7 +153,7 @@ impl Default for StateUi {
             rename_pending: None,
             deep_search: String::new(),
             deep_search_edited: None,
-            deep_search_regex: false,
+            deep_search_opts: deep_search::Options::default(),
             remote_form_open: false,
             remote_host: String::new(),
             remote_port: String::new(),
@@ -466,7 +470,7 @@ impl State {
             DeepSearch::start(
                 self.cwd().to_path_buf(),
                 query,
-                self.ui.deep_search_regex,
+                self.ui.deep_search_opts,
                 ctx.clone(),
             )
         });

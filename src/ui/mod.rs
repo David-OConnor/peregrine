@@ -1067,25 +1067,31 @@ fn rename_box(ui: &mut Ui, r: &mut FileRename, is_folder: bool) -> Option<bool> 
 /// it doesn't walk the whole tree once per letter typed.
 const DEEP_SEARCH_DELAY: f64 = 0.3;
 
-/// The Files panel's Deep search box and its regex toggle (see
+/// The Files panel's Deep search box with its regex toggle, and under it
+/// the switch between searching file names and file contents (see
 /// `crate::deep_search`). A search starts once typing pauses for
-/// [DEEP_SEARCH_DELAY], or at once on Enter, which also re-runs an unchanged
-/// one; clearing the box ends it. Also takes in the running search's latest
-/// results.
+/// [DEEP_SEARCH_DELAY], or at once on Enter (which also re-runs an
+/// unchanged one) or a toggle; clearing the box ends it. Also takes in the
+/// running search's latest results.
 fn deep_search_bar(state: &mut State, ui: &mut Ui) {
     let now = ui.input(|i| i.time);
     let mut run_now = false;
+    let opts = &mut state.ui.deep_search_opts;
     ui.horizontal(|ui| {
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let regex = &mut state.ui.deep_search_regex;
             if ui
-                .add(egui::Button::selectable(*regex, ".*"))
+                .add(egui::Button::selectable(opts.regex, ".*"))
                 .on_hover_text("Treat the Deep search as a regular expression, not plain text")
                 .clicked()
             {
-                *regex = !*regex;
+                opts.regex = !opts.regex;
                 run_now = true;
             }
+            let what = if opts.file_names {
+                "names"
+            } else {
+                "contents"
+            };
             let resp = ui
                 .add(
                     TextEdit::singleline(&mut state.ui.deep_search)
@@ -1093,11 +1099,11 @@ fn deep_search_bar(state: &mut State, ui: &mut Ui) {
                         .desired_width(f32::INFINITY)
                         .id_salt("deep_search"),
                 )
-                .on_hover_text(
-                    "Search the contents of every file in this folder and its subfolders, \
+                .on_hover_text(format!(
+                    "Search the {what} of every file in this folder and its subfolders, \
                      as ripgrep does: hidden and .gitignored files are skipped. \
-                     Case-insensitive unless the search has a capital letter.",
-                );
+                     Case-insensitive unless the search has a capital letter."
+                ));
             if resp.changed() {
                 if state.ui.deep_search.is_empty() {
                     run_now = true;
@@ -1109,6 +1115,14 @@ fn deep_search_bar(state: &mut State, ui: &mut Ui) {
                 run_now = true;
             }
         });
+    });
+    ui.horizontal(|ui| {
+        let before = opts.file_names;
+        ui.selectable_value(&mut opts.file_names, true, "Filenames")
+            .on_hover_text("Match file names, like `rg --files` filtered by the search");
+        ui.selectable_value(&mut opts.file_names, false, "File contents")
+            .on_hover_text("Match lines inside files, like `rg <search>`");
+        run_now |= opts.file_names != before;
     });
 
     if run_now {
@@ -1131,11 +1145,31 @@ fn plural(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }
 
+/// Append `text` to `job` in the `plain` format, except for its byte
+/// `ranges` (in order, not overlapping), which get `hl`.
+fn append_highlighted(
+    job: &mut LayoutJob,
+    text: &str,
+    ranges: &[std::ops::Range<usize>],
+    plain: &TextFormat,
+    hl: &TextFormat,
+) {
+    let mut at = 0;
+    for r in ranges {
+        job.append(&text[at..r.start], 0.0, plain.clone());
+        job.append(&text[r.clone()], 0.0, hl.clone());
+        at = r.end;
+    }
+    job.append(&text[at..], 0.0, plain.clone());
+}
+
 /// The Files list while a Deep search is set: a status line, then each file
-/// with matches (its path relative to the searched dir, and how many) above
-/// its matching lines, numbered, with the matches highlighted. `name_filter`
-/// (the panel's Search box) narrows the files by that path. Clicking a row
-/// selects its file; double-clicking opens it, as in the listing.
+/// found, by its path relative to the searched dir. In file-name mode the
+/// matches in its name are highlighted; otherwise it shows how many lines
+/// matched, and those lines follow it, numbered, with the matches
+/// highlighted. `name_filter` (the panel's Search box) narrows the files by
+/// that path. Clicking a row selects its file; double-clicking opens it, as
+/// in the listing.
 fn deep_search_results(
     search: &DeepSearch,
     name_filter: &str,
@@ -1170,11 +1204,13 @@ fn deep_search_results(
             .collect()
     };
 
-    let counts = format!(
-        "{} in {}",
-        plural(search.n_matches, "match", "matches"),
-        plural(search.hits.len(), "file", "files")
-    );
+    let files = plural(search.hits.len(), "file", "files");
+    let (counts, unit) = if search.opts.file_names {
+        (files, "files")
+    } else {
+        let matches = plural(search.n_matches, "match", "matches");
+        (format!("{matches} in {files}"), "matches")
+    };
     ui.horizontal_wrapped(|ui| {
         let status = if !search.done() {
             ui.spinner();
@@ -1182,27 +1218,42 @@ fn deep_search_results(
         } else if search.hits.is_empty() {
             "No matches.".to_owned()
         } else if search.n_matches >= MAX_MATCHES {
-            format!("{counts}. Stopped at {MAX_MATCHES} matches.")
+            format!("{counts}. Stopped at {MAX_MATCHES} {unit}.")
         } else {
             counts
         };
         ui.label(RichText::new(status).italics().weak());
     });
+    if rows.is_empty() && !search.hits.is_empty() {
+        ui.label(
+            RichText::new("None of them match the Search box.")
+                .italics()
+                .weak(),
+        );
+    }
 
     // Every row is one line of monospace text, so only the visible ones need
     // laying out, however many matches there are.
-    let font = TextStyle::Monospace.resolve(ui.style());
     let row_height = ui
         .spacing()
         .interact_size
         .y
         .max(ui.text_style_height(&TextStyle::Monospace) + 2.0 * ui.spacing().button_padding.y);
     let visuals = ui.visuals();
-    let (weak, hl_text, hl_back) = (
-        visuals.weak_text_color(),
-        visuals.selection.stroke.color,
-        visuals.selection.bg_fill,
-    );
+    let plain = TextFormat {
+        font_id: TextStyle::Monospace.resolve(ui.style()),
+        color: Color32::PLACEHOLDER,
+        ..Default::default()
+    };
+    let weak = TextFormat {
+        color: visuals.weak_text_color(),
+        ..plain.clone()
+    };
+    let hl = TextFormat {
+        color: visuals.selection.stroke.color,
+        background: visuals.selection.bg_fill,
+        ..plain.clone()
+    };
     let mut action = None;
 
     ui.scope(|ui| {
@@ -1216,6 +1267,23 @@ fn deep_search_results(
                     let (Row::File(i) | Row::Line(i, _)) = row;
                     let hit = &search.hits[i];
                     let text: WidgetText = match row {
+                        Row::File(_) if search.opts.file_names => {
+                            // The name ends the path; its matches are
+                            // highlighted there.
+                            let path = rel(&hit.path);
+                            let name = hit.path.file_name().map(|n| n.to_string_lossy());
+                            let ranges: Vec<_> = name
+                                .filter(|n| path.ends_with(n.as_ref()))
+                                .map(|n| path.len() - n.len())
+                                .map_or_else(Vec::new, |at| {
+                                    let shift =
+                                        |r: &std::ops::Range<usize>| r.start + at..r.end + at;
+                                    hit.name_ranges.iter().map(shift).collect()
+                                });
+                            let mut job = LayoutJob::default();
+                            append_highlighted(&mut job, &path, &ranges, &plain, &hl);
+                            job.into()
+                        }
                         Row::File(_) => {
                             let text = format!("{} ({})", rel(&hit.path), hit.lines.len());
                             RichText::new(text).monospace().strong().into()
@@ -1225,32 +1293,9 @@ fn deep_search_results(
                             // Line numbers right-aligned within the file.
                             let width =
                                 hit.lines.last().map_or(1, |l| l.line_num.to_string().len());
-                            let plain = TextFormat {
-                                font_id: font.clone(),
-                                color: Color32::PLACEHOLDER,
-                                ..Default::default()
-                            };
                             let mut job = LayoutJob::default();
-                            job.append(
-                                &format!("  {:>width$}: ", m.line_num),
-                                0.0,
-                                TextFormat {
-                                    color: weak,
-                                    ..plain.clone()
-                                },
-                            );
-                            let mut at = 0;
-                            for r in &m.ranges {
-                                job.append(&m.text[at..r.start], 0.0, plain.clone());
-                                let hl = TextFormat {
-                                    color: hl_text,
-                                    background: hl_back,
-                                    ..plain.clone()
-                                };
-                                job.append(&m.text[r.clone()], 0.0, hl);
-                                at = r.end;
-                            }
-                            job.append(&m.text[at..], 0.0, plain);
+                            job.append(&format!("  {:>width$}: ", m.line_num), 0.0, weak.clone());
+                            append_highlighted(&mut job, &m.text, &m.ranges, &plain, &hl);
                             job.into()
                         }
                     };

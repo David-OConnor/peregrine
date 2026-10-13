@@ -1,5 +1,7 @@
 //! The Files panel's Deep search: the contents of every file under the
-//! listed dir, searched the way `rg <query>` would. Uses ripgrep's own
+//! listed dir, searched the way `rg <query>` would — or with
+//! [Options::file_names], their names, like `rg --files` filtered by the
+//! query. Uses ripgrep's own
 //! library crates — `ignore` for its parallel, .gitignore-aware directory
 //! walk, `grep-searcher` and `grep-regex` for the search itself — on
 //! background threads, so the panel keeps drawing while results come in.
@@ -17,17 +19,27 @@ use std::{
 
 use grep_matcher::Matcher;
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
-use grep_searcher::{BinaryDetection, SearcherBuilder, sinks::Lossy};
-use ignore::{WalkBuilder, WalkState};
+use grep_searcher::{BinaryDetection, Searcher, SearcherBuilder, sinks::Lossy};
+use ignore::{DirEntry, WalkBuilder, WalkState};
 
-/// A search stops once it has found this many matching lines, so searching
-/// a big tree for something common can't swamp memory or the list.
+/// A search stops once it has found this many matches (matching lines, or
+/// files in file-name mode), so searching a big tree for something common
+/// can't swamp memory or the list.
 pub const MAX_MATCHES: usize = 2_000;
 /// Matching lines longer than this many chars (minified JS, say) are cut to
 /// a window around their first match.
 const MAX_LINE_CHARS: usize = 160;
 /// How many chars of such a window come before its first match.
 const LEAD_CHARS: usize = 24;
+
+/// How a search matches, set by the toggles beside the Deep search box.
+#[derive(Clone, Copy, Default)]
+pub struct Options {
+    /// The query is a regex rather than literal text.
+    pub regex: bool,
+    /// Match the query against file names rather than file contents.
+    pub file_names: bool,
+}
 
 /// One matching line, ready to draw.
 pub struct MatchLine {
@@ -43,8 +55,11 @@ pub struct MatchLine {
 /// A file with at least one match.
 pub struct FileHit {
     pub path: PathBuf,
-    /// In line order.
+    /// In line order. Empty in file-name mode.
     pub lines: Vec<MatchLine>,
+    /// In file-name mode, byte ranges of the matches in the file name (the
+    /// last part of `path`, lossily converted), for highlighting.
+    pub name_ranges: Vec<Range<usize>>,
 }
 
 /// A row of the results list: a file, or one of its matching lines (indices
@@ -61,11 +76,12 @@ pub enum Row {
 pub struct DeepSearch {
     /// The dir searched.
     pub root: PathBuf,
+    pub opts: Options,
     /// Files with matches, sorted by path.
     pub hits: Vec<FileHit>,
     /// `hits` flattened to the rows of the results list.
     pub rows: Vec<Row>,
-    /// Matching lines across `hits`.
+    /// Matches across `hits`: matching lines, or in file-name mode, files.
     pub n_matches: usize,
     /// Why the search couldn't run, e.g. an invalid regex.
     pub error: Option<String>,
@@ -76,13 +92,14 @@ pub struct DeepSearch {
 }
 
 impl DeepSearch {
-    /// Start searching the files under `root` for `query`: literal text, or
-    /// a regex if `regex`. Case-insensitive unless `query` has an uppercase
-    /// letter (ripgrep's `--smart-case`). `ctx` is asked to repaint as
-    /// results come in, and when the search finishes.
-    pub fn start(root: PathBuf, query: &str, regex: bool, ctx: egui::Context) -> Self {
+    /// Start searching the files under `root` for `query`, as `opts` says.
+    /// Case-insensitive unless `query` has an uppercase letter (ripgrep's
+    /// `--smart-case`). `ctx` is asked to repaint as results come in, and
+    /// when the search finishes.
+    pub fn start(root: PathBuf, query: &str, opts: Options, ctx: egui::Context) -> Self {
         let mut s = Self {
             root: root.clone(),
+            opts,
             hits: Vec::new(),
             rows: Vec::new(),
             n_matches: 0,
@@ -92,7 +109,7 @@ impl DeepSearch {
         };
         let matcher = RegexMatcherBuilder::new()
             .case_smart(true)
-            .fixed_strings(!regex)
+            .fixed_strings(!opts.regex)
             .line_terminator(Some(b'\n'))
             .build(query);
         let matcher = match matcher {
@@ -107,7 +124,7 @@ impl DeepSearch {
         s.rx = Some(rx);
         let cancel = s.cancel.clone();
         thread::spawn(move || {
-            search(&root, &matcher, &tx, &cancel, &ctx);
+            search(&root, &matcher, opts.file_names, &tx, &cancel, &ctx);
             // Dropping the last sender is what tells `poll` it's over.
             drop(tx);
             ctx.request_repaint();
@@ -131,7 +148,7 @@ impl DeepSearch {
                 Ok(hit) => {
                     // Kept sorted as they arrive, so rows don't jump around
                     // once the search finishes.
-                    self.n_matches += hit.lines.len();
+                    self.n_matches += hit.lines.len().max(1);
                     let i = self.hits.partition_point(|h| h.path < hit.path);
                     self.hits.insert(i, hit);
                     changed = true;
@@ -167,11 +184,13 @@ impl Drop for DeepSearch {
 
 /// Walk `root` as ripgrep does — in parallel, skipping hidden entries and
 /// whatever `.gitignore`, `.ignore` and `.rgignore` files exclude — and send
-/// each file with matches to `tx`. Returns once the walk finishes, is
-/// cancelled, or has found [MAX_MATCHES] lines.
+/// each file with matches (in its name, if `file_names`, else its contents)
+/// to `tx`. Returns once the walk finishes, is cancelled, or has found
+/// [MAX_MATCHES] matches.
 fn search(
     root: &Path,
     matcher: &RegexMatcher,
+    file_names: bool,
     tx: &Sender<FileHit>,
     cancel: &AtomicBool,
     ctx: &egui::Context,
@@ -201,29 +220,24 @@ fn search(
                 return WalkState::Continue;
             }
 
-            let mut lines = Vec::new();
-            let _ = searcher.search_path(
-                &matcher,
-                entry.path(),
-                Lossy(|line_num, line| {
-                    lines.push(match_line(&matcher, line_num, line));
-                    Ok(lines.len() < MAX_MATCHES && !cancel.load(Ordering::Relaxed))
-                }),
-            );
-            if lines.is_empty() {
+            let hit = if file_names {
+                name_hit(&matcher, entry)
+            } else {
+                contents_hit(&mut searcher, &matcher, entry, cancel)
+            };
+            let Some(mut hit) = hit else {
                 return WalkState::Continue;
-            }
+            };
 
-            let before = found.fetch_add(lines.len(), Ordering::Relaxed);
-            lines.truncate(MAX_MATCHES.saturating_sub(before));
-            let full = before + lines.len() >= MAX_MATCHES;
-            if lines.is_empty() {
+            // Each matching line counts towards the limit, or in file-name
+            // mode, each file.
+            let n = hit.lines.len().max(1);
+            let before = found.fetch_add(n, Ordering::Relaxed);
+            if before >= MAX_MATCHES {
                 return WalkState::Quit;
             }
-            let hit = FileHit {
-                path: entry.into_path(),
-                lines,
-            };
+            hit.lines.truncate(MAX_MATCHES - before);
+            let full = before + n >= MAX_MATCHES;
             // A send fails once the search has been dropped.
             if tx.send(hit).is_err() {
                 return WalkState::Quit;
@@ -236,6 +250,52 @@ fn search(
             }
         })
     });
+}
+
+/// `entry` as a [FileHit] if `matcher` matches its file name.
+fn name_hit(matcher: &RegexMatcher, entry: DirEntry) -> Option<FileHit> {
+    let name = entry.file_name().to_string_lossy();
+    let mut matched = false;
+    let mut name_ranges = Vec::new();
+    let _ = matcher.find_iter(name.as_bytes(), |m| {
+        matched = true;
+        let s = name.floor_char_boundary(m.start());
+        let e = name.ceil_char_boundary(m.end());
+        if s < e {
+            name_ranges.push(s..e);
+        }
+        true
+    });
+    drop(name);
+    matched.then(|| FileHit {
+        path: entry.into_path(),
+        lines: Vec::new(),
+        name_ranges,
+    })
+}
+
+/// `entry` as a [FileHit] if `matcher` matches any of its lines. Reading it
+/// stops early at [MAX_MATCHES] lines, or once `cancel` is set.
+fn contents_hit(
+    searcher: &mut Searcher,
+    matcher: &RegexMatcher,
+    entry: DirEntry,
+    cancel: &AtomicBool,
+) -> Option<FileHit> {
+    let mut lines = Vec::new();
+    let _ = searcher.search_path(
+        matcher,
+        entry.path(),
+        Lossy(|line_num, line| {
+            lines.push(match_line(matcher, line_num, line));
+            Ok(lines.len() < MAX_MATCHES && !cancel.load(Ordering::Relaxed))
+        }),
+    );
+    (!lines.is_empty()).then(|| FileHit {
+        path: entry.into_path(),
+        lines,
+        name_ranges: Vec::new(),
+    })
 }
 
 /// `line` (number `line_num`) as a [MatchLine], with `matcher`'s matches in
@@ -323,6 +383,19 @@ mod tests {
         assert_eq!(m.text[..m.ranges[0].start].chars().count(), LEAD_CHARS + 1);
     }
 
+    /// `s`, once it has finished.
+    fn finish(mut s: DeepSearch) -> DeepSearch {
+        for _ in 0..500 {
+            s.poll();
+            if s.done() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(s.done() && s.error.is_none());
+        s
+    }
+
     #[test]
     fn searches_a_tree() {
         let dir = std::env::temp_dir().join(format!("shell_gui_deep_{}", std::process::id()));
@@ -335,15 +408,13 @@ mod tests {
         // Each file with matches, relative to `dir`, and its first match's
         // line number.
         let run = |query: &str| {
-            let mut s = DeepSearch::start(dir.clone(), query, false, egui::Context::default());
-            for _ in 0..500 {
-                s.poll();
-                if s.done() {
-                    break;
-                }
-                thread::sleep(Duration::from_millis(10));
-            }
-            assert!(s.done() && s.error.is_none());
+            let opts = Options::default();
+            let s = finish(DeepSearch::start(
+                dir.clone(),
+                query,
+                opts,
+                egui::Context::default(),
+            ));
             let found: Vec<_> = s
                 .hits
                 .iter()
@@ -369,8 +440,29 @@ mod tests {
         // Smart case: an uppercase letter makes it case-sensitive.
         assert_eq!(run("Needle").0, [(PathBuf::from("a.txt"), 2)]);
 
-        let s = DeepSearch::start(dir.clone(), "(unclosed", true, egui::Context::default());
+        let opts = Options {
+            regex: true,
+            ..Default::default()
+        };
+        let s = DeepSearch::start(dir.clone(), "(unclosed", opts, egui::Context::default());
         assert!(s.done() && s.error.is_some());
+
+        // File-name mode lists the files whose names match, whatever's in
+        // them, with the matches located in the name.
+        let opts = Options {
+            file_names: true,
+            ..Default::default()
+        };
+        let s = finish(DeepSearch::start(
+            dir.clone(),
+            "b.",
+            opts,
+            egui::Context::default(),
+        ));
+        assert_eq!(s.hits.len(), 1);
+        assert_eq!(s.hits[0].path, dir.join("sub").join("b.rs"));
+        assert_eq!(s.hits[0].name_ranges, vec![Range { start: 0, end: 2 }]);
+        assert_eq!((s.rows.len(), s.n_matches), (1, 1));
 
         fs::remove_dir_all(&dir).unwrap();
     }
