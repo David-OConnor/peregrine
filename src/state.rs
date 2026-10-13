@@ -5,9 +5,10 @@ use std::{
 
 use chrono::Utc;
 use shell::{
-    BrowserFile, DirLabelLens, FontSizes, HistoryItem, NavState, OpenTabs, PanelVis, RecentDir,
-    RemoteSession, RemoteTerminal, SshMode, WindowSize, apply_completion, complete_cd_path,
-    current_branch, get_home, read_browser_files, save_data, ssh, ssh::secrets, truncate_branch,
+    BrowserFile, DirLabelLens, FontSizes, HistoryItem, NavState, OpenTabs, PanelVis, PanelWidths,
+    RecentDir, RemoteSession, RemoteTerminal, SshMode, WindowSize, apply_completion,
+    complete_cd_path, current_branch, get_home, read_browser_files, save_data, ssh, ssh::secrets,
+    truncate_branch,
 };
 
 use crate::{
@@ -58,6 +59,14 @@ pub struct StateUi {
     /// walks `recent_dirs`. See [NavState].
     pub history_nav: Vec<NavState>,
     pub panel_vis: PanelVis,
+    /// Each side panel's width as drawn last frame (`None` until it's first
+    /// shown, when nothing was saved). Persisted so the panels reopen at the
+    /// widths the user dragged them to; the saved value seeds the panel's
+    /// `default_size`, after which egui owns the live width.
+    pub panel_widths: PanelWidths,
+    /// Set while a panel edge drag has changed `panel_widths` without a save
+    /// yet; `ui::draw` saves once the pointer is released.
+    pub panel_widths_unsaved: bool,
 
     /// Per-tab browser-style back/forward navigation stacks (parallel to
     /// `State::cwd`). `nav_back` holds dirs we can return to (most recent on
@@ -111,6 +120,8 @@ impl Default for StateUi {
             cwd_history_filter: Vec::new(),
             history_nav: vec![NavState::new()],
             panel_vis: PanelVis::default(),
+            panel_widths: PanelWidths::default(),
+            panel_widths_unsaved: false,
             nav_back: vec![Vec::new()],
             nav_forward: vec![Vec::new()],
             show_hidden_attr: true,
@@ -414,6 +425,7 @@ impl State {
                 bookmarks: Some(self.bookmark_label_len),
                 recent_dirs: Some(self.recent_dir_label_len),
             },
+            self.ui.panel_widths,
             &self.state_path,
         )
     }
@@ -466,6 +478,7 @@ impl State {
 
         let mut ui = StateUi::default();
         ui.panel_vis = loaded.panel_vis;
+        ui.panel_widths = loaded.panel_widths;
         ui.active_tab = active_tab;
         ui.cli_input = vec![String::new(); n];
         ui.out = (0..n).map(|_| Vec::new()).collect();

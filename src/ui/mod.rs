@@ -1417,52 +1417,60 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
     // The side panels' text follows the "GUI font size" control.
     let gui_font_size = state.gui_font_size;
 
+    // Each side panel opens at its saved width (falling back to its default)
+    // and records the width it was drawn at, so `save` persists drags.
+    let prev = state.ui.panel_widths;
+
     if state.ui.panel_vis.bookmarks {
         let max = central_reserve(ui, f32::INFINITY);
-        Panel::left("bookmarks_panel")
+        let r = Panel::left("bookmarks_panel")
             .resizable(true)
-            .default_size(BOOKMARK_COL_WIDTH)
+            .default_size(prev.bookmarks.unwrap_or(BOOKMARK_COL_WIDTH))
             .max_size(max)
             .show_inside(ui, |ui| {
                 scale_panel_fonts(ui, gui_font_size);
                 dir_bookmarks(state, ui);
             });
+        state.ui.panel_widths.bookmarks = Some(r.response.rect.width());
     }
 
     if state.ui.panel_vis.recent_dirs {
         let max = central_reserve(ui, f32::INFINITY);
-        Panel::left("recent_dirs_panel")
+        let r = Panel::left("recent_dirs_panel")
             .resizable(true)
-            .default_size(RECENT_DIRS_COL_WIDTH)
+            .default_size(prev.recent_dirs.unwrap_or(RECENT_DIRS_COL_WIDTH))
             .max_size(max)
             .show_inside(ui, |ui| {
                 scale_panel_fonts(ui, gui_font_size);
                 dir_history(state, ui);
             });
+        state.ui.panel_widths.recent_dirs = Some(r.response.rect.width());
     }
 
     if state.ui.panel_vis.file_browser {
         let max = central_reserve(ui, f32::INFINITY);
-        Panel::left("file_browser_panel")
+        let r = Panel::left("file_browser_panel")
             .resizable(true)
-            .default_size(BROWSER_COL_WIDTH)
+            .default_size(prev.file_browser.unwrap_or(BROWSER_COL_WIDTH))
             .max_size(max)
             .show_inside(ui, |ui| {
                 scale_panel_fonts(ui, gui_font_size);
                 file_browser(state, ui);
             });
+        state.ui.panel_widths.file_browser = Some(r.response.rect.width());
     }
 
     if state.ui.panel_vis.remote_terminals {
         let max = central_reserve(ui, f32::INFINITY);
-        Panel::left("remote_terminals_panel")
+        let r = Panel::left("remote_terminals_panel")
             .resizable(true)
-            .default_size(REMOTE_COL_WIDTH)
+            .default_size(prev.remote_terminals.unwrap_or(REMOTE_COL_WIDTH))
             .max_size(max)
             .show_inside(ui, |ui| {
                 scale_panel_fonts(ui, gui_font_size);
                 remote_terminals(state, ui);
             });
+        state.ui.panel_widths.remote_terminals = Some(r.response.rect.width());
     }
 
     if state.ui.panel_vis.recent_cmds {
@@ -1471,26 +1479,37 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
         // still allows shrinking via the drag handle, and the central
         // reserve keeps it from crowding out the terminal column.
         let max = central_reserve(ui, RIGHT_COL_WIDTH);
-        Panel::right("cmd_history_panel")
+        let r = Panel::right("cmd_history_panel")
             .resizable(true)
-            .default_size(RIGHT_COL_WIDTH)
+            .default_size(prev.recent_cmds.unwrap_or(RIGHT_COL_WIDTH))
             .max_size(max)
             .show_inside(ui, |ui| {
                 scale_panel_fonts(ui, gui_font_size);
                 cmd_history(state, ui);
             });
+        state.ui.panel_widths.recent_cmds = Some(r.response.rect.width());
     }
 
     if state.ui.panel_vis.recent_cmds_in_dir {
         let max = central_reserve(ui, f32::INFINITY);
-        Panel::right("cwd_cmd_history_panel")
+        let r = Panel::right("cwd_cmd_history_panel")
             .resizable(true)
-            .default_size(CWD_HIST_COL_WIDTH)
+            .default_size(prev.recent_cmds_in_dir.unwrap_or(CWD_HIST_COL_WIDTH))
             .max_size(max)
             .show_inside(ui, |ui| {
                 scale_panel_fonts(ui, gui_font_size);
                 cwd_cmd_history(state, ui);
             });
+        state.ui.panel_widths.recent_cmds_in_dir = Some(r.response.rect.width());
+    }
+
+    // A width that changed while the pointer is held is a drag on a panel
+    // edge. Saved once released (below) rather than every frame of the drag.
+    // Changes without a drag (a panel clamped as the window narrows) ride
+    // along with the next save, like the window size.
+    let pointer_down = ui.input(|i| i.pointer.any_down());
+    if pointer_down && state.ui.panel_widths != prev {
+        state.ui.panel_widths_unsaved = true;
     }
 
     // Black backgrounds on the terminal panes so they read as a terminal,
@@ -1525,7 +1544,9 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
     }
 
     // Persist on any change so the layout survives restart.
-    if !panel_vis_eq(&vis_before, &state.ui.panel_vis) {
+    let drag_done = state.ui.panel_widths_unsaved && !pointer_down;
+    if drag_done || !panel_vis_eq(&vis_before, &state.ui.panel_vis) {
+        state.ui.panel_widths_unsaved = false;
         let _ = state.save();
     }
 }
