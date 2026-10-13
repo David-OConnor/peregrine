@@ -5,10 +5,10 @@ use std::{
 
 use chrono::Utc;
 use shell::{
-    BrowserFile, DirLabelLens, FontSizes, HistoryItem, NavState, OpenTabs, PanelVis, PanelWidths,
-    RecentDir, RemoteSession, RemoteTerminal, SshMode, WindowSize, apply_completion,
-    complete_cd_path, current_branch, get_home, read_browser_files, save_data, ssh, ssh::secrets,
-    truncate_branch,
+    BrowserFile, DirLabelLens, FilesPanelPrefs, FontSizes, HistoryItem, NavState, OpenTabs,
+    PanelVis, PanelWidths, RecentDir, RemoteSession, RemoteTerminal, SshMode, WindowSize,
+    apply_completion, complete_cd_path, current_branch, get_home, read_browser_files, save_data,
+    ssh, ssh::secrets, truncate_branch,
 };
 
 use crate::{
@@ -554,6 +554,11 @@ impl State {
                 recent_dirs: Some(self.recent_dir_label_len),
             },
             self.ui.panel_widths,
+            FilesPanelPrefs {
+                show_hidden: Some(self.ui.show_hidden_attr),
+                show_dotfiles: Some(self.ui.show_dotfiles),
+                deep_search_names: Some(self.ui.deep_search_opts.file_names),
+            },
             &self.state_path,
         )
     }
@@ -607,6 +612,12 @@ impl State {
         let mut ui = StateUi::default();
         ui.panel_vis = loaded.panel_vis;
         ui.panel_widths = loaded.panel_widths;
+        let prefs = loaded.files_panel;
+        ui.show_hidden_attr = prefs.show_hidden.unwrap_or(ui.show_hidden_attr);
+        ui.show_dotfiles = prefs.show_dotfiles.unwrap_or(ui.show_dotfiles);
+        ui.deep_search_opts.file_names = prefs
+            .deep_search_names
+            .unwrap_or(ui.deep_search_opts.file_names);
         ui.active_tab = active_tab;
         ui.cli_input = vec![String::new(); n];
         ui.out = (0..n).map(|_| Vec::new()).collect();

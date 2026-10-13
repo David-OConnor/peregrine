@@ -67,15 +67,15 @@ impl FileDetails {
         })
     }
 
-    /// [Self::read] for a file Deep search found, which (being in a subdir,
-    /// usually) has no row in the listing to read from.
+    /// [Self::read] for a file or folder Deep search found, which (being in
+    /// a subdir, usually) has no row in the listing to read from.
     pub fn read_file(path: &Path) -> Option<Self> {
         let md = fs::metadata(path).ok()?;
         Self::read(&BrowserFile {
             path: path.to_path_buf(),
             disp_name: path.file_name()?.to_string_lossy().into_owned(),
-            is_folder: false,
-            is_executable: is_executable(path, &md),
+            is_folder: md.is_dir(),
+            is_executable: !md.is_dir() && is_executable(path, &md),
             hidden_attr: false,
         })
     }

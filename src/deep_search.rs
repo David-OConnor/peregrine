@@ -1,10 +1,10 @@
 //! The Files panel's Deep search: the contents of every file under the
 //! listed dir, searched the way `rg <query>` would — or with
-//! [Options::file_names], their names, like `rg --files` filtered by the
-//! query. Uses ripgrep's own
-//! library crates — `ignore` for its parallel, .gitignore-aware directory
-//! walk, `grep-searcher` and `grep-regex` for the search itself — on
-//! background threads, so the panel keeps drawing while results come in.
+//! [Options::file_names], the names of every file and folder, like
+//! `rg --files` filtered by the query (but with folders too). Uses ripgrep's
+//! own library crates — `ignore` for its parallel, .gitignore-aware
+//! directory walk, `grep-searcher` and `grep-regex` for the search itself —
+//! on background threads, so the panel keeps drawing while results come in.
 
 use std::{
     ops::Range,
@@ -23,8 +23,8 @@ use grep_searcher::{BinaryDetection, Searcher, SearcherBuilder, sinks::Lossy};
 use ignore::{DirEntry, WalkBuilder, WalkState};
 
 /// A search stops once it has found this many matches (matching lines, or
-/// files in file-name mode), so searching a big tree for something common
-/// can't swamp memory or the list.
+/// files and folders in file-name mode), so searching a big tree for
+/// something common can't swamp memory or the list.
 pub const MAX_MATCHES: usize = 2_000;
 /// Matching lines longer than this many chars (minified JS, say) are cut to
 /// a window around their first match.
@@ -37,7 +37,8 @@ const LEAD_CHARS: usize = 24;
 pub struct Options {
     /// The query is a regex rather than literal text.
     pub regex: bool,
-    /// Match the query against file names rather than file contents.
+    /// Match the query against file and folder names rather than file
+    /// contents.
     pub file_names: bool,
 }
 
@@ -52,13 +53,15 @@ pub struct MatchLine {
     pub ranges: Vec<Range<usize>>,
 }
 
-/// A file with at least one match.
+/// A file with at least one match, or in file-name mode, a folder.
 pub struct FileHit {
     pub path: PathBuf,
+    /// Only in file-name mode.
+    pub is_folder: bool,
     /// In line order. Empty in file-name mode.
     pub lines: Vec<MatchLine>,
-    /// In file-name mode, byte ranges of the matches in the file name (the
-    /// last part of `path`, lossily converted), for highlighting.
+    /// In file-name mode, byte ranges of the matches in the name (the last
+    /// part of `path`, lossily converted), for highlighting.
     pub name_ranges: Vec<Range<usize>>,
 }
 
@@ -216,21 +219,24 @@ fn search(
             let Ok(entry) = entry else {
                 return WalkState::Continue;
             };
-            if !entry.file_type().is_some_and(|t| t.is_file()) {
-                return WalkState::Continue;
-            }
-
-            let hit = if file_names {
-                name_hit(&matcher, entry)
-            } else {
+            // Folders only have names to match, and `root` itself (depth 0)
+            // isn't a result.
+            let (is_file, is_folder) = entry
+                .file_type()
+                .map_or((false, false), |t| (t.is_file(), t.is_dir()));
+            let hit = if file_names && (is_file || (is_folder && entry.depth() > 0)) {
+                name_hit(&matcher, entry, is_folder)
+            } else if is_file && !file_names {
                 contents_hit(&mut searcher, &matcher, entry, cancel)
+            } else {
+                None
             };
             let Some(mut hit) = hit else {
                 return WalkState::Continue;
             };
 
             // Each matching line counts towards the limit, or in file-name
-            // mode, each file.
+            // mode, each file or folder.
             let n = hit.lines.len().max(1);
             let before = found.fetch_add(n, Ordering::Relaxed);
             if before >= MAX_MATCHES {
@@ -252,8 +258,9 @@ fn search(
     });
 }
 
-/// `entry` as a [FileHit] if `matcher` matches its file name.
-fn name_hit(matcher: &RegexMatcher, entry: DirEntry) -> Option<FileHit> {
+/// `entry` (a file, or a folder if `is_folder`) as a [FileHit] if `matcher`
+/// matches its name.
+fn name_hit(matcher: &RegexMatcher, entry: DirEntry, is_folder: bool) -> Option<FileHit> {
     let name = entry.file_name().to_string_lossy();
     let mut matched = false;
     let mut name_ranges = Vec::new();
@@ -269,6 +276,7 @@ fn name_hit(matcher: &RegexMatcher, entry: DirEntry) -> Option<FileHit> {
     drop(name);
     matched.then(|| FileHit {
         path: entry.into_path(),
+        is_folder,
         lines: Vec::new(),
         name_ranges,
     })
@@ -293,6 +301,7 @@ fn contents_hit(
     );
     (!lines.is_empty()).then(|| FileHit {
         path: entry.into_path(),
+        is_folder: false,
         lines,
         name_ranges: Vec::new(),
     })
@@ -461,8 +470,20 @@ mod tests {
         ));
         assert_eq!(s.hits.len(), 1);
         assert_eq!(s.hits[0].path, dir.join("sub").join("b.rs"));
+        assert!(!s.hits[0].is_folder);
         assert_eq!(s.hits[0].name_ranges, vec![Range { start: 0, end: 2 }]);
         assert_eq!((s.rows.len(), s.n_matches), (1, 1));
+
+        // Folders match too, by their own name; what's in them doesn't
+        // match by being in them.
+        let s = finish(DeepSearch::start(
+            dir.clone(),
+            "su",
+            opts,
+            egui::Context::default(),
+        ));
+        let found: Vec<_> = s.hits.iter().map(|h| (&h.path, h.is_folder)).collect();
+        assert_eq!(found, [(&dir.join("sub"), true)]);
 
         fs::remove_dir_all(&dir).unwrap();
     }

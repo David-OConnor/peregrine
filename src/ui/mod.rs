@@ -859,6 +859,7 @@ fn file_browser(state: &mut State, ui: &mut Ui) {
     });
     if filters_changed {
         state.refresh_browser_files();
+        let _ = state.save();
     }
     if open_clicked {
         let cwd = state.cwd().to_path_buf();
@@ -889,7 +890,8 @@ fn file_browser(state: &mut State, ui: &mut Ui) {
     // While a Deep search is set, its results stand in for the listing.
     if let Some(search) = &state.deep_search {
         let selected = state.selected_file.as_ref().map(|d| d.path.as_path());
-        let action = deep_search_results(search, &state.ui.files_search, selected, ui);
+        let home = state.home.as_deref();
+        let action = deep_search_results(search, &state.ui.files_search, selected, home, ui);
         apply_action(state, action);
         return;
     }
@@ -1067,8 +1069,8 @@ fn rename_box(ui: &mut Ui, r: &mut FileRename, is_folder: bool) -> Option<bool> 
 /// it doesn't walk the whole tree once per letter typed.
 const DEEP_SEARCH_DELAY: f64 = 0.3;
 
-/// The Files panel's Deep search box with its regex toggle, and under it
-/// the switch between searching file names and file contents (see
+/// The Files panel's Deep search box, followed on its row by the switch
+/// between searching file names and contents and the regex toggle (see
 /// `crate::deep_search`). A search starts once typing pauses for
 /// [DEEP_SEARCH_DELAY], or at once on Enter (which also re-runs an
 /// unchanged one) or a toggle; clearing the box ends it. Also takes in the
@@ -1076,6 +1078,8 @@ const DEEP_SEARCH_DELAY: f64 = 0.3;
 fn deep_search_bar(state: &mut State, ui: &mut Ui) {
     let now = ui.input(|i| i.time);
     let mut run_now = false;
+    // Filenames / Contents was switched; unlike the regex toggle, it's saved.
+    let mut mode_changed = false;
     let opts = &mut state.ui.deep_search_opts;
     ui.horizontal(|ui| {
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -1087,10 +1091,20 @@ fn deep_search_bar(state: &mut State, ui: &mut Ui) {
                 opts.regex = !opts.regex;
                 run_now = true;
             }
+            // Right to left, so Contents comes before Filenames.
+            let before = opts.file_names;
+            ui.selectable_value(&mut opts.file_names, false, "Contents")
+                .on_hover_text("Match lines inside files, like `rg <search>`");
+            ui.selectable_value(&mut opts.file_names, true, "Filenames")
+                .on_hover_text(
+                    "Match file and folder names, like `rg --files` filtered by the search",
+                );
+            mode_changed = opts.file_names != before;
+            run_now |= mode_changed;
             let what = if opts.file_names {
-                "names"
+                "names of every file and folder"
             } else {
-                "contents"
+                "contents of every file"
             };
             let resp = ui
                 .add(
@@ -1100,7 +1114,7 @@ fn deep_search_bar(state: &mut State, ui: &mut Ui) {
                         .id_salt("deep_search"),
                 )
                 .on_hover_text(format!(
-                    "Search the {what} of every file in this folder and its subfolders, \
+                    "Search the {what} in this folder and its subfolders, \
                      as ripgrep does: hidden and .gitignored files are skipped. \
                      Case-insensitive unless the search has a capital letter."
                 ));
@@ -1116,15 +1130,10 @@ fn deep_search_bar(state: &mut State, ui: &mut Ui) {
             }
         });
     });
-    ui.horizontal(|ui| {
-        let before = opts.file_names;
-        ui.selectable_value(&mut opts.file_names, true, "Filenames")
-            .on_hover_text("Match file names, like `rg --files` filtered by the search");
-        ui.selectable_value(&mut opts.file_names, false, "File contents")
-            .on_hover_text("Match lines inside files, like `rg <search>`");
-        run_now |= opts.file_names != before;
-    });
 
+    if mode_changed {
+        let _ = state.save();
+    }
     if run_now {
         state.start_deep_search(ui.ctx());
     } else if let Some(t) = state.ui.deep_search_edited {
@@ -1164,16 +1173,19 @@ fn append_highlighted(
 }
 
 /// The Files list while a Deep search is set: a status line, then each file
-/// found, by its path relative to the searched dir. In file-name mode the
-/// matches in its name are highlighted; otherwise it shows how many lines
-/// matched, and those lines follow it, numbered, with the matches
-/// highlighted. `name_filter` (the panel's Search box) narrows the files by
-/// that path. Clicking a row selects its file; double-clicking opens it, as
-/// in the listing.
+/// (or in file-name mode, folder) found, by its path relative to the
+/// searched dir. In file-name mode the matches in its name are highlighted,
+/// and folders are marked and coloured as in the listing; otherwise it
+/// shows how many lines matched, and those lines follow it, numbered, with
+/// the matches highlighted. `name_filter` (the panel's Search box) narrows
+/// the results by that path. Clicking a row selects its file or folder;
+/// double-clicking opens the file or goes into the folder, as in the
+/// listing.
 fn deep_search_results(
     search: &DeepSearch,
     name_filter: &str,
     selected: Option<&Path>,
+    home: Option<&Path>,
     ui: &mut Ui,
 ) -> Option<ListAction> {
     if let Some(e) = &search.error {
@@ -1204,9 +1216,16 @@ fn deep_search_results(
             .collect()
     };
 
-    let files = plural(search.hits.len(), "file", "files");
+    let n_folders = search.hits.iter().filter(|h| h.is_folder).count();
+    let files = plural(search.hits.len() - n_folders, "file", "files");
     let (counts, unit) = if search.opts.file_names {
-        (files, "files")
+        let folders = plural(n_folders, "folder", "folders");
+        let counts = match (search.hits.len() - n_folders, n_folders) {
+            (_, 0) => files,
+            (0, _) => folders,
+            _ => format!("{files}, {folders}"),
+        };
+        (counts, "results")
     } else {
         let matches = plural(search.n_matches, "match", "matches");
         (format!("{matches} in {files}"), "matches")
@@ -1254,6 +1273,7 @@ fn deep_search_results(
         background: visuals.selection.bg_fill,
         ..plain.clone()
     };
+    let dark = visuals.dark_mode;
     let mut action = None;
 
     ui.scope(|ui| {
@@ -1281,7 +1301,17 @@ fn deep_search_results(
                                     hit.name_ranges.iter().map(shift).collect()
                                 });
                             let mut job = LayoutJob::default();
-                            append_highlighted(&mut job, &path, &ranges, &plain, &hl);
+                            let mut base = plain.clone();
+                            if hit.is_folder {
+                                // Same colour this folder has in any path
+                                // shown elsewhere.
+                                job.append("📁 ", 0.0, plain.clone());
+                                let tilde = render_with_tilde(&hit.path, home);
+                                if let Some(c) = path_color::last_color(&tilde, Some("~"), dark) {
+                                    base.color = c;
+                                }
+                            }
+                            append_highlighted(&mut job, &path, &ranges, &base, &hl);
                             job.into()
                         }
                         Row::File(_) => {
@@ -1305,7 +1335,11 @@ fn deep_search_results(
                         .min_size(egui::vec2(ui.available_width(), row_height));
                     let resp = ui.add(button);
                     if resp.double_clicked() {
-                        action = Some(ListAction::OpenFile(hit.path.clone()));
+                        action = Some(if hit.is_folder {
+                            ListAction::ChangeDir(hit.path.clone())
+                        } else {
+                            ListAction::OpenFile(hit.path.clone())
+                        });
                     } else if resp.clicked() {
                         action = Some(ListAction::SelectFile(hit.path.clone()));
                     }
