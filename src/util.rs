@@ -3,7 +3,7 @@
 use std::{fs, io, path::Path};
 
 use shell::{
-    SshMode, clone_root, commands, commands::Frontend, find_bookmark, find_recent_dir,
+    DirList, SshMode, clone_root, commands, commands::Frontend, find_bookmark, find_recent_dir,
     path_from_args, quiet_command, ssh,
 };
 
@@ -188,20 +188,17 @@ pub fn handle_cmd(state: &mut State, cmd: &str, input: &str, args: &str) {
         }
 
         "cd" => {
-            // Remember the recent-dir index if the arg parsed as a number
-            // so we can prune the entry on a `NotFound` cd failure (the
-            // path was deleted/moved on disk).
-            let (target, recent_idx) = if let Ok(idx) = args.parse::<usize>() {
-                match state.recent_dirs.get(idx).map(|r| r.path.clone()) {
-                    Some(p) => (Some(p), Some(idx)),
-                    None => {
-                        state.push_out(
-                            format!("cd: no recent directory at index {idx}"),
-                            OutType::StdErr,
-                        );
-                        (None, None)
-                    }
+            // `cd <number>` jumps to a recent dir by index; anything else is
+            // a path, bookmark or recent-dir name.
+            let target = if let Ok(idx) = args.parse::<usize>() {
+                let resolved = state.recent_dirs.get(idx).map(|r| r.path.clone());
+                if resolved.is_none() {
+                    state.push_out(
+                        format!("cd: no recent directory at index {idx}"),
+                        OutType::StdErr,
+                    );
                 }
+                resolved
             } else {
                 let mut target = path_from_args(
                     state.home.as_deref(),
@@ -214,34 +211,11 @@ pub fn handle_cmd(state: &mut State, cmd: &str, input: &str, args: &str) {
                         target = found;
                     }
                 }
-                (Some(target), None)
+                Some(target)
             };
 
             if let Some(target) = target {
-                let before = state.cwd().to_path_buf();
-                state.change_dir(target.clone());
-                let failed = state.cwd() == before;
-                if failed {
-                    if let Some(i) = recent_idx {
-                        if let Err(e) = std::fs::metadata(&target) {
-                            if e.kind() == io::ErrorKind::NotFound
-                                && state
-                                    .recent_dirs
-                                    .get(i)
-                                    .map(|r| r.path == target)
-                                    .unwrap_or(false)
-                            {
-                                state.recent_dirs.remove(i);
-                                state.refresh_recent_dirs_filter();
-                                state.push_out(
-                                    format!("cd: removed stale recent-dir entry {i}"),
-                                    OutType::StdErr,
-                                );
-                                let _ = state.save();
-                            }
-                        }
-                    }
-                }
+                state.change_saved_dir(target, DirList::RecentDirs);
             }
         }
 
@@ -254,7 +228,7 @@ pub fn handle_cmd(state: &mut State, cmd: &str, input: &str, args: &str) {
                 None
             };
             match resolved {
-                Some(target) => state.change_dir(target),
+                Some(target) => state.change_saved_dir(target, DirList::Bookmarks),
                 None => state.push_out(
                     format!("bm: no matching bookmark for `{args}`"),
                     OutType::StdErr,

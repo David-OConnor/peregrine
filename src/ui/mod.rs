@@ -6,11 +6,13 @@ use std::{
 
 use egui::{
     Align, CentralPanel, Color32, DragValue, FontData, FontDefinitions, FontFamily, FontId, Frame,
-    Key, Layout, Panel, RichText, ScrollArea, TextEdit, TextFormat, TextStyle, TextWrapMode, Ui,
-    WidgetText,
+    Key, Layout, Modal, Panel, RichText, ScrollArea, TextEdit, TextFormat, TextStyle, TextWrapMode,
+    Ui, WidgetText,
     text::{CCursor, CCursorRange, LayoutJob},
 };
-use shell::SshMode;
+use shell::{DirList, SshMode};
+
+pub mod path_panel;
 
 /// Renders a single-line "Search..." box that fills the available width and
 /// triggers `on_changed` when the buffer is edited. Pulled out so all three
@@ -145,8 +147,8 @@ fn bold_family() -> FontFamily {
 /// this only needs to fit the `"<i>: "` prefix plus that path and the trailing
 /// `x` button.
 const BOOKMARK_COL_WIDTH: f32 = 170.;
-/// Recent-dirs column. Paths are truncated like bookmarks; slightly wider to
-/// fit the extra `*` (bookmarked) marker.
+/// Recent-dirs column. Paths are truncated like bookmarks, with the same
+/// trailing `x`; slightly wider to fit the extra `*` (bookmarked) marker.
 const RECENT_DIRS_COL_WIDTH: f32 = 175.;
 const RIGHT_COL_WIDTH: f32 = 180.;
 const CWD_HIST_COL_WIDTH: f32 = 220.;
@@ -156,6 +158,8 @@ const BROWSER_COL_WIDTH: f32 = 200.;
 /// GUI font size). See [file_browser].
 const FILES_COL_MIN_CHARS: f32 = 26.;
 const REMOTE_COL_WIDTH: f32 = 180.;
+/// PATH column. Wide enough for a typical install dir without wrapping much.
+const PATH_COL_WIDTH: f32 = 260.;
 
 /// The main terminal output/input column must always keep at least this many
 /// points of width, no matter how wide the user drags the side panels (or how
@@ -186,12 +190,17 @@ const COLOR_EXECUTABLE: Color32 = Color32::from_rgb(120, 220, 120);
 /// applied afterwards, so the borrow checker is happy.
 enum ListAction {
     ChangeDir(PathBuf),
+    /// cd to a Recent dirs or Bookmarks row, offering to remove it from that
+    /// list if it no longer exists. See [State::change_saved_dir].
+    ChangeSavedDir(PathBuf, DirList),
     /// Open a file with the OS's default associated program, the way a
     /// double-click does in Explorer / a Linux file manager.
     OpenFile(PathBuf),
     /// Select a Files-panel row, showing its details in the pane below.
     SelectFile(PathBuf),
     RemoveBookmark(usize),
+    /// Drop a path from Recent dirs (the dir itself is untouched).
+    RemoveRecentDir(PathBuf),
     FillInput(String),
     /// Re-run the history item at this index in its original working dir,
     /// without changing the GUI's CWD. Delegates to the `hisd` built-in.
@@ -292,7 +301,7 @@ fn dir_bookmarks(state: &mut State, ui: &mut Ui) {
                 ui.horizontal(|ui| {
                     let label = dir_label(ui, format!("{i}: "), bm, home.as_deref(), max_len);
                     if ui.button(label).clicked() {
-                        action = Some(ListAction::ChangeDir(bm.clone()));
+                        action = Some(ListAction::ChangeSavedDir(bm.clone(), DirList::Bookmarks));
                     }
                     if ui.small_button("x").clicked() {
                         action = Some(ListAction::RemoveBookmark(i));
@@ -305,10 +314,23 @@ fn dir_bookmarks(state: &mut State, ui: &mut Ui) {
 }
 
 /// Display recent directories we've executed a command from, as a clickable
-/// column. Newest first. Stars mark dirs that are also bookmarked. The
-/// search box filters by case-insensitive substring against the full path.
+/// column. Newest first. Stars mark dirs that are also bookmarked. The `x`
+/// removes a row from the list, and "Cleanup missing" removes every row whose
+/// dir is gone. The search box filters by case-insensitive substring against
+/// the full path.
 fn dir_history(state: &mut State, ui: &mut Ui) {
     panel_header(ui, "Recent dirs", &mut state.ui.panel_vis.recent_dirs);
+
+    if ui
+        .button("Cleanup missing")
+        .on_hover_text(
+            "Remove recent dirs that no longer exist on disk. Only the list \
+             changes; nothing on disk is touched.",
+        )
+        .clicked()
+    {
+        state.cleanup_missing_recent_dirs();
+    }
 
     if search_box(ui, &mut state.ui.recent_dirs_search, "recent_dirs_search") {
         state.refresh_recent_dirs_filter();
@@ -333,16 +355,28 @@ fn dir_history(state: &mut State, ui: &mut Ui) {
                 } else {
                     ""
                 };
-                let label = dir_label(
-                    ui,
-                    format!("{i}: {star}"),
-                    &r.path,
-                    home.as_deref(),
-                    max_len,
-                );
-                if ui.button(label).clicked() {
-                    action = Some(ListAction::ChangeDir(r.path.clone()));
-                }
+                ui.horizontal(|ui| {
+                    let label = dir_label(
+                        ui,
+                        format!("{i}: {star}"),
+                        &r.path,
+                        home.as_deref(),
+                        max_len,
+                    );
+                    if ui.button(label).clicked() {
+                        action = Some(ListAction::ChangeSavedDir(
+                            r.path.clone(),
+                            DirList::RecentDirs,
+                        ));
+                    }
+                    if ui
+                        .small_button("x")
+                        .on_hover_text("Remove from recent dirs")
+                        .clicked()
+                    {
+                        action = Some(ListAction::RemoveRecentDir(r.path.clone()));
+                    }
+                });
             }
         });
 
@@ -452,6 +486,7 @@ fn cmd_history(state: &mut State, ui: &mut Ui) {
 fn apply_action(state: &mut State, action: Option<ListAction>) {
     match action {
         Some(ListAction::ChangeDir(p)) => state.change_dir(p),
+        Some(ListAction::ChangeSavedDir(p, list)) => state.change_saved_dir(p, list),
         Some(ListAction::OpenFile(p)) if is_markdown(&p) => state.md_viewers.open(p),
         Some(ListAction::OpenFile(p)) => {
             if let Err(e) = open_with_default_app(&p) {
@@ -472,6 +507,9 @@ fn apply_action(state: &mut State, action: Option<ListAction>) {
                 );
                 let _ = state.save();
             }
+        }
+        Some(ListAction::RemoveRecentDir(p)) => {
+            state.remove_from_dir_list(&p, DirList::RecentDirs);
         }
         Some(ListAction::FillInput(s)) => {
             let i = state.ui.active_tab;
@@ -1579,6 +1617,7 @@ fn panel_toggles(state: &mut State, ui: &mut Ui) {
         ui.toggle_value(&mut v.recent_dirs, "Recent dirs");
         ui.toggle_value(&mut v.file_browser, "Files");
         ui.toggle_value(&mut v.remote_terminals, "Remote");
+        ui.toggle_value(&mut v.path_editor, "PATH");
         ui.toggle_value(&mut v.recent_cmds, "Cmd history");
         ui.toggle_value(&mut v.recent_cmds_in_dir, "Cmds this dir");
     });
@@ -1593,6 +1632,7 @@ fn panel_vis_eq(a: &shell::PanelVis, b: &shell::PanelVis) -> bool {
         && a.recent_cmds_in_dir == b.recent_cmds_in_dir
         && a.remote_terminals == b.remote_terminals
         && a.file_browser == b.file_browser
+        && a.path_editor == b.path_editor
 }
 
 /// A `<label> N + -` font-size control for the tab strip: the label, the
@@ -1829,6 +1869,88 @@ fn scale_panel_fonts(ui: &mut Ui, size: f32) {
     }
 }
 
+/// Popup shown while `state.ui.stale_dir` is set: a Recent dirs / Bookmarks
+/// entry no longer exists, so ask whether to remove it from its list. Esc or
+/// a click outside the popup keeps it, as the Keep button does.
+fn stale_dir_popup(state: &mut State, ctx: &egui::Context) {
+    let Some((path, list)) = state.ui.stale_dir.clone() else {
+        return;
+    };
+    let home = state.home.clone();
+    let shown = render_with_tilde(&path, home.as_deref());
+    let gui_font_size = state.gui_font_size;
+
+    // `Some(true)` to remove, `Some(false)` to keep.
+    let mut remove = None;
+    let modal = Modal::new(egui::Id::new("stale_dir_popup")).show(ctx, |ui| {
+        scale_panel_fonts(ui, gui_font_size);
+        ui.heading("Directory not found");
+        ui.add_space(4.);
+
+        let mut msg = path_job(ui, &path, home.as_deref());
+        let body = TextFormat {
+            font_id: TextStyle::Body.resolve(ui.style()),
+            color: Color32::PLACEHOLDER,
+            ..Default::default()
+        };
+        msg.append(
+            &format!(" doesn't exist. Remove it from {}?", list.name()),
+            0.,
+            body,
+        );
+        ui.label(msg);
+        ui.add_space(8.);
+
+        ui.horizontal_wrapped(|ui| {
+            let font_id = TextStyle::Button.resolve(ui.style());
+            let mut label = LayoutJob::default();
+            label.append(
+                "🗙 ",
+                0.,
+                TextFormat {
+                    font_id: font_id.clone(),
+                    color: ui.visuals().error_fg_color,
+                    ..Default::default()
+                },
+            );
+            label.append(
+                &format!("Remove {shown} from {}", list.name()),
+                0.,
+                TextFormat {
+                    font_id,
+                    color: Color32::PLACEHOLDER,
+                    ..Default::default()
+                },
+            );
+            let remove_btn = ui.button(label);
+            let keep_btn = ui.button(format!("Keep this {}", list.entry_name()));
+            // Hold keyboard focus inside the popup, starting on Keep: the
+            // input row behind it would otherwise keep its focus and take
+            // typing (and Enter) while the popup is up. Tab switches between
+            // the two; Enter or Space presses the focused one.
+            if !remove_btn.has_focus() && !keep_btn.has_focus() {
+                keep_btn.request_focus();
+            }
+            if remove_btn.clicked() {
+                remove = Some(true);
+            }
+            if keep_btn.clicked() {
+                remove = Some(false);
+            }
+        });
+    });
+    if remove.is_none() && modal.should_close() {
+        remove = Some(false);
+    }
+
+    match remove {
+        Some(true) => state.remove_stale_dir(),
+        Some(false) => state.ui.stale_dir = None,
+        None => return,
+    }
+    state.ui.focus_input = true;
+}
+
 pub fn draw(state: &mut State, ui: &mut Ui) {
     // Snapshot panel visibility so a change from the "Panels:" toggles or a
     // panel's own close button is persisted at the end of the frame.
@@ -1914,6 +2036,19 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
         state.ui.panel_widths.remote_terminals = Some(r.response.rect.width());
     }
 
+    if state.ui.panel_vis.path_editor {
+        let max = central_reserve(ui, f32::INFINITY);
+        let r = Panel::left("path_editor_panel")
+            .resizable(true)
+            .default_size(prev.path_editor.unwrap_or(PATH_COL_WIDTH))
+            .max_size(max)
+            .show_inside(ui, |ui| {
+                scale_panel_fonts(ui, gui_font_size);
+                path_panel::path_panel(state, ui);
+            });
+        state.ui.panel_widths.path_editor = Some(r.response.rect.width());
+    }
+
     if state.ui.panel_vis.recent_cmds {
         // Long commands wrap inside the panel (see [cmd_history]) rather
         // than widening it, so it stays at whatever width it's dragged to.
@@ -1975,6 +2110,8 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
     // Markdown viewer windows are child viewports: they only stay open while
     // the main window's pass keeps showing them.
     state.md_viewers.show(ui.ctx());
+
+    stale_dir_popup(state, ui.ctx());
 
     // A command was submitted this frame: paint its echo, then come straight
     // back to run it.

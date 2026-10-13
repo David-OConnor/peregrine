@@ -10,6 +10,7 @@ mod deep_search;
 mod files;
 mod markdown;
 mod path_color;
+mod path_env;
 mod state;
 mod ui;
 mod util;
@@ -219,6 +220,12 @@ pub fn run_command(state: &mut State, input: &str) {
 }
 
 fn main() {
+    // Started elevated by the PATH panel just to write the System PATH:
+    // do that and exit, without opening a window.
+    if let Some(code) = path_env::run_elevated_helper() {
+        std::process::exit(code);
+    }
+
     let state_path =
         save_data::default_path().unwrap_or_else(|| PathBuf::from(save_data::FILENAME));
 

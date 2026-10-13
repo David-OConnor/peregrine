@@ -39,11 +39,16 @@ ignore = "0.4.33"
 # program, as an Explorer double-click does; `SHGetFileInfoW` gives Explorer's
 # type name ("Text Document") for the details pane; the drive functions list
 # "This PC" for the drive menu. Same version `shell` uses, so this adds nothing
-# new to the build.
+# new to the build. The PATH panel (see `src/path_env.rs`) reads and writes
+# the User and System `Path` registry values, broadcasts the change as
+# Windows' own dialog does, and runs itself elevated (`ShellExecuteExW`
+# "runas") to write the System one.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Storage_FileSystem",
     "Win32_System_Diagnostics_Debug",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
     "Win32_System_WindowsProgramming",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",

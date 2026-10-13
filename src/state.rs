@@ -5,10 +5,11 @@ use std::{
 
 use chrono::Utc;
 use shell::{
-    BrowserFile, DirLabelLens, FilesPanelPrefs, FontSizes, HistoryItem, NavState, OpenTabs,
-    PanelVis, PanelWidths, RecentDir, RemoteSession, RemoteTerminal, SshMode, WindowSize,
-    apply_completion, complete_cd_path, current_branch, get_home, read_browser_files, save_data,
-    ssh, ssh::secrets, truncate_branch,
+    BrowserFile, DirLabelLens, DirList, FilesPanelPrefs, FontSizes, HistoryItem, NavState,
+    OpenTabs, PanelVis, PanelWidths, RecentDir, RemoteSession, RemoteTerminal, SshMode, WindowSize,
+    apply_completion, complete_cd_path, current_branch, get_home, read_browser_files,
+    remove_missing_recent_dirs, remove_saved_dir, save_data, ssh, ssh::secrets, stale_dir_list,
+    truncate_branch,
 };
 
 use crate::{
@@ -17,7 +18,8 @@ use crate::{
     deep_search::{self, DeepSearch},
     files::FileDetails,
     markdown::MarkdownViewers,
-    path_color, ui,
+    path_color,
+    ui::{self, path_panel::PathPanel},
 };
 
 /// State specific to the GUI: the current input buffer, the captured terminal
@@ -79,6 +81,11 @@ pub struct StateUi {
     /// persisted (a fresh session starts with empty stacks).
     pub nav_back: Vec<Vec<PathBuf>>,
     pub nav_forward: Vec<Vec<PathBuf>>,
+
+    /// A Recent dirs / Bookmarks entry found to no longer exist when a cd to
+    /// it failed, and the list it's in. While set, a popup asks whether to
+    /// remove it (see [State::change_saved_dir]).
+    pub stale_dir: Option<(PathBuf, DirList)>,
 
     /// Files-panel listing filters, toggled independently by the buttons
     /// above the listing; not persisted. `show_hidden_attr` covers entries
@@ -145,6 +152,7 @@ impl Default for StateUi {
             panel_widths_unsaved: false,
             nav_back: vec![Vec::new()],
             nav_forward: vec![Vec::new()],
+            stale_dir: None,
             show_hidden_attr: true,
             show_dotfiles: true,
             files_search: String::new(),
@@ -236,6 +244,8 @@ pub struct State {
     /// Open Markdown viewer windows (double-clicked in the Files panel).
     /// Not persisted.
     pub md_viewers: MarkdownViewers,
+    /// The PATH panel's lists and their unsaved edits. Not persisted.
+    pub path_panel: PathPanel,
 }
 
 /// A saved Bookmarks / Recent dirs path length, or the default when none was
@@ -274,6 +284,7 @@ impl Default for State {
             bookmark_label_len: ui::DEFAULT_DIR_LABEL_LEN,
             recent_dir_label_len: ui::DEFAULT_DIR_LABEL_LEN,
             md_viewers: MarkdownViewers::default(),
+            path_panel: PathPanel::default(),
         };
         s.refresh_all_filters();
         s.refresh_cmd_colors();
@@ -648,6 +659,7 @@ impl State {
             bookmark_label_len: dir_label_len(loaded.dir_label_lens.bookmarks),
             recent_dir_label_len: dir_label_len(loaded.dir_label_lens.recent_dirs),
             md_viewers: MarkdownViewers::default(),
+            path_panel: PathPanel::default(),
         };
         s.refresh_all_filters();
         s.refresh_cmd_colors();
@@ -928,6 +940,70 @@ impl State {
             let i = self.ui.active_tab;
             self.ui.nav_back[i].push(before);
             self.ui.nav_forward[i].clear();
+        }
+    }
+
+    /// [Self::change_dir] to a dir picked from `from`: a Recent dirs or
+    /// Bookmarks row, or a typed `cd <n>` / `bm <n>`. If the cd fails because
+    /// the dir no longer exists, sets `stale_dir` so a popup offers to remove
+    /// it from its list.
+    pub fn change_saved_dir(&mut self, target: PathBuf, from: DirList) {
+        self.change_dir(target.clone());
+        if let Some(list) = stale_dir_list(&target, from, &self.dir_bookmarks, &self.recent_dirs) {
+            self.ui.stale_dir = Some((target, list));
+        }
+    }
+
+    /// The stale-dir popup's Remove button: drop `stale_dir` from its list.
+    pub fn remove_stale_dir(&mut self) {
+        if let Some((path, list)) = self.ui.stale_dir.take() {
+            self.remove_from_dir_list(&path, list);
+        }
+    }
+
+    /// Remove `path` from `list` (the dir itself is untouched), report it in
+    /// the output pane, and save.
+    pub fn remove_from_dir_list(&mut self, path: &Path, list: DirList) {
+        if !remove_saved_dir(list, path, &mut self.dir_bookmarks, &mut self.recent_dirs) {
+            return;
+        }
+        self.refresh_bookmarks_filter();
+        self.refresh_recent_dirs_filter();
+        let shown = crate::render_with_tilde(path, self.home.as_deref());
+        self.push_out(
+            format!("Removed {shown} from {}", list.name()),
+            OutType::StdOut,
+        );
+        self.save_or_warn();
+    }
+
+    /// The Recent dirs "Cleanup missing" button: drop every recent dir that's
+    /// gone from disk, listing them in the output pane.
+    pub fn cleanup_missing_recent_dirs(&mut self) {
+        let removed = remove_missing_recent_dirs(&mut self.recent_dirs);
+        if removed.is_empty() {
+            self.push_out("Recent dirs: no missing directories", OutType::StdOut);
+            return;
+        }
+        self.refresh_recent_dirs_filter();
+
+        let noun = if removed.len() == 1 { "dir" } else { "dirs" };
+        let mut msg = format!("Removed {} missing {noun} from recent dirs:", removed.len());
+        for path in &removed {
+            msg.push_str("\n  ");
+            msg.push_str(&crate::render_with_tilde(path, self.home.as_deref()));
+        }
+        self.push_out(msg, OutType::StdOut);
+        self.save_or_warn();
+    }
+
+    /// [Self::save], reporting a failure in the output pane.
+    fn save_or_warn(&mut self) {
+        if let Err(e) = self.save() {
+            self.push_out(
+                format!("warning: failed to save state: {e}"),
+                OutType::StdErr,
+            );
         }
     }
 
