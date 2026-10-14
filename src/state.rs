@@ -7,7 +7,8 @@ use chrono::Utc;
 use shell::{
     BrowserFile, DirLabelLens, DirList, FilesPanelPrefs, FontSizes, HistoryItem, NavState,
     OpenTabs, PanelVis, PanelWidths, RecentDir, RemoteSession, RemoteTerminal, SshMode, WindowSize,
-    apply_completion, current_branch, get_home, read_browser_files, remove_missing_recent_dirs,
+    apply_completion, current_branch, dir_missing, get_home, read_browser_files,
+    remove_missing_recent_dirs,
     remove_saved_dir, save_data, ssh, ssh::secrets, stale_dir_list, truncate_branch,
 };
 
@@ -254,10 +255,15 @@ pub struct State {
     /// other text styles scale with it (see `ui::scale_panel_fonts`).
     pub gui_font_size: f32,
     /// Max displayed path length (in characters) in the Bookmarks and Recent
-    /// dirs panels, set via the controls on the tab strip and persisted
+    /// dirs panels, set via the controls at the top of each and persisted
     /// alongside the font sizes. Longer paths are truncated from the front.
     pub bookmark_label_len: usize,
     pub recent_dir_label_len: usize,
+    /// Whether the Bookmarks and Recent dirs panels show just each dir's
+    /// final name ("Names") rather than its path ("Paths"). Persisted with the
+    /// path lengths.
+    pub bookmark_names: bool,
+    pub recent_dir_names: bool,
     /// Open Markdown and text viewer windows (double-clicked in the Files
     /// panel).
     /// Not persisted.
@@ -267,11 +273,11 @@ pub struct State {
 }
 
 /// A saved Bookmarks / Recent dirs path length, or the default when none was
-/// saved, clamped to the range the tab-strip controls allow.
+/// saved, clamped to the range the panels' controls allow.
 fn dir_label_len(saved: Option<usize>) -> usize {
     saved
-        .unwrap_or(ui::DEFAULT_DIR_LABEL_LEN)
-        .clamp(ui::MIN_DIR_LABEL_LEN, ui::MAX_DIR_LABEL_LEN)
+        .unwrap_or(ui::dirs::DEFAULT_DIR_LABEL_LEN)
+        .clamp(ui::dirs::MIN_DIR_LABEL_LEN, ui::dirs::MAX_DIR_LABEL_LEN)
 }
 
 impl Default for State {
@@ -301,8 +307,10 @@ impl Default for State {
             window_size: None,
             font_size: ui::DEFAULT_FONT_SIZE,
             gui_font_size: ui::DEFAULT_GUI_FONT_SIZE,
-            bookmark_label_len: ui::DEFAULT_DIR_LABEL_LEN,
-            recent_dir_label_len: ui::DEFAULT_DIR_LABEL_LEN,
+            bookmark_label_len: ui::dirs::DEFAULT_DIR_LABEL_LEN,
+            recent_dir_label_len: ui::dirs::DEFAULT_DIR_LABEL_LEN,
+            bookmark_names: true,
+            recent_dir_names: true,
             file_viewers: FileViewers::default(),
             path_panel: PathPanel::default(),
         };
@@ -646,6 +654,8 @@ impl State {
             DirLabelLens {
                 bookmarks: Some(self.bookmark_label_len),
                 recent_dirs: Some(self.recent_dir_label_len),
+                bookmark_names: Some(self.bookmark_names),
+                recent_dir_names: Some(self.recent_dir_names),
             },
             self.ui.panel_widths,
             FilesPanelPrefs {
@@ -743,6 +753,8 @@ impl State {
             gui_font_size: loaded.font_size.gui.unwrap_or(ui::DEFAULT_GUI_FONT_SIZE),
             bookmark_label_len: dir_label_len(loaded.dir_label_lens.bookmarks),
             recent_dir_label_len: dir_label_len(loaded.dir_label_lens.recent_dirs),
+            bookmark_names: loaded.dir_label_lens.bookmark_names.unwrap_or(true),
+            recent_dir_names: loaded.dir_label_lens.recent_dir_names.unwrap_or(true),
             file_viewers: FileViewers::default(),
             path_panel: PathPanel::default(),
         };
@@ -930,14 +942,18 @@ impl State {
     /// Toggle the current dir in the bookmark list. Returns the message we
     /// surfaced to the user, so callers can echo it into the output pane.
     pub fn toggle_bookmark_cwd(&mut self) -> String {
-        let cwd = self.cwd().to_path_buf();
+        self.toggle_bookmark(self.cwd().to_path_buf())
+    }
 
-        let msg = if let Some(pos) = self.dir_bookmarks.iter().position(|p| p == &cwd) {
+    /// Toggle `dir` in the bookmark list, as the Files and Recent dirs ★
+    /// buttons do. Returns the message, as [Self::toggle_bookmark_cwd] does.
+    pub fn toggle_bookmark(&mut self, dir: PathBuf) -> String {
+        let msg = if let Some(pos) = self.dir_bookmarks.iter().position(|p| p == &dir) {
             self.dir_bookmarks.remove(pos);
-            format!("Removed bookmark: {}", cwd.display())
+            format!("Removed bookmark: {}", dir.display())
         } else {
-            self.dir_bookmarks.push(cwd.clone());
-            format!("Added a bookmark: {}", cwd.display())
+            self.dir_bookmarks.push(dir.clone());
+            format!("Added a bookmark: {}", dir.display())
         };
 
         let _ = self.save();
@@ -1070,6 +1086,29 @@ impl State {
         }
     }
 
+    /// Open a new tab in `target` and switch to it, as middle-clicking a
+    /// folder does. Unlike [Self::change_dir], the new tab starts with no
+    /// Back history. If `target` can't be entered, reports why and opens
+    /// nothing.
+    pub fn open_dir_in_new_tab(&mut self, target: PathBuf) {
+        if let Err(e) = env::set_current_dir(&target) {
+            self.push_out(format!("cd: {e}"), OutType::StdErr);
+            return;
+        }
+        self.add_tab();
+        self.navigate_to(target);
+    }
+
+    /// [Self::open_dir_in_new_tab] for a dir picked from `from` (a Recent dirs
+    /// or Bookmarks row). If it no longer exists, offers to remove it from its
+    /// list, as [Self::change_saved_dir] does.
+    pub fn open_saved_dir_in_new_tab(&mut self, target: PathBuf, from: DirList) {
+        self.open_dir_in_new_tab(target.clone());
+        if let Some(list) = stale_dir_list(&target, from, &self.dir_bookmarks, &self.recent_dirs) {
+            self.ui.stale_dir = Some((target, list));
+        }
+    }
+
     /// The stale-dir popup's Remove button: drop `stale_dir` from its list.
     pub fn remove_stale_dir(&mut self) {
         if let Some((path, list)) = self.ui.stale_dir.take() {
@@ -1093,18 +1132,33 @@ impl State {
         self.save_or_warn();
     }
 
-    /// The Recent dirs "Cleanup missing" button: drop every recent dir that's
-    /// gone from disk, listing them in the output pane.
-    pub fn cleanup_missing_recent_dirs(&mut self) {
-        let removed = remove_missing_recent_dirs(&mut self.recent_dirs);
+    /// The Bookmarks / Recent dirs "Cleanup missing" button: drop every dir in
+    /// `list` that's gone from disk (see [dir_missing]), listing them in the
+    /// output pane.
+    pub fn cleanup_missing_dirs(&mut self, list: DirList) {
+        let removed = match list {
+            DirList::RecentDirs => remove_missing_recent_dirs(&mut self.recent_dirs),
+            DirList::Bookmarks => self
+                .dir_bookmarks
+                .extract_if(.., |p| dir_missing(p))
+                .collect(),
+        };
         if removed.is_empty() {
-            self.push_out("Recent dirs: no missing directories", OutType::StdOut);
+            self.push_out(
+                format!("No missing directories in {}", list.name()),
+                OutType::StdOut,
+            );
             return;
         }
+        self.refresh_bookmarks_filter();
         self.refresh_recent_dirs_filter();
 
         let noun = if removed.len() == 1 { "dir" } else { "dirs" };
-        let mut msg = format!("Removed {} missing {noun} from recent dirs:", removed.len());
+        let mut msg = format!(
+            "Removed {} missing {noun} from {}:",
+            removed.len(),
+            list.name()
+        );
         for path in &removed {
             msg.push_str("\n  ");
             msg.push_str(&crate::render_with_tilde(path, self.home.as_deref()));

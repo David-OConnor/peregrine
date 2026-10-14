@@ -5,9 +5,9 @@ use std::{
 };
 
 use egui::{
-    Align, Button, CentralPanel, Color32, DragValue, FontData, FontDefinitions, FontFamily, FontId,
-    FontSelection, Frame, Key, Layout, Modal, Panel, Rect, RichText, ScrollArea, TextEdit,
-    TextFormat, TextStyle, TextWrapMode, Ui, WidgetText,
+    Align, Button, CentralPanel, Color32, FontData, FontDefinitions, FontFamily, FontId,
+    FontSelection, Frame, Key, Layout, Panel, Rect, RichText, ScrollArea, TextEdit, TextFormat,
+    TextStyle, TextWrapMode, Ui, WidgetText,
     text::{CCursor, CCursorRange, LayoutJob, TextWrapping},
 };
 use shell::{DirList, SshMode};
@@ -15,14 +15,15 @@ use shell::{DirList, SshMode};
 mod file_browser;
 pub mod path_panel;
 pub mod clipboard;
+pub mod dirs;
 
-/// Renders a single-line "Search..." box that fills the available width and
+/// Renders a single-line "Search" box that fills the available width and
 /// triggers `on_changed` when the buffer is edited. Pulled out so all three
 /// sidebars look identical.
 fn search_box(ui: &mut Ui, buf: &mut String, id_salt: &str) -> bool {
     ui.add(
         TextEdit::singleline(buf)
-            .hint_text("Search...")
+            .hint_text("Search")
             .desired_width(f32::INFINITY)
             .id_salt(id_salt),
     )
@@ -70,16 +71,6 @@ pub const DEFAULT_GUI_FONT_SIZE: f32 = 11.;
 /// shrunk to an unreadable size or blown up past the window.
 pub const MIN_FONT_SIZE: f32 = 6.;
 pub const MAX_FONT_SIZE: f32 = 48.;
-
-/// Default max displayed length (in characters) of a Bookmarks / Recent dirs
-/// path, used when the state file has no saved `DIR_LABEL_LEN`. Longer paths
-/// are truncated from the front (see [path_color::truncate_start]), e.g.
-/// `.../code/Bio/dynamics`.
-pub const DEFAULT_DIR_LABEL_LEN: usize = 22;
-/// Bounds the path-length controls clamp to. The minimum leaves room for a
-/// few characters after the `...`.
-pub const MIN_DIR_LABEL_LEN: usize = 8;
-pub const MAX_DIR_LABEL_LEN: usize = 200;
 
 /// Name of the bold font family registered by [install_fonts]; see
 /// [bold_family].
@@ -143,14 +134,6 @@ fn bold_family() -> FontFamily {
     FontFamily::Name(BOLD_FAMILY.into())
 }
 
-/// Bookmarks column. Narrower than the other side columns: bookmark paths are
-/// truncated (to [DEFAULT_DIR_LABEL_LEN] chars unless the user changes it), so
-/// this only needs to fit the `"<i>: "` prefix plus that path and the trailing
-/// `x` button.
-const BOOKMARK_COL_WIDTH: f32 = 170.;
-/// Recent-dirs column. Paths are truncated like bookmarks, with the same
-/// trailing `x`; slightly wider to fit the extra `*` (bookmarked) marker.
-const RECENT_DIRS_COL_WIDTH: f32 = 175.;
 const RIGHT_COL_WIDTH: f32 = 180.;
 const CWD_HIST_COL_WIDTH: f32 = 220.;
 const BROWSER_COL_WIDTH: f32 = 200.;
@@ -207,6 +190,13 @@ enum ListAction {
     /// cd to a Recent dirs or Bookmarks row, offering to remove it from that
     /// list if it no longer exists. See [State::change_saved_dir].
     ChangeSavedDir(PathBuf, DirList),
+    /// Open a dir in a new tab, as middle-clicking a Files folder does.
+    NewTabDir(PathBuf),
+    /// [ListAction::NewTabDir] for a Recent dirs or Bookmarks row. See
+    /// [State::open_saved_dir_in_new_tab].
+    NewTabSavedDir(PathBuf, DirList),
+    /// Add or remove a dir from Bookmarks (the Recent dirs ★).
+    ToggleBookmark(PathBuf),
     /// Open a file with the OS's default associated program, the way a
     /// double-click does in Explorer / a Linux file manager.
     OpenFile(PathBuf),
@@ -216,6 +206,9 @@ enum ListAction {
     /// Drop a path from Recent dirs (the dir itself is untouched).
     RemoveRecentDir(PathBuf),
     FillInput(String),
+    /// Run a command in a new tab at the active tab's cwd, as middle-clicking
+    /// a Command history or Cmds this dir row does.
+    RunInNewTab(String),
     /// Re-run the history item at this index in its original working dir,
     /// without changing the GUI's CWD. Delegates to the `hisd` built-in.
     RunHistoryInDir(usize),
@@ -227,35 +220,26 @@ enum ListAction {
     RemoveRemote(usize),
 }
 
-/// A Bookmarks / Recent dirs button label: `prefix` (the index, plus any
-/// marker), then `path` as `~/...`, colour-coded by directory (see
-/// [path_color]) with its final directory bold, and truncated from the front
-/// to `max_len` chars so the column stays narrow.
-fn dir_label(
-    ui: &Ui,
-    prefix: String,
-    path: &Path,
-    home: Option<&Path>,
-    max_len: usize,
-) -> LayoutJob {
-    let dark = ui.visuals().dark_mode;
-    let parts = path_color::parts(&render_with_tilde(path, home), Some("~"), dark);
-    let mut label = vec![Part::plain(prefix)];
-    label.extend(path_color::truncate_start(parts, max_len));
-    let font = TextStyle::Button.resolve(ui.style());
-    let bold = FontId::new(font.size, bold_family());
-    path_color::layout_job(&label, font, Some(bold), Color32::PLACEHOLDER)
-}
-
 /// `path` as `~/...`, colour-coded by directory (see [path_color]) with its
 /// final part bold, in the body font. Uncoloured runs take the label's own
 /// text colour.
 fn path_job(ui: &Ui, path: &Path, home: Option<&Path>) -> LayoutJob {
-    let dark = ui.visuals().dark_mode;
+    path_job_on(ui, path, home, ui.visuals().dark_mode, Color32::PLACEHOLDER)
+}
+
+/// [path_job] in the palette for a `dark` or light background (see
+/// [path_color::palette]), with uncoloured runs in `text_color`.
+fn path_job_on(
+    ui: &Ui,
+    path: &Path,
+    home: Option<&Path>,
+    dark: bool,
+    text_color: Color32,
+) -> LayoutJob {
     let parts = path_color::parts(&render_with_tilde(path, home), Some("~"), dark);
     let font = TextStyle::Body.resolve(ui.style());
     let bold = FontId::new(font.size, bold_family());
-    path_color::layout_job(&parts, font, Some(bold), Color32::PLACEHOLDER)
+    path_color::layout_job(&parts, font, Some(bold), text_color)
 }
 
 /// A Command history / In this dir button label: `"<i>: "`, then the command
@@ -291,16 +275,6 @@ fn chars_width(ui: &Ui, style: TextStyle, n: f32) -> f32 {
     n * ui.ctx().fonts_mut(|f| f.glyph_width(&font, '0'))
 }
 
-/// Width a Bookmarks / Recent dirs column needs so none of its rows spill into
-/// the next: a `prefix_chars`-long index (and marker), a path cut to `max_len`
-/// chars (see [dir_label]), then the `x` button.
-fn dir_col_width(ui: &Ui, prefix_chars: usize, max_len: usize) -> f32 {
-    let s = ui.spacing();
-    // Both buttons' padding, and the gap between them.
-    let extra = 4.0 * s.button_padding.x + s.item_spacing.x;
-    chars_width(ui, TextStyle::Button, (prefix_chars + max_len + 1) as f32) + extra
-}
-
 /// Lay a list panel's `items` out in as many columns as fit across `ui`, each
 /// at least `min_width` wide (or just one if even that doesn't fit), drawing
 /// each with `row`. Filled down the first column, then the next, like `ls`,
@@ -329,130 +303,9 @@ fn list_columns<T: Copy>(
     });
 }
 
-/// Display directory bookmarks as a clickable list, in columns when the panel
-/// is wide enough. Clicking a row cd's to that bookmark; the `x` removes it
-/// from the list. The search box filters by case-insensitive substring against
-/// the full path.
-fn dir_bookmarks(state: &mut State, ui: &mut Ui) {
-    panel_header(ui, "Bookmarks", &mut state.ui.panel_vis.bookmarks);
-
-    if ui.button("+ bookmark current dir").clicked() {
-        let msg = state.toggle_bookmark_cwd();
-        state.push_out(msg, OutType::StdOut);
-    }
-
-    if search_box(ui, &mut state.ui.bookmarks_search, "bookmarks_search") {
-        state.refresh_bookmarks_filter();
-    }
-    ui.separator();
-
-    let home = state.home.clone();
-    let max_len = state.bookmark_label_len;
-    let mut action: Option<ListAction> = None;
-
-    ScrollArea::vertical()
-        .id_salt("bookmarks_scroll")
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            // `"<i>: "`, sized for the largest index.
-            let prefix_chars = state.dir_bookmarks.len().to_string().len() + 2;
-            let min_width = dir_col_width(ui, prefix_chars, max_len);
-            list_columns(ui, &state.ui.bookmarks_filter, min_width, |ui, i| {
-                let Some(bm) = state.dir_bookmarks.get(i) else {
-                    return;
-                };
-                ui.horizontal(|ui| {
-                    let label = dir_label(ui, format!("{i}: "), bm, home.as_deref(), max_len);
-                    if ui.button(label).clicked() {
-                        action = Some(ListAction::ChangeSavedDir(bm.clone(), DirList::Bookmarks));
-                    }
-                    if ui.small_button("x").clicked() {
-                        action = Some(ListAction::RemoveBookmark(i));
-                    }
-                });
-            });
-        });
-
-    apply_action(state, action);
-}
-
-/// Display recent directories we've executed a command from, as a clickable
-/// list, in columns when the panel is wide enough. Newest first. Stars mark dirs that are also bookmarked. The `x`
-/// removes a row from the list, and "Cleanup missing" removes every row whose
-/// dir is gone. The search box filters by case-insensitive substring against
-/// the full path.
-fn dir_history(state: &mut State, ui: &mut Ui) {
-    panel_header(ui, "Recent dirs", &mut state.ui.panel_vis.recent_dirs);
-
-    if ui
-        .button("Cleanup missing")
-        .on_hover_text(
-            "Remove recent dirs that no longer exist on disk. Only the list \
-             changes; nothing on disk is touched.",
-        )
-        .clicked()
-    {
-        state.cleanup_missing_recent_dirs();
-    }
-
-    if search_box(ui, &mut state.ui.recent_dirs_search, "recent_dirs_search") {
-        state.refresh_recent_dirs_filter();
-    }
-    ui.separator();
-
-    let home = state.home.clone();
-    let max_len = state.recent_dir_label_len;
-    let mut action: Option<ListAction> = None;
-
-    ScrollArea::vertical()
-        .id_salt("recent_dirs_scroll")
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            // Render newest-first so the most-recently-used dirs are at the top.
-            let rows: Vec<usize> = state.ui.recent_dirs_filter.iter().rev().copied().collect();
-            // `"<i>: *"`, sized for the largest index.
-            let prefix_chars = state.recent_dirs.len().to_string().len() + 3;
-            let min_width = dir_col_width(ui, prefix_chars, max_len);
-            list_columns(ui, &rows, min_width, |ui, i| {
-                let Some(r) = state.recent_dirs.get(i) else {
-                    return;
-                };
-                let star = if state.dir_bookmarks.contains(&r.path) {
-                    "*"
-                } else {
-                    ""
-                };
-                ui.horizontal(|ui| {
-                    let label = dir_label(
-                        ui,
-                        format!("{i}: {star}"),
-                        &r.path,
-                        home.as_deref(),
-                        max_len,
-                    );
-                    if ui.button(label).clicked() {
-                        action = Some(ListAction::ChangeSavedDir(
-                            r.path.clone(),
-                            DirList::RecentDirs,
-                        ));
-                    }
-                    if ui
-                        .small_button("x")
-                        .on_hover_text("Remove from recent dirs")
-                        .clicked()
-                    {
-                        action = Some(ListAction::RemoveRecentDir(r.path.clone()));
-                    }
-                });
-            });
-        });
-
-    apply_action(state, action);
-}
-
 /// Display commands previously run in the active tab's cwd. Newest first, in
 /// columns when the panel is wide enough. Same click behavior as the global
-/// history panel.
+/// history panel (see [cmd_click]).
 fn cwd_cmd_history(state: &mut State, ui: &mut Ui) {
     panel_header(
         ui,
@@ -487,8 +340,8 @@ fn cwd_cmd_history(state: &mut State, ui: &mut Ui) {
                 let btn = Button::new(label)
                     .wrap()
                     .min_size(egui::vec2(ui.available_width(), 0.0));
-                if ui.add(btn).clicked() {
-                    action = Some(ListAction::FillInput(item.text.clone()));
+                if let Some(a) = cmd_click(ui.add(btn), &item.text) {
+                    action = Some(a);
                 }
             });
         });
@@ -496,10 +349,23 @@ fn cwd_cmd_history(state: &mut State, ui: &mut Ui) {
     apply_action(state, action);
 }
 
+/// What a click on a Command history / Cmds this dir row does: a left click
+/// copies `text` into the input box, a middle click runs it in a new tab.
+fn cmd_click(resp: egui::Response, text: &str) -> Option<ListAction> {
+    if resp.middle_clicked() {
+        Some(ListAction::RunInNewTab(text.to_owned()))
+    } else if resp.clicked() {
+        Some(ListAction::FillInput(text.to_owned()))
+    } else {
+        None
+    }
+}
+
 /// Display recent commands entered, newest first, in columns when the panel
 /// is wide enough. Clicking the label copies
-/// the command into the input box so the user can edit or run it; the
-/// "In dir" button re-runs it in the directory it was originally run from.
+/// the command into the input box so the user can edit or run it, and
+/// middle-clicking runs it in a new tab (see [cmd_click]); the "In dir"
+/// button re-runs it in the directory it was originally run from.
 fn cmd_history(state: &mut State, ui: &mut Ui) {
     panel_header(ui, "Command history", &mut state.ui.panel_vis.recent_cmds);
 
@@ -530,8 +396,8 @@ fn cmd_history(state: &mut State, ui: &mut Ui) {
                 let btn = Button::new(label)
                     .wrap()
                     .min_size(egui::vec2(ui.available_width(), 0.0));
-                if ui.add(btn).clicked() {
-                    action = Some(ListAction::FillInput(item.text.clone()));
+                if let Some(a) = cmd_click(ui.add(btn), &item.text) {
+                    action = Some(a);
                 }
                 // "In <leaf>" sits on its own row underneath so it
                 // doesn't fight the wrapping command-text button for
@@ -560,6 +426,12 @@ fn apply_action(state: &mut State, action: Option<ListAction>) {
     match action {
         Some(ListAction::ChangeDir(p)) => state.change_dir(p),
         Some(ListAction::ChangeSavedDir(p, list)) => state.change_saved_dir(p, list),
+        Some(ListAction::NewTabDir(p)) => state.open_dir_in_new_tab(p),
+        Some(ListAction::NewTabSavedDir(p, list)) => state.open_saved_dir_in_new_tab(p, list),
+        Some(ListAction::ToggleBookmark(p)) => {
+            let msg = state.toggle_bookmark(p);
+            state.push_out(msg, OutType::StdOut);
+        }
         Some(ListAction::OpenFile(p)) if viewer::can_view(&p) => state.file_viewers.open(p),
         Some(ListAction::OpenFile(p)) => {
             if let Err(e) = open_with_default_app(&p) {
@@ -588,6 +460,10 @@ fn apply_action(state: &mut State, action: Option<ListAction>) {
             let i = state.ui.active_tab;
             state.ui.cli_input[i] = s;
             state.ui.focus_input = true;
+        }
+        Some(ListAction::RunInNewTab(s)) => {
+            state.add_tab();
+            submit_command(state, &s);
         }
         Some(ListAction::RunHistoryInDir(i)) => {
             // Reuse the `hisd` built-in so the spawn / output-capture path
@@ -969,7 +845,7 @@ fn deep_search_bar(state: &mut State, ui: &mut Ui) {
             let resp = ui
                 .add(
                     TextEdit::singleline(&mut state.ui.deep_search)
-                        .hint_text("Deep search...")
+                        .hint_text("Deep search")
                         .desired_width(f32::INFINITY)
                         .id_salt("deep_search"),
                 )
@@ -1035,16 +911,18 @@ fn append_highlighted(
 /// The Files list while a Deep search is set: a status line, then each file
 /// (or in file-name mode, folder) found, by its path relative to the
 /// searched dir. In file-name mode the matches in its name are highlighted,
-/// and folders are marked and coloured as in the listing; otherwise it
+/// and folders are marked and coloured as in the listing, on pale green when
+/// they're among `bookmarks` (see [dirs::BOOKMARKED_FILL]); otherwise it
 /// shows how many lines matched, and those lines follow it, numbered, with
 /// the matches highlighted. `name_filter` (the panel's Search box) narrows
 /// the results by that path. Clicking a row selects its file or folder;
-/// double-clicking opens the file or goes into the folder, as in the
-/// listing.
+/// double-clicking opens the file or goes into the folder, and
+/// middle-clicking a folder opens it in a new tab, as in the listing.
 fn deep_search_results(
     search: &DeepSearch,
     name_filter: &str,
     selected: Option<&Path>,
+    bookmarks: &[PathBuf],
     home: Option<&Path>,
     ui: &mut Ui,
 ) -> Option<ListAction> {
@@ -1146,6 +1024,12 @@ fn deep_search_results(
                 for &row in &rows[range] {
                     let (Row::File(i) | Row::Line(i, _)) = row;
                     let hit = &search.hits[i];
+                    let is_selected = matches!(row, Row::File(_)) && selected == Some(&hit.path);
+                    // As in the listing: pale green unless selected.
+                    let bookmarked = matches!(row, Row::File(_))
+                        && hit.is_folder
+                        && !is_selected
+                        && bookmarks.contains(&hit.path);
                     let text: WidgetText = match row {
                         Row::File(_) if search.opts.file_names => {
                             // The name ends the path; its matches are
@@ -1162,11 +1046,16 @@ fn deep_search_results(
                                 });
                             let mut job = LayoutJob::default();
                             let mut base = plain.clone();
+                            if bookmarked {
+                                base.color = dirs::BOOKMARKED_TEXT;
+                            }
                             if hit.is_folder {
                                 // Same colour this folder has in any path
-                                // shown elsewhere.
-                                job.append("📁 ", 0.0, plain.clone());
+                                // shown elsewhere, from the light-background
+                                // palette on the green.
+                                job.append("📁 ", 0.0, base.clone());
                                 let tilde = render_with_tilde(&hit.path, home);
+                                let dark = dark && !bookmarked;
                                 if let Some(c) = path_color::last_color(&tilde, Some("~"), dark) {
                                     base.color = c;
                                 }
@@ -1189,12 +1078,16 @@ fn deep_search_results(
                             job.into()
                         }
                     };
-                    let is_selected = matches!(row, Row::File(_)) && selected == Some(&hit.path);
-                    let button = Button::selectable(is_selected, text)
+                    let mut button = Button::selectable(is_selected, text)
                         .truncate()
                         .min_size(egui::vec2(ui.available_width(), row_height));
+                    if bookmarked {
+                        button = button.fill(dirs::BOOKMARKED_FILL).frame_when_inactive(true);
+                    }
                     let resp = ui.add(button);
-                    if resp.double_clicked() {
+                    if hit.is_folder && resp.middle_clicked() {
+                        action = Some(ListAction::NewTabDir(hit.path.clone()));
+                    } else if resp.double_clicked() {
                         action = Some(if hit.is_folder {
                             ListAction::ChangeDir(hit.path.clone())
                         } else {
@@ -1487,53 +1380,6 @@ fn font_size_control(ui: &mut Ui, label: &str, size: f32, what: &str) -> f32 {
     delta
 }
 
-/// A `<label> N + -` control for a Bookmarks / Recent dirs path length, like
-/// [font_size_control] except `N` can also be dragged or clicked to type a
-/// value. Updates `len` live, clamped to [MIN_DIR_LABEL_LEN]..=
-/// [MAX_DIR_LABEL_LEN]. Returns true once a change is complete (a button
-/// click, a finished drag, or a committed edit), so the caller can persist it
-/// without saving on every frame of a drag. `what` names the panel's paths,
-/// for the tooltips.
-fn dir_label_len_control(ui: &mut Ui, label: &str, len: &mut usize, what: &str) -> bool {
-    ui.label(label);
-
-    let resp = ui
-        .add(
-            DragValue::new(len)
-                .range(MIN_DIR_LABEL_LEN..=MAX_DIR_LABEL_LEN)
-                .speed(0.25)
-                .update_while_editing(false),
-        )
-        .on_hover_text(format!(
-            "Max characters of {what} paths to show; longer ones are cut from the \
-             front. Drag, or click to type."
-        ));
-
-    let mut done = (resp.changed() && !resp.dragged()) || resp.drag_stopped();
-
-    if ui
-        .small_button("-")
-        .on_hover_text(format!("Show less of {what} paths"))
-        .clicked()
-        && *len > MIN_DIR_LABEL_LEN
-    {
-        *len -= 1;
-        done = true;
-    }
-
-    if ui
-        .small_button("+")
-        .on_hover_text(format!("Show more of {what} paths"))
-        .clicked()
-        && *len < MAX_DIR_LABEL_LEN
-    {
-        *len += 1;
-        done = true;
-    }
-
-    done
-}
-
 /// One [TAB_WIDTH]-wide tab of the top strip. The label is laid out by hand
 /// so it can be cut off at the edge with no ellipsis (egui's own truncation
 /// always adds one); the full label is in the hover text when cut. With
@@ -1619,8 +1465,6 @@ fn tabs_bar(state: &mut State, ui: &mut Ui) {
 
     let font_size = state.font_size;
     let gui_font_size = state.gui_font_size;
-    let mut bookmark_label_len = state.bookmark_label_len;
-    let mut recent_dir_label_len = state.recent_dir_label_len;
 
     let mut to_select: Option<usize> = None;
     let mut to_close: Option<usize> = None;
@@ -1628,27 +1472,13 @@ fn tabs_bar(state: &mut State, ui: &mut Ui) {
     let mut connect_remote: Option<usize> = None;
     let mut font_delta = 0.;
     let mut gui_font_delta = 0.;
-    let mut label_len_done = false;
 
     ui.horizontal(|ui| {
         // Font-size controls sit to the left of the tab strip: one for the
-        // terminal panes, one for the side panels. Then the path lengths
-        // for the Bookmarks and Recent dirs panels, which resize separately.
+        // terminal panes, one for the side panels.
         font_delta = font_size_control(ui, "CLI text: ", font_size, "terminal");
         ui.separator();
         gui_font_delta = font_size_control(ui, "GUI text: ", gui_font_size, "panel");
-        ui.separator();
-        label_len_done |=
-            dir_label_len_control(ui, "Bookmark chars: ", &mut bookmark_label_len, "bookmark");
-        ui.separator();
-
-        label_len_done |= dir_label_len_control(
-            ui,
-            "Recent dir chars: ",
-            &mut recent_dir_label_len,
-            "recent dir",
-        );
-
         ui.separator();
         // Breathing room either side of the tab section.
         ui.add_space(TAB_SECTION_PADDING);
@@ -1700,13 +1530,6 @@ fn tabs_bar(state: &mut State, ui: &mut Ui) {
     if gui_font_delta != 0.0 {
         state.adjust_gui_font_size(gui_font_delta);
     }
-
-    // Applied every frame so the panels follow a drag live; saved once done.
-    state.bookmark_label_len = bookmark_label_len;
-    state.recent_dir_label_len = recent_dir_label_len;
-    if label_len_done {
-        let _ = state.save();
-    }
     if let Some(i) = to_select {
         state.select_tab(i);
     }
@@ -1757,88 +1580,6 @@ fn scale_panel_fonts(ui: &mut Ui, size: f32) {
     }
 }
 
-/// Popup shown while `state.ui.stale_dir` is set: a Recent dirs / Bookmarks
-/// entry no longer exists, so ask whether to remove it from its list. Esc or
-/// a click outside the popup keeps it, as the Keep button does.
-fn stale_dir_popup(state: &mut State, ctx: &egui::Context) {
-    let Some((path, list)) = state.ui.stale_dir.clone() else {
-        return;
-    };
-    let home = state.home.clone();
-    let shown = render_with_tilde(&path, home.as_deref());
-    let gui_font_size = state.gui_font_size;
-
-    // `Some(true)` to remove, `Some(false)` to keep.
-    let mut remove = None;
-    let modal = Modal::new(egui::Id::new("stale_dir_popup")).show(ctx, |ui| {
-        scale_panel_fonts(ui, gui_font_size);
-        ui.heading("Directory not found");
-        ui.add_space(4.);
-
-        let mut msg = path_job(ui, &path, home.as_deref());
-        let body = TextFormat {
-            font_id: TextStyle::Body.resolve(ui.style()),
-            color: Color32::PLACEHOLDER,
-            ..Default::default()
-        };
-        msg.append(
-            &format!(" doesn't exist. Remove it from {}?", list.name()),
-            0.,
-            body,
-        );
-        ui.label(msg);
-        ui.add_space(8.);
-
-        ui.horizontal_wrapped(|ui| {
-            let font_id = TextStyle::Button.resolve(ui.style());
-            let mut label = LayoutJob::default();
-            label.append(
-                "🗙 ",
-                0.,
-                TextFormat {
-                    font_id: font_id.clone(),
-                    color: ui.visuals().error_fg_color,
-                    ..Default::default()
-                },
-            );
-            label.append(
-                &format!("Remove {shown} from {}", list.name()),
-                0.,
-                TextFormat {
-                    font_id,
-                    color: Color32::PLACEHOLDER,
-                    ..Default::default()
-                },
-            );
-            let remove_btn = ui.button(label);
-            let keep_btn = ui.button(format!("Keep this {}", list.entry_name()));
-            // Hold keyboard focus inside the popup, starting on Keep: the
-            // input row behind it would otherwise keep its focus and take
-            // typing (and Enter) while the popup is up. Tab switches between
-            // the two; Enter or Space presses the focused one.
-            if !remove_btn.has_focus() && !keep_btn.has_focus() {
-                keep_btn.request_focus();
-            }
-            if remove_btn.clicked() {
-                remove = Some(true);
-            }
-            if keep_btn.clicked() {
-                remove = Some(false);
-            }
-        });
-    });
-    if remove.is_none() && modal.should_close() {
-        remove = Some(false);
-    }
-
-    match remove {
-        Some(true) => state.remove_stale_dir(),
-        Some(false) => state.ui.stale_dir = None,
-        None => return,
-    }
-    state.ui.focus_input = true;
-}
-
 pub fn draw(state: &mut State, ui: &mut Ui) {
     clipboard::capture(state, ui.ctx());
     // Snapshot panel visibility so a change from the "Panels:" toggles or a
@@ -1885,11 +1626,11 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
         let max = central_reserve(ui, f32::INFINITY);
         let r = Panel::left("bookmarks_panel")
             .resizable(true)
-            .default_size(prev.bookmarks.unwrap_or(BOOKMARK_COL_WIDTH))
+            .default_size(prev.bookmarks.unwrap_or(dirs::BOOKMARK_COL_WIDTH))
             .max_size(max)
             .show(ui, |ui| {
                 scale_panel_fonts(ui, gui_font_size);
-                dir_bookmarks(state, ui);
+                dirs::dir_bookmarks(state, ui);
             });
         state.ui.panel_widths.bookmarks = Some(r.response.rect.width());
     }
@@ -1898,11 +1639,11 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
         let max = central_reserve(ui, f32::INFINITY);
         let r = Panel::left("recent_dirs_panel")
             .resizable(true)
-            .default_size(prev.recent_dirs.unwrap_or(RECENT_DIRS_COL_WIDTH))
+            .default_size(prev.recent_dirs.unwrap_or(dirs::RECENT_DIRS_COL_WIDTH))
             .max_size(max)
             .show(ui, |ui| {
                 scale_panel_fonts(ui, gui_font_size);
-                dir_history(state, ui);
+                dirs::dir_history(state, ui);
             });
         state.ui.panel_widths.recent_dirs = Some(r.response.rect.width());
     }
@@ -2010,7 +1751,7 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
     // Likewise the PATH editor's window.
     path_panel::path_window(state, ui.ctx());
 
-    stale_dir_popup(state, ui.ctx());
+    dirs::stale_dir_popup(state, ui.ctx());
 
     // A command was submitted this frame: paint its echo, then come straight
     // back to run it.

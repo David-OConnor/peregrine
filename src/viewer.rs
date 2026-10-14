@@ -1,23 +1,33 @@
-//! File viewer windows. Double-clicking a Markdown or plain-text file in the
-//! Files panel opens it in its own native window (an egui deferred viewport):
-//! Markdown rendered by `egui_commonmark` (see `crate::markdown`), plain text
-//! as is. Each window re-reads its file when it changes on disk, so it can sit
-//! beside an editor as a live preview.
+//! File viewer windows. Double-clicking a Markdown, plain-text or image file
+//! in the Files panel opens it in its own native window (an egui deferred
+//! viewport): Markdown rendered by `egui_commonmark` (see `crate::markdown`),
+//! plain text as is, images decoded by the `image` crate. Each window re-reads
+//! its file when it changes on disk, so it can sit beside an editor as a live
+//! preview.
 
 use std::{
     ffi::OsStr,
     fs::{self, File},
     io::{self, Read},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{
+        Arc, Mutex, MutexGuard,
+        mpsc::{self, Receiver, TryRecvError},
+    },
+    thread,
     time::{Duration, Instant, SystemTime},
 };
 
 use egui::{
-    CentralPanel, Context, Frame, Id, Key, Label, Panel, RichText, ScrollArea, Ui, ViewportBuilder,
-    ViewportCommand, ViewportId,
+    CentralPanel, Color32, ColorImage, Context, Frame, Id, Key, Label, Modifiers, Panel, Rect,
+    RichText, ScrollArea, Sense, TextureFilter, TextureHandle, TextureOptions, Ui, Vec2,
+    ViewportBuilder, ViewportCommand, ViewportId, emath::GuiRounding, pos2, scroll_area, vec2,
 };
 use egui_commonmark::CommonMarkCache;
+use image::{
+    DynamicImage, ImageDecoder, ImageReader, ImageResult, imageops::FilterType,
+    metadata::Orientation,
+};
 
 use crate::{
     files::{format_size, open_with_default_app},
@@ -29,13 +39,27 @@ const TEXT_EXTENSIONS: [&str; 1] = ["txt"];
 /// Names (lowercase) of plain-text files that have no extension as far as
 /// `Path::extension` is concerned: a leading dot starts the name.
 const TEXT_FILE_NAMES: [&str; 1] = [".gitignore"];
+/// Extensions (lowercase) of images: the formats enabled on the `image` crate
+/// in Cargo.toml.
+const IMAGE_EXTENSIONS: [&str; 5] = ["png", "jpg", "jpeg", "jfif", "bmp"];
+
+/// Zoom limits for images, in screen pixels per image pixel.
+const MIN_ZOOM: f32 = 0.02;
+const MAX_ZOOM: f32 = 32.;
+
+/// Zoomed in, image pixels show as crisp squares rather than a blur, as in
+/// most image viewers.
+const IMAGE_TEXTURE: TextureOptions = TextureOptions {
+    magnification: TextureFilter::Nearest,
+    ..TextureOptions::LINEAR
+};
 
 /// How often an open window checks its file's modification time.
 const RELOAD_POLL: Duration = Duration::from_secs(1);
 
 /// How much of a file a window reads. Every window draws on the UI thread,
 /// so laying out a huge log would stall the whole app; the rest is left to
-/// "Open externally".
+/// "Open with OS default".
 const MAX_BYTES: u64 = 1 << 20;
 
 const WINDOW_SIZE: [f32; 2] = [820., 900.];
@@ -44,18 +68,27 @@ const MIN_WINDOW_SIZE: [f32; 2] = [300., 200.];
 /// Whether `path` is a file type the viewer shows, so a double-click views it
 /// here rather than handing it to the OS's default program.
 pub fn can_view(path: &Path) -> bool {
-    is_markdown(path) || is_text(path)
+    is_markdown(path) || is_text(path) || is_image(path)
+}
+
+fn lowercase(s: &OsStr) -> String {
+    s.to_string_lossy().to_lowercase()
 }
 
 fn is_text(path: &Path) -> bool {
-    let lower = |s: &OsStr| s.to_string_lossy().to_lowercase();
     path.extension()
-        .map(lower)
+        .map(lowercase)
         .is_some_and(|e| TEXT_EXTENSIONS.contains(&e.as_str()))
         || path
             .file_name()
-            .map(lower)
+            .map(lowercase)
             .is_some_and(|n| TEXT_FILE_NAMES.contains(&n.as_str()))
+}
+
+fn is_image(path: &Path) -> bool {
+    path.extension()
+        .map(lowercase)
+        .is_some_and(|e| IMAGE_EXTENSIONS.contains(&e.as_str()))
 }
 
 /// How a window renders its file.
@@ -64,12 +97,15 @@ enum Kind {
     Markdown,
     /// Plain text, in the monospace font.
     Text,
+    Image,
 }
 
 impl Kind {
     fn of(path: &Path) -> Self {
         if is_markdown(path) {
             Self::Markdown
+        } else if is_image(path) {
+            Self::Image
         } else {
             Self::Text
         }
@@ -79,6 +115,7 @@ impl Kind {
         match self {
             Self::Markdown => "Markdown",
             Self::Text => "Text",
+            Self::Image => "Image",
         }
     }
 }
@@ -111,15 +148,17 @@ struct Doc {
     id: ViewportId,
     path: PathBuf,
     kind: Kind,
-    /// The file's contents (at most [MAX_BYTES] of them), or why it couldn't
-    /// be read.
-    text: Result<String, String>,
-    /// The file's size, when `text` holds only the start of it.
+    /// The file's contents, or why they couldn't be read.
+    content: Result<Content, String>,
+    /// The file's size, when `content` holds only the start of it.
     truncated: Option<u64>,
-    /// Markdown `text` split at its `<details>` blocks; see
-    /// [markdown::split_details]. Empty for plain text.
+    /// Markdown `content` split at its `<details>` blocks; see
+    /// [markdown::split_details]. Empty for plain text and images.
     blocks: Vec<Block>,
-    /// Modification time of the contents in `text`, to notice edits.
+    /// An image being decoded on a background thread.
+    decoding: Option<Decoding>,
+    zoom: Zoom,
+    /// Modification time of the file as last read, to notice edits.
     modified: Option<SystemTime>,
     last_poll: Instant,
     /// Cleared when the user closes the window; the main pass then drops it.
@@ -128,48 +167,147 @@ struct Doc {
     notice: Option<String>,
 }
 
+/// What a window shows.
+enum Content {
+    /// Markdown or plain text: at most [MAX_BYTES] of the file.
+    Text(String),
+    Image(Picture),
+    /// An image whose first decode hasn't finished yet.
+    Loading,
+}
+
+/// An image decode running on a background thread; see [spawn_decode].
+struct Decoding {
+    rx: Receiver<Result<Decoded, String>>,
+    /// Set when the file changed, or the window moved on to another image,
+    /// after this decode began: its result is dropped and the current file
+    /// decoded afresh.
+    stale: bool,
+}
+
+/// An image, uploaded for drawing.
+struct Picture {
+    texture: TextureHandle,
+    /// The image's own size in pixels. Bigger than the texture when that had
+    /// to be scaled down to the GPU's largest texture size.
+    size: [u32; 2],
+}
+
+/// How an image window is zoomed.
+#[derive(Default)]
+struct Zoom {
+    /// Screen pixels per image pixel, as the user set it. `None` fits the
+    /// image to the window: shrunk if it's bigger, actual size if not.
+    set: Option<f32>,
+    /// The scale the image was last drawn at, for the toolbar.
+    shown: f32,
+}
+
 impl Doc {
-    fn new(id: ViewportId, path: PathBuf, kind: Kind) -> Self {
+    fn new(ctx: &Context, id: ViewportId, path: PathBuf, kind: Kind) -> Self {
         let mut doc = Self {
             id,
             path,
             kind,
-            text: Ok(String::new()),
+            content: Ok(Content::Loading),
             truncated: None,
             blocks: Vec::new(),
+            decoding: None,
+            zoom: Zoom::default(),
             modified: None,
             last_poll: Instant::now(),
             open: true,
             notice: None,
         };
-        doc.reload();
+        doc.reload(ctx);
         doc
     }
 
-    fn reload(&mut self) {
+    fn reload(&mut self, ctx: &Context) {
         self.modified = modified_time(&self.path);
         self.last_poll = Instant::now();
+        if self.kind == Kind::Image {
+            // The current picture stays up until the new one is ready. One
+            // decode at a time, so holding an arrow key over big photos
+            // doesn't pile up threads: one already running is redone when
+            // it finishes.
+            match &mut self.decoding {
+                Some(decoding) => decoding.stale = true,
+                None => self.start_decode(ctx),
+            }
+            return;
+        }
         let read = read_text(&self.path);
         self.truncated = read.as_ref().ok().and_then(|(_, size)| *size);
-        self.text = read
-            .map(|(text, _)| text)
-            .map_err(|e| format!("Couldn't read {}: {e}", self.path.display()));
-        self.blocks = match (&self.text, self.kind) {
-            (Ok(text), Kind::Markdown) => markdown::split_details(text),
+        self.blocks = match (&read, self.kind) {
+            (Ok((text, _)), Kind::Markdown) => markdown::split_details(text),
             _ => Vec::new(),
         };
+        self.content = read
+            .map(|(text, _)| Content::Text(text))
+            .map_err(|e| format!("Couldn't read {}: {e}", self.path.display()));
     }
 
     /// Re-read the file if its modification time changed since it was read.
     /// Polled at most once per [RELOAD_POLL].
-    fn reload_if_changed(&mut self) {
+    fn reload_if_changed(&mut self, ctx: &Context) {
         if self.last_poll.elapsed() < RELOAD_POLL {
             return;
         }
         self.last_poll = Instant::now();
         if modified_time(&self.path) != self.modified {
-            self.reload();
+            self.reload(ctx);
         }
+    }
+
+    fn start_decode(&mut self, ctx: &Context) {
+        self.decoding = Some(Decoding {
+            rx: spawn_decode(ctx, self.id, self.path.clone()),
+            stale: false,
+        });
+    }
+
+    /// Show the image from [spawn_decode], once it's ready.
+    fn receive_image(&mut self, ctx: &Context) {
+        let Some(decoding) = &self.decoding else {
+            return;
+        };
+        let decoded = match decoding.rx.try_recv() {
+            Ok(decoded) => decoded,
+            Err(TryRecvError::Empty) => return,
+            // The decoder panicked.
+            Err(TryRecvError::Disconnected) => {
+                Err(format!("Couldn't decode {}", self.path.display()))
+            }
+        };
+        if decoding.stale {
+            self.start_decode(ctx);
+            return;
+        }
+        self.decoding = None;
+        self.content = decoded.map(|d| {
+            Content::Image(Picture {
+                texture: ctx.load_texture(self.path.to_string_lossy(), d.pixels, IMAGE_TEXTURE),
+                size: d.size,
+            })
+        });
+    }
+
+    /// Show the image `step` places after this one in its folder (before
+    /// it, if negative); see [neighbor_image].
+    fn navigate(&mut self, ctx: &Context, step: isize) {
+        let Some(path) = neighbor_image(&self.path, step) else {
+            return;
+        };
+        if path == self.path {
+            return;
+        }
+        self.path = path;
+        self.zoom = Zoom::default();
+        self.notice = None;
+        self.reload(ctx);
+        // The main window's pass sets titles too, but it may be idle.
+        ctx.send_viewport_cmd_to(self.id, ViewportCommand::Title(self.title()));
     }
 
     fn title(&self) -> String {
@@ -184,6 +322,35 @@ impl Doc {
 
 fn modified_time(path: &Path) -> Option<SystemTime> {
     fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
+/// The image `step` places after `path` in its folder (before it, if
+/// negative), in the Files panel's order: by name, ignoring case. Wraps
+/// around at the ends. `path` itself needn't still exist.
+fn neighbor_image(path: &Path, step: isize) -> Option<PathBuf> {
+    let key = |p: &Path| {
+        let name = p.file_name().unwrap_or_default().to_string_lossy();
+        // Then by exact name, so names differing only in case keep an order.
+        (name.to_lowercase(), name.into_owned())
+    };
+    let mut images: Vec<PathBuf> = fs::read_dir(path.parent()?)
+        .ok()?
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| !t.is_dir()))
+        .map(|e| e.path())
+        .filter(|p| is_image(p))
+        .collect();
+    if images.is_empty() {
+        return None;
+    }
+    images.sort_by_cached_key(|p| key(p));
+    let target = match images.binary_search_by_key(&key(path), |p| key(p)) {
+        Ok(i) => i as isize + step,
+        // Gone from the folder: `i` is where it was.
+        Err(i) => i as isize + step - isize::from(step > 0),
+    };
+    let i = target.rem_euclid(images.len() as isize) as usize;
+    Some(images.swap_remove(i))
 }
 
 /// Read the text file at `path`. A file bigger than [MAX_BYTES] is cut at
@@ -224,6 +391,53 @@ fn decode(bytes: &[u8]) -> String {
             text.strip_prefix('\u{feff}').unwrap_or(&text).to_string()
         }
     }
+}
+
+/// An image decoded by [decode_image], ready to upload.
+struct Decoded {
+    pixels: ColorImage,
+    /// The image's own size, before any scaling down.
+    size: [u32; 2],
+}
+
+/// Decode the image at `path` on a background thread, then repaint window
+/// `id` to show it: a big photo takes long enough to stall every window.
+fn spawn_decode(ctx: &Context, id: ViewportId, path: PathBuf) -> Receiver<Result<Decoded, String>> {
+    let (tx, rx) = mpsc::channel();
+    let ctx = ctx.clone();
+    let max_side = ctx.input(|i| i.max_texture_side) as u32;
+    thread::spawn(move || {
+        let decoded = decode_image(&path, max_side)
+            .map_err(|e| format!("Couldn't read {}: {e}", path.display()));
+        // Fails if the window closed meanwhile: nobody's waiting.
+        if tx.send(decoded).is_ok() {
+            ctx.request_repaint_of(id);
+        }
+    });
+    rx
+}
+
+/// Decode the image at `path`, its format sniffed from the contents rather
+/// than the extension. It's turned upright per its EXIF orientation, as phone
+/// photos need, and scaled down if a side is longer than `max_side`.
+fn decode_image(path: &Path, max_side: u32) -> ImageResult<Decoded> {
+    let mut decoder = ImageReader::open(path)?
+        .with_guessed_format()?
+        .into_decoder()?;
+    // A malformed EXIF block isn't worth refusing the picture over.
+    let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
+    let mut image = DynamicImage::from_decoder(decoder)?;
+    image.apply_orientation(orientation);
+    let size = [image.width(), image.height()];
+    if size[0].max(size[1]) > max_side {
+        image = image.resize(max_side, max_side, FilterType::Triangle);
+    }
+    let rgba = image.into_rgba8();
+    let pixels = ColorImage::from_rgba_unmultiplied(
+        [rgba.width() as usize, rgba.height() as usize],
+        rgba.as_raw(),
+    );
+    Ok(Decoded { pixels, size })
 }
 
 impl FileViewers {
@@ -278,13 +492,13 @@ impl Inner {
         // find the same window.
         let path = fs::canonicalize(&path).map(strip_verbatim).unwrap_or(path);
         if let Some(doc) = self.docs.iter_mut().find(|d| d.path == path && d.open) {
-            doc.reload();
+            doc.reload(ctx);
             ctx.send_viewport_cmd_to(doc.id, ViewportCommand::Focus);
             return;
         }
         let id = ViewportId::from_hash_of(("file_viewer", self.next_id));
         self.next_id += 1;
-        self.docs.push(Doc::new(id, path, kind));
+        self.docs.push(Doc::new(ctx, id, path, kind));
     }
 
     /// Render the window for viewport `id`. Runs in that viewport's own pass.
@@ -307,10 +521,20 @@ impl Inner {
         }
 
         if ctx.input(|i| i.key_pressed(Key::F5)) {
-            doc.reload();
+            doc.reload(&ctx);
         } else {
-            doc.reload_if_changed();
+            doc.reload_if_changed(&ctx);
         }
+        if doc.kind == Kind::Image {
+            let step = ctx.input_mut(|i| {
+                isize::from(i.consume_key(Modifiers::NONE, Key::ArrowRight))
+                    - isize::from(i.consume_key(Modifiers::NONE, Key::ArrowLeft))
+            });
+            if step != 0 {
+                doc.navigate(&ctx, step);
+            }
+        }
+        doc.receive_image(&ctx);
         // Keep polling for edits while the window is idle.
         ctx.request_repaint_after(RELOAD_POLL);
 
@@ -322,22 +546,29 @@ impl Inner {
 
         CentralPanel::default()
             .frame(Frame::central_panel(ui.style()).inner_margin(egui::Margin::symmetric(16, 8)))
-            .show(ui, |ui| {
-                ScrollArea::vertical()
-                    .id_salt(("viewer_scroll", id))
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| match (&doc.text, doc.kind) {
-                        (Ok(text), Kind::Markdown) => {
-                            let cache = cache.get_or_insert_with(CommonMarkCache::default);
-                            markdown::show(ui, text, &doc.blocks, &doc.path, cache, id);
-                        }
-                        (Ok(text), Kind::Text) => {
-                            ui.add(Label::new(RichText::new(text).monospace()).selectable(true));
-                        }
-                        (Err(e), _) => {
-                            ui.label(RichText::new(e).color(ui.visuals().error_fg_color));
-                        }
-                    });
+            .show(ui, |ui| match &doc.content {
+                Ok(Content::Text(text)) => {
+                    ScrollArea::vertical()
+                        .id_salt(("viewer_scroll", id))
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            if doc.kind == Kind::Markdown {
+                                let cache = cache.get_or_insert_with(CommonMarkCache::default);
+                                markdown::show(ui, text, &doc.blocks, &doc.path, cache, id);
+                            } else {
+                                ui.add(
+                                    Label::new(RichText::new(text).monospace()).selectable(true),
+                                );
+                            }
+                        });
+                }
+                Ok(Content::Image(picture)) => show_image(ui, picture, &mut doc.zoom, id),
+                Ok(Content::Loading) => {
+                    ui.spinner();
+                }
+                Err(e) => {
+                    ui.label(RichText::new(e).color(ui.visuals().error_fg_color));
+                }
             });
 
         if doc.kind == Kind::Markdown {
@@ -349,25 +580,46 @@ impl Inner {
     }
 }
 
-/// Path, notices, and the Reload / Open externally buttons.
+/// Path, notices, and the Reload / Open externally buttons, plus previous /
+/// next and zoom controls for an image.
 fn toolbar(doc: &mut Doc, ui: &mut Ui) {
     ui.horizontal(|ui| {
+        if doc.kind == Kind::Image {
+            if ui
+                .button("⬅")
+                .on_hover_text("Previous image in this folder (Left arrow)")
+                .clicked()
+            {
+                doc.navigate(ui.ctx(), -1);
+            }
+            if ui
+                .button("➡")
+                .on_hover_text("Next image in this folder (Right arrow)")
+                .clicked()
+            {
+                doc.navigate(ui.ctx(), 1);
+            }
+            ui.separator();
+        }
         if ui
             .button("⟳ Reload")
             .on_hover_text("Re-read the file (F5)")
             .clicked()
         {
-            doc.reload();
+            doc.reload(ui.ctx());
             doc.notice = None;
         }
         if ui
-            .button("Open externally")
+            .button("Open with OS default")
             .on_hover_text("Open with the default program for this file type")
             .clicked()
         {
             doc.notice = open_with_default_app(&doc.path)
                 .err()
                 .map(|e| format!("Couldn't open: {e}"));
+        }
+        if let Ok(Content::Image(picture)) = &doc.content {
+            zoom_controls(ui, picture, &mut doc.zoom);
         }
         ui.label(RichText::new(doc.path.display().to_string()).weak());
     });
@@ -379,9 +631,104 @@ fn toolbar(doc: &mut Doc, ui: &mut Ui) {
         );
         ui.label(RichText::new(msg).color(ui.visuals().warn_fg_color));
     }
+    if let Ok(Content::Image(picture)) = &doc.content {
+        let [w, h] = picture.texture.size();
+        if [w as u32, h as u32] != picture.size {
+            let msg = format!(
+                "Showing at {w} × {h}, the largest image the graphics card takes. \
+                 Open with the default application to see it all."
+            );
+            ui.label(RichText::new(msg).color(ui.visuals().warn_fg_color));
+        }
+    }
     if let Some(notice) = &doc.notice {
         ui.label(RichText::new(notice).color(ui.visuals().error_fg_color));
     }
+}
+
+/// Fit / 100% toggles, and the image's size and zoom.
+fn zoom_controls(ui: &mut Ui, picture: &Picture, zoom: &mut Zoom) {
+    ui.separator();
+    if ui
+        .selectable_label(zoom.set.is_none(), "Fit")
+        .on_hover_text("Shrink to fit the window. Ctrl+scroll to zoom, drag to pan")
+        .clicked()
+    {
+        zoom.set = None;
+    }
+    if ui
+        .selectable_label(zoom.set == Some(1.), "100%")
+        .on_hover_text("Actual size: one image pixel per screen pixel")
+        .clicked()
+    {
+        zoom.set = Some(1.);
+    }
+    let [w, h] = picture.size;
+    ui.label(format!("{w} × {h} at {:.0}%", zoom.shown * 100.));
+    ui.separator();
+}
+
+/// Draw `picture` centred in viewer window `window`, at `zoom`. Ctrl+scroll
+/// (or pinch) zooms about the pointer; scrolling or dragging pans.
+fn show_image(ui: &mut Ui, picture: &Picture, zoom: &mut Zoom, window: ViewportId) {
+    let ppp = ui.ctx().pixels_per_point();
+    // Its size in points at 100%: one image pixel per screen pixel.
+    let actual = vec2(picture.size[0] as f32, picture.size[1] as f32) / ppp;
+    let viewport = ui.available_rect_before_wrap();
+    let fit = (viewport.width() / actual.x)
+        .min(viewport.height() / actual.y)
+        .min(1.);
+    let mut scale = zoom.set.unwrap_or(fit);
+
+    let scroll_salt = ("viewer_scroll", window);
+    let mut scroll = ScrollArea::both()
+        .id_salt(scroll_salt)
+        .auto_shrink([false, false]);
+    let factor = ui.input(|i| i.zoom_delta());
+    let pointer = ui
+        .ctx()
+        .pointer_hover_pos()
+        .filter(|p| viewport.contains(*p));
+    if let Some(pointer) = pointer
+        && factor != 1.
+    {
+        let new_scale = (scale * factor).clamp(MIN_ZOOM, MAX_ZOOM);
+        // Scroll so the image point under the pointer stays there.
+        let offset = scroll_area::State::load(ui.ctx(), ui.make_persistent_id(scroll_salt))
+            .map_or(Vec2::ZERO, |s| s.offset);
+        let at = pointer - viewport.min;
+        let point = (offset + at - padding(actual * scale, viewport.size())) / scale;
+        let offset = point * new_scale + padding(actual * new_scale, viewport.size()) - at;
+        scroll = scroll.scroll_offset(offset.max(Vec2::ZERO));
+        scale = new_scale;
+        zoom.set = Some(new_scale);
+    }
+    if zoom.shown != scale {
+        zoom.shown = scale;
+        // For the toolbar, already drawn this pass.
+        ui.ctx().request_repaint();
+    }
+
+    let size = actual * scale;
+    // Fitted, the image is never bigger than the viewport, so float error
+    // mustn't add scroll bars.
+    let content = match zoom.set {
+        Some(_) => size.max(viewport.size()),
+        None => viewport.size(),
+    };
+    scroll.show(ui, |ui| {
+        let (rect, _) = ui.allocate_exact_size(content, Sense::hover());
+        let image_rect = Rect::from_center_size(rect.center(), size).round_to_pixels(ppp);
+        let uv = Rect::from_min_max(pos2(0., 0.), pos2(1., 1.));
+        ui.painter()
+            .image(picture.texture.id(), image_rect, uv, Color32::WHITE);
+    });
+}
+
+/// The margin around an image of `size` centred in a viewport of
+/// `viewport`: none along an axis where it overflows.
+fn padding(size: Vec2, viewport: Vec2) -> Vec2 {
+    ((viewport - size) / 2.).max(Vec2::ZERO)
 }
 
 /// Open `path`, a local file linked from `doc`: in another viewer window if
@@ -423,8 +770,75 @@ mod tests {
         assert!(!can_view(Path::new("a/main.rs")));
         assert!(!can_view(Path::new("txt")));
         assert!(!can_view(Path::new("a/.gitignore.bak")));
+        assert!(can_view(Path::new("shots/a.PNG")));
+        assert!(can_view(Path::new("photo.jpeg")));
+        assert!(!can_view(Path::new("png")));
         assert_eq!(Kind::of(Path::new("README.md")), Kind::Markdown);
         assert_eq!(Kind::of(Path::new(".gitignore")), Kind::Text);
+        assert_eq!(Kind::of(Path::new("logo.bmp")), Kind::Image);
+    }
+
+    #[test]
+    fn decodes_images() {
+        let dir = std::env::temp_dir();
+        let pid = std::process::id();
+        // Named .jpg, but a PNG: the format comes from the contents.
+        let path = dir.join(format!("peregrine_viewer_{pid}.jpg"));
+        let mut image = image::RgbaImage::new(3, 2);
+        image.put_pixel(0, 0, image::Rgba([255, 0, 0, 255]));
+        image
+            .save_with_format(&path, image::ImageFormat::Png)
+            .unwrap();
+        let full = decode_image(&path, 8);
+        let shrunk = decode_image(&path, 2);
+        fs::remove_file(&path).unwrap();
+
+        let full = full.unwrap();
+        assert_eq!(full.size, [3, 2]);
+        assert_eq!(full.pixels.size, [3, 2]);
+        assert_eq!(full.pixels.pixels[0], Color32::RED);
+        let shrunk = shrunk.unwrap();
+        assert_eq!(shrunk.size, [3, 2]);
+        assert_eq!(shrunk.pixels.size, [2, 1]);
+
+        let not_image = dir.join(format!("peregrine_viewer_{pid}.png"));
+        fs::write(&not_image, "hello").unwrap();
+        let read = decode_image(&not_image, 8);
+        fs::remove_file(&not_image).unwrap();
+        assert!(read.is_err());
+    }
+
+    #[test]
+    fn steps_through_a_folders_images() {
+        let dir = std::env::temp_dir().join(format!("peregrine_viewer_{}", std::process::id()));
+        fs::create_dir_all(dir.join("d.png")).unwrap();
+        for name in ["b.JPG", "a.png", "c.bmp", "notes.txt"] {
+            fs::write(dir.join(name), "").unwrap();
+        }
+        let next = |name: &str, step| {
+            neighbor_image(&dir.join(name), step).map(|p| p.file_name().unwrap().to_owned())
+        };
+        let (next_a, prev_a, skip_a) = (next("a.png", 1), next("a.png", -1), next("a.png", 2));
+        let (next_c, gone_next, gone_prev) =
+            (next("c.bmp", 1), next("bb.png", 1), next("bb.png", -1));
+        let last = next("c.bmp", 0);
+        fs::remove_dir_all(&dir).unwrap();
+
+        // Ignoring case, skipping the text file and the folder named like an
+        // image, wrapping around at the ends.
+        assert_eq!(next_a.unwrap(), "b.JPG");
+        assert_eq!(prev_a.unwrap(), "c.bmp");
+        assert_eq!(skip_a.unwrap(), "c.bmp");
+        assert_eq!(next_c.unwrap(), "a.png");
+        assert_eq!(last.unwrap(), "c.bmp");
+        // A file that's gone steps from where it was.
+        assert_eq!(gone_next.unwrap(), "c.bmp");
+        assert_eq!(gone_prev.unwrap(), "b.JPG");
+    }
+
+    #[test]
+    fn pads_only_what_fits() {
+        assert_eq!(padding(vec2(100., 300.), vec2(200., 200.)), vec2(50., 0.));
     }
 
     #[test]

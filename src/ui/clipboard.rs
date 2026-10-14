@@ -129,7 +129,8 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
     super::panel_header(ui, "Clipboard", &mut state.ui.clipboard.visible);
     ui.label("Choose an entry, then paste normally, or use its paste button.");
     ui.small("Session only · 100 entries · up to 1 MiB each");
-    ui.add(TextEdit::singleline(&mut state.ui.clipboard.search).hint_text("Search clipboard"));
+    ui.add(TextEdit::singleline(&mut state.ui.clipboard.search).hint_text("Search"));
+    
     if ui
         .button("Clear history")
         .on_hover_text("Leaves the system clipboard unchanged")

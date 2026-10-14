@@ -1,29 +1,32 @@
 use std::path::PathBuf;
 
-use egui::{
-    Align, Button, Event, Frame, Key, Layout, Panel, RichText, ScrollArea, TextStyle, Ui,
-};
+use egui::{Align, Button, Event, Frame, Key, Layout, Panel, RichText, ScrollArea, TextStyle, Ui};
 
 use crate::{
-    OutType, files,
-    path_color, render_with_tilde,
+    OutType, files, path_color, render_with_tilde,
     state::State,
     ui,
-    ui::{COLOR_EXECUTABLE, FILES_COL_MIN_CHARS, ListAction},
+    ui::{
+        COLOR_EXECUTABLE, FILES_COL_MIN_CHARS, ListAction,
+        dirs::{BOOKMARKED_FILL, BOOKMARKED_TEXT},
+    },
 };
 
 /// Files in the active tab's cwd, as a selectable list. Folders are
-/// sorted first and prefixed with 📁; executable files (Unix +x, or
+/// sorted first and prefixed with 📁, on pale green when bookmarked (as in
+/// Recent dirs); executable files (Unix +x, or
 /// Windows `.exe`/`.msi`) are coloured green. The listing is refreshed
 /// by [State::refresh_browser_files] on every cwd change and after every
 /// command, so we just read what's already there. The search box under the
-/// hidden/dotfile toggles narrows the listing by name. When the panel is wide
-/// enough (see [FILES_COL_MIN_CHARS]) the list is laid out in as many columns
-/// as fit.
+/// hidden/dotfile toggles narrows the listing by name and selects the first
+/// match as it's edited. Enter opens the selected row, just like a double-click.
+/// When the panel is wide enough (see [FILES_COL_MIN_CHARS]) the list is laid
+/// out in as many columns as fit.
 ///
 /// Clicking a row selects it, and the bottom third of the panel shows its
 /// details (see [ui::file_details]). Double-clicking a folder row navigates into
-/// it (same path as clicking a bookmark or recent dir); double-clicking a
+/// it (same path as clicking a bookmark or recent dir), and middle-clicking
+/// opens it in a new tab; double-clicking a
 /// Markdown or plain-text (`.txt`, `.gitignore`) file opens it in a viewer
 /// window (see `crate::viewer`); any other file opens with the OS's default
 /// associated program (see
@@ -41,14 +44,41 @@ pub(crate) fn file_browser(state: &mut State, ui: &mut Ui) {
     // The whole pane, for the mouse Back/Forward buttons below.
     let pane_rect = ui.max_rect();
 
+    // A click in this pane gives it Enter and Ctrl+C / X / V; a click
+    // anywhere else takes them away.
+    if ui.input(|i| i.pointer.any_pressed()) {
+        state.ui.files_active = ui.rect_contains_pointer(pane_rect);
+    }
+
+    // Consume Enter before drawing the widgets, so the quick filter keeps
+    // focus and a selected row's button doesn't turn it into a rename click.
+    // Other text boxes (including Deep search and rename) keep their Enter.
+    let search_id = ui.make_persistent_id(egui::IdSalt::new("files_search"));
+    let can_open = state.ui.rename.is_none()
+        && (ui.memory(|m| m.has_focus(search_id))
+            || (state.ui.files_active && !ui.ctx().text_edit_focused()));
+    let open_selected =
+        can_open && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter));
+    if open_selected {
+        state.ui.rename_pending = None;
+    }
+
     ui::panel_header(ui, "Files", &mut state.ui.panel_vis.file_browser);
 
-    // The directory being listed, colour-coded like the other panels' paths.
-    // Wraps rather than widening the panel when it's long. The button to its
-    // right does what the `open` command does: shows this dir in the OS's
-    // file manager.
-    let cwd_job = ui::path_job(ui, state.cwd(), state.home.as_deref());
+    // The directory being listed, colour-coded like the other panels' paths,
+    // and on pale green when it's bookmarked, as its rows are elsewhere.
+    // Wraps rather than widening the panel when it's long. The buttons to its
+    // right bookmark it (or remove the bookmark), and do what the `open`
+    // command does: show this dir in the OS's file manager.
+    let bookmarked = state.dir_bookmarks.iter().any(|p| p == state.cwd());
+    let home = state.home.clone();
+    let cwd_job = if bookmarked {
+        ui::path_job_on(ui, state.cwd(), home.as_deref(), false, BOOKMARKED_TEXT)
+    } else {
+        ui::path_job(ui, state.cwd(), home.as_deref())
+    };
     let mut open_clicked = false;
+    let mut star_clicked = false;
     ui.horizontal(|ui| {
         ui.with_layout(Layout::right_to_left(Align::TOP), |ui| {
             if ui
@@ -58,12 +88,26 @@ pub(crate) fn file_browser(state: &mut State, ui: &mut Ui) {
             {
                 open_clicked = true;
             }
-            // Left-aligned in whatever width the button leaves.
+            star_clicked = ui::dirs::bookmark_star(ui, bookmarked, false).clicked();
+            // Left-aligned in whatever width the buttons leave.
             ui.with_layout(Layout::left_to_right(Align::TOP), |ui| {
-                ui.add(egui::Label::new(cwd_job).wrap());
+                let label = egui::Label::new(cwd_job).wrap();
+                if bookmarked {
+                    Frame::new()
+                        .fill(BOOKMARKED_FILL)
+                        .corner_radius(ui.visuals().widgets.inactive.corner_radius)
+                        .inner_margin(egui::Margin::symmetric(4, 1))
+                        .show(ui, |ui| ui.add(label));
+                } else {
+                    ui.add(label);
+                }
             });
         });
     });
+    if star_clicked {
+        let msg = state.toggle_bookmark_cwd();
+        state.push_out(msg, OutType::StdOut);
+    }
     if open_clicked {
         let cwd = state.cwd().to_path_buf();
         shell::commands::open_dir(&cwd, &mut |kind, msg| {
@@ -84,7 +128,6 @@ pub(crate) fn file_browser(state: &mut State, ui: &mut Ui) {
     // into a missing dir and push a diagnostic. On Windows, 🖴 is a menu of
     // drives and 🗑 opens the Recycle Bin in Explorer.
 
-    let home = state.home.clone();
     let shortcuts = files::shortcuts(home.as_deref());
     let mut go_up = false;
     let mut go_back = false;
@@ -169,12 +212,6 @@ pub(crate) fn file_browser(state: &mut State, ui: &mut Ui) {
             go_back |= i.pointer.button_pressed(egui::PointerButton::Extra1);
             go_forward |= i.pointer.button_pressed(egui::PointerButton::Extra2);
         });
-    }
-
-    // A click in this pane gives it Ctrl+C / X / V (see below); a click
-    // anywhere else takes them away.
-    if ui.input(|i| i.pointer.any_pressed()) {
-        state.ui.files_active = ui.rect_contains_pointer(pane_rect);
     }
 
     if go_up {
@@ -285,10 +322,53 @@ pub(crate) fn file_browser(state: &mut State, ui: &mut Ui) {
 
     // Text filter on names in this dir; cleared on cd (see
     // [State::refresh_browser_files]).
-    if ui::search_box(ui, &mut state.ui.files_search, "files_search") {
+    let search_changed = ui::search_box(ui, &mut state.ui.files_search, "files_search");
+    if search_changed {
         state.refresh_browser_files_filter();
     }
     ui::deep_search_bar(state, ui);
+
+    if search_changed {
+        state.ui.rename_pending = None;
+        let first_match = match &state.deep_search {
+            Some(search) => {
+                let needle = state.ui.files_search.to_lowercase();
+                search
+                    .hits
+                    .iter()
+                    .find(|hit| {
+                        hit.path
+                            .strip_prefix(&search.root)
+                            .unwrap_or(&hit.path)
+                            .to_string_lossy()
+                            .to_lowercase()
+                            .contains(&needle)
+                    })
+                    .map(|hit| hit.path.clone())
+            }
+            None => state
+                .ui
+                .browser_files_filter
+                .first()
+                .map(|&i| state.browser_files[i].path.clone()),
+        };
+        if let Some(path) = first_match {
+            state.select_file(&path);
+        } else {
+            state.selected_file = None;
+        }
+    }
+
+    if open_selected {
+        let action = state.selected_file.as_ref().map(|file| {
+            if file.is_folder {
+                ListAction::ChangeDir(file.path.clone())
+            } else {
+                ListAction::OpenFile(file.path.clone())
+            }
+        });
+        ui::apply_action(state, action);
+    }
 
     ui.separator();
 
@@ -306,7 +386,14 @@ pub(crate) fn file_browser(state: &mut State, ui: &mut Ui) {
     if let Some(search) = &state.deep_search {
         let selected = state.selected_file.as_ref().map(|d| d.path.as_path());
         let home = state.home.as_deref();
-        let action = ui::deep_search_results(search, &state.ui.files_search, selected, home, ui);
+        let action = ui::deep_search_results(
+            search,
+            &state.ui.files_search,
+            selected,
+            &state.dir_bookmarks,
+            home,
+            ui,
+        );
         ui::apply_action(state, action);
         return;
     }
@@ -371,11 +458,21 @@ pub(crate) fn file_browser(state: &mut State, ui: &mut Ui) {
                     f.disp_name.clone()
                 };
 
+                let is_selected = selected == Some(f.path.as_path());
+                // A bookmarked folder is drawn on the same pale green as in
+                // Recent dirs, unless it's selected so the selection shows.
+                let bookmarked =
+                    f.is_folder && !is_selected && state.dir_bookmarks.contains(&f.path);
+
                 let mut rich = RichText::new(text).monospace();
                 if f.is_folder {
-                    // Same colour this folder has in any path shown elsewhere.
+                    if bookmarked {
+                        rich = rich.color(BOOKMARKED_TEXT);
+                    }
+                    // Same colour this folder has in any path shown elsewhere,
+                    // from the light-background palette on the green.
                     let path = render_with_tilde(&f.path, home.as_deref());
-                    if let Some(c) = path_color::last_color(&path, Some("~"), dark) {
+                    if let Some(c) = path_color::last_color(&path, Some("~"), dark && !bookmarked) {
                         rich = rich.color(c);
                     }
                 } else if f.is_executable {
@@ -385,22 +482,31 @@ pub(crate) fn file_browser(state: &mut State, ui: &mut Ui) {
                 // Full width so the whole row is clickable and the selection
                 // highlight spans the column. Long names are truncated; the
                 // details pane shows the full name.
-                let row = Button::selectable(selected == Some(f.path.as_path()), rich)
+                let mut row = Button::selectable(is_selected, rich)
                     .truncate()
                     .min_size(egui::vec2(ui.available_width(), 0.0));
+                if bookmarked {
+                    row = row.fill(BOOKMARKED_FILL).frame_when_inactive(true);
+                }
                 let resp = ui.add(row);
+                if search_changed && is_selected {
+                    resp.scroll_to_me(Some(Align::TOP));
+                }
 
                 // A double-click's first click has already selected the row.
                 // Then a folder navigates into it; a file opens with its
-                // associated program, just like a desktop file manager.
-                if resp.double_clicked() {
+                // associated program, just like a desktop file manager. A
+                // middle click opens a folder in a new tab.
+                if f.is_folder && resp.middle_clicked() {
+                    action = Some(ListAction::NewTabDir(f.path.clone()));
+                } else if resp.double_clicked() {
                     action = Some(if f.is_folder {
                         ListAction::ChangeDir(f.path.clone())
                     } else {
                         ListAction::OpenFile(f.path.clone())
                     });
                 } else if resp.clicked() {
-                    if selected == Some(f.path.as_path()) {
+                    if is_selected {
                         clicked_selected = Some(f.path.clone());
                     } else {
                         action = Some(ListAction::SelectFile(f.path.clone()));
