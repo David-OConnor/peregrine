@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 
-use egui::{Align, Button, Event, Frame, Key, Layout, Panel, RichText, ScrollArea, TextStyle, Ui};
+use egui::{
+    Align, Button, Event, Frame, Key, Layout, Modifiers, Panel, RichText, ScrollArea, TextStyle, Ui,
+};
 
 use crate::{
     OutType, files, path_color, render_with_tilde,
@@ -10,6 +12,7 @@ use crate::{
         COLOR_EXECUTABLE, FILES_COL_MIN_CHARS, ListAction,
         dirs::{BOOKMARKED_FILL, BOOKMARKED_TEXT},
     },
+    viewer,
 };
 
 /// Files in the active tab's cwd, as a selectable list. Folders are
@@ -21,10 +24,14 @@ use crate::{
 /// hidden/dotfile toggles narrows the listing by name and selects the first
 /// match as it's edited. Enter opens the selected row, just like a double-click.
 /// When the panel is wide enough (see [FILES_COL_MIN_CHARS]) the list is laid
-/// out in as many columns as fit.
+/// out in as many columns as fit. The arrow keys move the selection as the
+/// rows are laid out (see [arrow_target]); Up and Down work from the search
+/// box too.
 ///
-/// Clicking a row selects it, and the bottom third of the panel shows its
-/// details (see [ui::file_details]). Double-clicking a folder row navigates into
+/// Clicking a row selects it, and the pane at the bottom of the panel shows
+/// its details (see [ui::file_details]), with a picture of an image under
+/// them. The divider above that pane drags up and down (see [ui::Divider]).
+/// Double-clicking a folder row navigates into
 /// it (same path as clicking a bookmark or recent dir), and middle-clicking
 /// opens it in a new tab; double-clicking a
 /// Markdown or plain-text (`.txt`, `.gitignore`) file opens it in a viewer
@@ -38,14 +45,15 @@ use crate::{
 /// Paste (Ctrl+V) copies or moves the files there into this dir, so files
 /// can go to and from the OS file manager too (see `crate::clipboard`).
 pub(crate) fn file_browser(state: &mut State, ui: &mut Ui) {
-    // Measured before anything is laid out, so the details pane is a third
+    // Measured before anything is laid out, so the details pane's share is
     // of the whole panel rather than of what's left under the header.
-    let details_height = ui.available_height() / 3.0;
+    let split = &mut state.ui.files_details_split;
+    let divider = ui::Divider::begin(ui, "files_details_divider", split);
     // The whole pane, for the mouse Back/Forward buttons below.
     let pane_rect = ui.max_rect();
 
-    // A click in this pane gives it Enter and Ctrl+C / X / V; a click
-    // anywhere else takes them away.
+    // A click in this pane gives it Enter, the arrow keys and Ctrl+C / X / V;
+    // a click anywhere else takes them away.
     if ui.input(|i| i.pointer.any_pressed()) {
         state.ui.files_active = ui.rect_contains_pointer(pane_rect);
     }
@@ -54,13 +62,35 @@ pub(crate) fn file_browser(state: &mut State, ui: &mut Ui) {
     // focus and a selected row's button doesn't turn it into a rename click.
     // Other text boxes (including Deep search and rename) keep their Enter.
     let search_id = ui.make_persistent_id(egui::IdSalt::new("files_search"));
-    let can_open = state.ui.rename.is_none()
-        && (ui.memory(|m| m.has_focus(search_id))
-            || (state.ui.files_active && !ui.ctx().text_edit_focused()));
-    let open_selected =
-        can_open && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter));
+    let search_has_keys = state.ui.rename.is_none() && ui.memory(|m| m.has_focus(search_id));
+    let list_has_keys =
+        state.ui.rename.is_none() && state.ui.files_active && !ui.ctx().text_edit_focused();
+    let open_selected = (search_has_keys || list_has_keys)
+        && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter));
     if open_selected {
         state.ui.rename_pending = None;
+    }
+
+    // Likewise the arrow keys, which move the selection: Up / Down from the
+    // quick filter too, but Left / Right only from the listing, so they still
+    // move the filter's caret. Not while Deep search results stand in for
+    // the listing.
+    let mut arrows = Vec::new();
+    if state.deep_search.is_none() {
+        use Key::{ArrowDown, ArrowLeft, ArrowRight, ArrowUp};
+        ui.input_mut(|i| {
+            for key in [ArrowUp, ArrowDown, ArrowLeft, ArrowRight] {
+                let vertical = matches!(key, ArrowUp | ArrowDown);
+                if list_has_keys || (search_has_keys && vertical) {
+                    let n = i.count_and_consume_key(Modifiers::NONE, key);
+                    arrows.extend(std::iter::repeat_n(key, n));
+                }
+            }
+        });
+    }
+    if !arrows.is_empty() {
+        // egui would otherwise also move keyboard focus off the quick filter.
+        ui.memory_mut(|m| m.move_focus(egui::FocusDirection::None));
     }
 
     ui::panel_header(ui, "Files", &mut state.ui.panel_vis.file_browser);
@@ -359,6 +389,8 @@ pub(crate) fn file_browser(state: &mut State, ui: &mut Ui) {
         }
     }
 
+    let arrow_moved = move_selection(state, &arrows);
+
     if open_selected {
         let action = state.selected_file.as_ref().map(|file| {
             if file.is_folder {
@@ -372,14 +404,23 @@ pub(crate) fn file_browser(state: &mut State, ui: &mut Ui) {
 
     ui.separator();
 
+    let image = state
+        .selected_file
+        .as_ref()
+        .filter(|d| !d.is_folder && viewer::is_image(&d.path))
+        .map(|d| (d.path.as_path(), d.modified));
+    state.file_preview.set(ui.ctx(), image);
+
     // Added before the list so it claims the bottom of the panel; the list
     // then fills the space left above it.
-    Panel::bottom("file_details_panel")
+    let details_height = divider.height(ui, state.ui.files_details_split, ui::MIN_SPLIT_HEIGHT);
+    let details = Panel::bottom("file_details_panel")
         .resizable(false)
         .exact_size(details_height)
         .frame(Frame::new().inner_margin(egui::Margin::symmetric(0, 4)))
         .show(ui, |ui| {
-            ui::file_details(state.selected_file.as_ref(), state.home.as_deref(), ui);
+            let home = state.home.as_deref();
+            ui::file_details(state.selected_file.as_ref(), home, &state.file_preview, ui);
         });
 
     // While a Deep search is set, its results stand in for the listing.
@@ -395,8 +436,70 @@ pub(crate) fn file_browser(state: &mut State, ui: &mut Ui) {
             ui,
         );
         ui::apply_action(state, action);
-        return;
+    } else {
+        file_list(state, ui, search_changed, arrow_moved);
     }
+
+    // After the list, so the divider is on top of it for the pointer.
+    if divider.end(ui, details.response.rect, &mut state.ui.files_details_split) {
+        let _ = state.save();
+    }
+}
+
+/// Move the Files selection by `arrows`, each as [arrow_target] says, in the
+/// listing as last laid out. Returns whether it moved.
+fn move_selection(state: &mut State, arrows: &[Key]) -> bool {
+    if arrows.is_empty() {
+        return false;
+    }
+    let rows = &state.ui.browser_files_filter;
+    let path_at = |k: usize| &state.browser_files[rows[k]].path;
+    let from = state
+        .selected_file
+        .as_ref()
+        .and_then(|d| (0..rows.len()).find(|&k| *path_at(k) == d.path));
+    let mut at = from;
+    for &key in arrows {
+        at = arrow_target(key, at, rows.len(), state.ui.files_columns).or(at);
+    }
+    let Some(to) = at.filter(|&to| Some(to) != from) else {
+        return false;
+    };
+    let path = path_at(to).clone();
+    state.select_file(&path);
+    state.ui.rename_pending = None;
+    true
+}
+
+/// Where an arrow `key` moves the selection in a list of `len` items laid
+/// out in `columns` columns by [ui::list_columns], from item `from` (or from
+/// nothing selected, the first item, or for Up the last). Up and Down step
+/// through the list, wrapping around at its ends: down a column, then on to
+/// the top of the next. Left and Right move to the same row of the column
+/// beside, or to the last item when that column is shorter. `None` when
+/// there's nowhere to go.
+fn arrow_target(key: Key, from: Option<usize>, len: usize, columns: usize) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+    let Some(i) = from else {
+        return Some(if key == Key::ArrowUp { len - 1 } else { 0 });
+    };
+    let per_col = ui::column_len(len, columns);
+    match key {
+        Key::ArrowUp => Some((i + len - 1) % len),
+        Key::ArrowDown => Some((i + 1) % len),
+        Key::ArrowLeft => i.checked_sub(per_col),
+        Key::ArrowRight => ((i / per_col + 1) * per_col < len).then(|| (i + per_col).min(len - 1)),
+        _ => None,
+    }
+}
+
+/// The Files panel's listing of its dir: one row per entry, in columns when
+/// they fit (see [file_browser]). `search_changed` and `arrow_moved` say
+/// the selection just moved, to be scrolled into view.
+fn file_list(state: &mut State, ui: &mut Ui, search_changed: bool, arrow_moved: bool) {
+    let home = state.home.clone();
 
     // Explorer-style rename: a click on the already-selected row starts one,
     // once it's clear the click isn't the first half of a double-click. Any
@@ -430,7 +533,7 @@ pub(crate) fn file_browser(state: &mut State, ui: &mut Ui) {
     // another row in the same frame can't drop the rename.
     let mut rename_done: Option<bool> = None;
 
-    ScrollArea::vertical()
+    let columns = ScrollArea::vertical()
         .id_salt("file_browser_scroll")
         .auto_shrink([false, false])
         .show(ui, |ui| {
@@ -489,8 +592,10 @@ pub(crate) fn file_browser(state: &mut State, ui: &mut Ui) {
                     row = row.fill(BOOKMARKED_FILL).frame_when_inactive(true);
                 }
                 let resp = ui.add(row);
-                if search_changed && is_selected {
+                if is_selected && search_changed {
                     resp.scroll_to_me(Some(Align::TOP));
+                } else if is_selected && arrow_moved {
+                    resp.scroll_to_me(None);
                 }
 
                 // A double-click's first click has already selected the row.
@@ -518,8 +623,10 @@ pub(crate) fn file_browser(state: &mut State, ui: &mut Ui) {
             // filled down like `ls`, so the folders stay together at the top
             // left.
             let min_width = ui::chars_width(ui, TextStyle::Monospace, FILES_COL_MIN_CHARS);
-            ui::list_columns(ui, &state.ui.browser_files_filter, min_width, row);
-        });
+            ui::list_columns(ui, &state.ui.browser_files_filter, min_width, row)
+        })
+        .inner;
+    state.ui.files_columns = columns;
 
     match rename_done {
         Some(true) => state.commit_rename(),
@@ -532,4 +639,36 @@ pub(crate) fn file_browser(state: &mut State, ui: &mut Ui) {
     }
 
     ui::apply_action(state, action);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn arrows_follow_the_layout() {
+        use Key::{ArrowDown as D, ArrowLeft as L, ArrowRight as R, ArrowUp as U};
+        // 8 items in 3 columns, filled down: 0 3 6 / 1 4 7 / 2 5.
+        let go = |key, from| arrow_target(key, Some(from), 8, 3);
+        assert_eq!(go(D, 1), Some(2));
+        assert_eq!(go(D, 2), Some(3), "on to the top of the next column");
+        assert_eq!(go(D, 7), Some(0), "wraps at the end");
+        assert_eq!(go(U, 0), Some(7), "and at the start");
+        assert_eq!(go(R, 1), Some(4));
+        assert_eq!(go(L, 4), Some(1));
+        assert_eq!(go(L, 1), None, "no column to the left");
+        assert_eq!(go(R, 7), None, "nor to the right");
+        assert_eq!(go(R, 5), Some(7), "the last item of a shorter column");
+
+        // One column: Left and Right go nowhere.
+        assert_eq!(arrow_target(R, Some(0), 8, 1), None);
+        assert_eq!(arrow_target(L, Some(5), 8, 1), None);
+        assert_eq!(arrow_target(D, Some(5), 8, 1), Some(6));
+
+        // Nothing selected yet; nothing to select.
+        assert_eq!(arrow_target(D, None, 8, 3), Some(0));
+        assert_eq!(arrow_target(R, None, 8, 3), Some(0));
+        assert_eq!(arrow_target(U, None, 8, 3), Some(7));
+        assert_eq!(arrow_target(D, None, 0, 3), None);
+    }
 }

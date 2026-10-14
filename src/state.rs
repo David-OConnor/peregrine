@@ -6,10 +6,10 @@ use std::{
 use chrono::Utc;
 use shell::{
     BrowserFile, DirLabelLens, DirList, FilesPanelPrefs, FontSizes, HistoryItem, NavState,
-    OpenTabs, PanelVis, PanelWidths, RecentDir, RemoteSession, RemoteTerminal, SshMode, WindowSize,
-    apply_completion, current_branch, dir_missing, get_home, read_browser_files,
-    remove_missing_recent_dirs,
-    remove_saved_dir, save_data, ssh, ssh::secrets, stale_dir_list, truncate_branch,
+    OpenTabs, PaneSplits, PanelVis, PanelWidths, RecentDir, RemoteSession, RemoteTerminal, SshMode,
+    WindowSize, apply_completion, current_branch, dir_missing, get_home, read_browser_files,
+    remove_missing_recent_dirs, remove_saved_dir, save_data, ssh, ssh::secrets, stale_dir_list,
+    truncate_branch,
 };
 
 use crate::{
@@ -22,7 +22,7 @@ use crate::{
     path_color,
     running::RunningCmd,
     ui::{self, path_panel::PathPanel},
-    viewer::FileViewers,
+    viewer::{FileViewers, ImagePreview},
 };
 
 /// State specific to the GUI: the current input buffer, the captured terminal
@@ -117,6 +117,13 @@ pub struct StateUi {
     /// Set while the last click was in the Files panel, so Ctrl+C / X / V
     /// act on its files rather than on whatever else has the keyboard.
     pub files_active: bool,
+    /// How many columns the Files listing was last laid out in, for the
+    /// arrow keys to move across.
+    pub files_columns: usize,
+    /// The fraction of the Files panel's height its details pane takes, and
+    /// likewise for the PATH window's; see [ui::Divider]. Persisted.
+    pub files_details_split: f32,
+    pub path_details_split: f32,
     /// Files-panel Deep search text, looked for in the contents (or names)
     /// of every file under the listed dir (see [State::start_deep_search]).
     /// Empty = off, and the panel lists the dir as usual. Cleared on cd,
@@ -172,6 +179,9 @@ impl Default for StateUi {
             rename: None,
             rename_pending: None,
             files_active: false,
+            files_columns: 1,
+            files_details_split: ui::DEFAULT_DETAILS_SPLIT,
+            path_details_split: ui::DEFAULT_DETAILS_SPLIT,
             deep_search: String::new(),
             deep_search_edited: None,
             deep_search_opts: deep_search::Options::default(),
@@ -231,6 +241,9 @@ pub struct State {
     /// shows. Re-read whenever `browser_files` is, and cleared once the path
     /// is no longer in the listing (e.g. after a cd or tab switch).
     pub selected_file: Option<FileDetails>,
+    /// The picture under `selected_file`'s details, when it's an image. Not
+    /// persisted.
+    pub file_preview: ImagePreview,
     /// The Files panel's Deep search for `ui.deep_search`, running or done.
     /// While set, the panel lists its results instead of `browser_files`.
     pub deep_search: Option<DeepSearch>,
@@ -299,6 +312,7 @@ impl Default for State {
             browser_files: Vec::new(),
             browser_dir: PathBuf::new(),
             selected_file: None,
+            file_preview: ImagePreview::default(),
             deep_search: None,
             paste: None,
             state_path: save_data::default_path()
@@ -663,6 +677,10 @@ impl State {
                 show_dotfiles: Some(self.ui.show_dotfiles),
                 deep_search_names: Some(self.ui.deep_search_opts.file_names),
             },
+            PaneSplits {
+                files: Some(self.ui.files_details_split),
+                path: Some(self.ui.path_details_split),
+            },
             &self.state_path,
         )
     }
@@ -722,6 +740,9 @@ impl State {
         ui.deep_search_opts.file_names = prefs
             .deep_search_names
             .unwrap_or(ui.deep_search_opts.file_names);
+        let splits = loaded.pane_splits;
+        ui.files_details_split = splits.files.unwrap_or(ui.files_details_split);
+        ui.path_details_split = splits.path.unwrap_or(ui.path_details_split);
         ui.active_tab = active_tab;
         ui.cli_input = vec![String::new(); n];
         ui.out = (0..n).map(|_| Vec::new()).collect();
@@ -744,6 +765,7 @@ impl State {
             browser_files: Vec::new(),
             browser_dir: PathBuf::new(),
             selected_file: None,
+            file_preview: ImagePreview::default(),
             deep_search: None,
             paste: None,
             state_path: path,

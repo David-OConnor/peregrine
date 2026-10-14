@@ -278,22 +278,23 @@ fn chars_width(ui: &Ui, style: TextStyle, n: f32) -> f32 {
 /// Lay a list panel's `items` out in as many columns as fit across `ui`, each
 /// at least `min_width` wide (or just one if even that doesn't fit), drawing
 /// each with `row`. Filled down the first column, then the next, like `ls`,
-/// so the list still reads top to bottom.
+/// so the list still reads top to bottom: [column_len] items to a column.
+/// Returns how many columns fit.
 fn list_columns<T: Copy>(
     ui: &mut Ui,
     items: &[T],
     min_width: f32,
     mut row: impl FnMut(&mut Ui, T),
-) {
+) -> usize {
     let gap = ui.spacing().item_spacing.x;
     let n = ((ui.available_width() + gap) / (min_width + gap)).max(1.0) as usize;
     if n == 1 {
         for &item in items {
             row(ui, item);
         }
-        return;
+        return n;
     }
-    let per_col = items.len().div_ceil(n).max(1);
+    let per_col = column_len(items.len(), n);
     ui.columns(n, |cols| {
         for (col, chunk) in cols.iter_mut().zip(items.chunks(per_col)) {
             for &item in chunk {
@@ -301,6 +302,101 @@ fn list_columns<T: Copy>(
             }
         }
     });
+    n
+}
+
+/// How many of `len` items [list_columns] puts in each column, when
+/// `columns` fit. The last may have fewer.
+fn column_len(len: usize, columns: usize) -> usize {
+    len.div_ceil(columns.max(1)).max(1)
+}
+
+/// The least height a [Divider] leaves the details pane below it, and by
+/// default the list above.
+const MIN_SPLIT_HEIGHT: f32 = 40.;
+
+/// The fraction of its panel a details pane under a [Divider] takes, until
+/// the divider is dragged.
+pub const DEFAULT_DETAILS_SPLIT: f32 = 1. / 3.;
+
+/// A divider across a panel, between a list above and a details pane below
+/// (a `Panel::bottom`), that the user drags up or down to share the panel's
+/// height between them. Its position is kept as the fraction of the panel
+/// the details take (`split`), so it holds as the window is resized.
+///
+/// Make one with [Divider::begin] before laying anything out, show the
+/// details pane at [Divider::height], then call [Divider::end] once the
+/// list above is drawn too, so the divider is on top of both for the
+/// pointer.
+pub struct Divider {
+    id: egui::Id,
+    /// The panel's height and bottom edge, measured by [Divider::begin].
+    total: f32,
+    bottom: f32,
+}
+
+impl Divider {
+    /// Measure the panel `ui` is laying out, and follow a drag of the
+    /// divider in progress, setting `split`.
+    pub fn begin(ui: &Ui, id_salt: &str, split: &mut f32) -> Self {
+        let id = ui.id().with(id_salt);
+        let space = ui.available_rect_before_wrap();
+        let divider = Self {
+            id,
+            total: space.height(),
+            bottom: space.bottom(),
+        };
+        // Read before the pane is drawn, so it follows the pointer without
+        // lagging a frame behind.
+        if let Some(r) = ui.ctx().read_response(id)
+            && r.dragged()
+            && let Some(p) = r.interact_pointer_pos()
+        {
+            *split = divider.fraction(divider.bottom - p.y);
+        }
+        divider
+    }
+
+    /// The details pane's height for `split`, leaving at least `keep_above`
+    /// of what's left of `ui` for the rest of the panel above it.
+    pub fn height(&self, ui: &Ui, split: f32, keep_above: f32) -> f32 {
+        let max = (ui.available_height() - keep_above).max(MIN_SPLIT_HEIGHT);
+        (split * self.total).clamp(MIN_SPLIT_HEIGHT, max)
+    }
+
+    /// Make the top edge of `pane`, the details pane as drawn, draggable:
+    /// highlighted while hovered or dragged, as an egui panel's edge is.
+    /// Once a drag ends, sets `split` to where the pane was left (within
+    /// the limits [Self::height] set) and returns `true`, for the caller to
+    /// save it.
+    pub fn end(self, ui: &Ui, pane: Rect, split: &mut f32) -> bool {
+        let grab = ui.style().interaction.resize_grab_radius_side;
+        let y = pane.top();
+        let rect = Rect::from_x_y_ranges(pane.x_range(), egui::Rangef::new(y - grab, y + grab));
+        let resp = ui.interact(rect, self.id, egui::Sense::drag());
+        if resp.hovered() || resp.dragged() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+            let widgets = &ui.visuals().widgets;
+            let stroke = if resp.dragged() {
+                widgets.active.fg_stroke
+            } else {
+                widgets.hovered.fg_stroke
+            };
+            // Over the pane's own separator line.
+            ui.painter()
+                .hline(pane.x_range(), y + stroke.width / 2., stroke);
+        }
+        if resp.drag_stopped() {
+            *split = self.fraction(pane.height());
+            return true;
+        }
+        false
+    }
+
+    /// `height` as a fraction of the panel's.
+    fn fraction(&self, height: f32) -> f32 {
+        (height / self.total.max(1.)).clamp(0.01, 0.99)
+    }
 }
 
 /// Display commands previously run in the active tab's cwd. Newest first, in
@@ -503,7 +599,7 @@ fn set_mono_size(ui: &mut Ui, size: f32) {
 /// The "terminal" output pane: scrolls, sticks to the bottom so the latest
 /// line stays in view, and colours rows by stream kind.
 fn term_out(state: &mut State, ui: &mut Ui) {
-    ScrollArea::vertical()
+    let output = ScrollArea::vertical()
         .id_salt("term_out_scroll")
         .auto_shrink([false, false])
         .stick_to_bottom(true)
@@ -527,6 +623,7 @@ fn term_out(state: &mut State, ui: &mut Ui) {
                 ui.label(job);
             }
         });
+    clipboard::copy_output_on_right_click(ui, output.inner_rect);
 }
 
 /// The input row: prompt line on top, with an edit beneath it that wraps long
@@ -1103,8 +1200,14 @@ fn deep_search_results(
 }
 
 /// The Files panel's lower pane: type, size, dates and attributes of the
-/// selected row, read when it was selected (see [FileDetails::read]).
-fn file_details(details: Option<&FileDetails>, home: Option<&Path>, ui: &mut Ui) {
+/// selected row, read when it was selected (see [FileDetails::read]). Under
+/// them, an image's `preview` fills the rest of the pane.
+fn file_details(
+    details: Option<&FileDetails>,
+    home: Option<&Path>,
+    preview: &viewer::ImagePreview,
+    ui: &mut Ui,
+) {
     let Some(d) = details else {
         ui.label(
             RichText::new("Select a file to see its details.")
@@ -1127,9 +1230,11 @@ fn file_details(details: Option<&FileDetails>, home: Option<&Path>, ui: &mut Ui)
             .to_string()
     };
 
+    // Only as tall as the text, so the preview gets the rest; it scrolls
+    // when the pane is too short for it all.
     ScrollArea::vertical()
         .id_salt("file_details_scroll")
-        .auto_shrink([false, false])
+        .auto_shrink([false, true])
         .show(ui, |ui| {
             ui.style_mut().wrap_mode = Some(TextWrapMode::Wrap);
 
@@ -1137,6 +1242,9 @@ fn file_details(details: Option<&FileDetails>, home: Option<&Path>, ui: &mut Ui)
             field(ui, "Type", d.type_name.clone().into());
             if let Some(size) = d.size {
                 field(ui, "Size", format_size(size).into());
+            }
+            if let Some([w, h]) = preview.size() {
+                field(ui, "Dimensions", format!("{w} × {h}").into());
             }
             if let Some(n) = d.item_count {
                 let s = if n == 1 { "" } else { "s" };
@@ -1164,6 +1272,8 @@ fn file_details(details: Option<&FileDetails>, home: Option<&Path>, ui: &mut Ui)
             }
             field(ui, "Path", path_job(ui, &d.path, home).into());
         });
+    ui.add_space(4.);
+    preview.show(ui);
 }
 
 /// Saved SSH remotes. Lists each `user@host:port` with Connect / Edit / delete
@@ -1328,15 +1438,15 @@ fn remote_form(state: &mut State, ui: &mut Ui) {
 fn panel_toggles(state: &mut State, ui: &mut Ui) {
     ui.horizontal(|ui| {
         let v = &mut state.ui.panel_vis;
-        ui.toggle_value(&mut v.bookmarks, "Bookmarks");
+        ui.toggle_value(&mut v.bookmarks, "Bosynokmarks");
         ui.toggle_value(&mut v.recent_dirs, "Recent dirs");
         ui.toggle_value(&mut v.file_browser, "Files");
         ui.toggle_value(&mut v.remote_terminals, "Remote");
-        ui.toggle_value(&mut v.recent_cmds, "Cmd history");
         ui.toggle_value(&mut v.recent_cmds_in_dir, "Cmds this dir");
+        ui.toggle_value(&mut v.recent_cmds, "Cmd history");
         // Opens a window of its own rather than a side panel.
         ui.toggle_value(&mut v.path_editor, "PATH");
-        ui.toggle_value(&mut state.ui.clipboard.visible, "Clipboard")
+        ui.toggle_value(&mut v.clipboard, "Clipboard")
             .on_hover_text("Toggle clipboard history (Ctrl+Shift+V)");
     });
 }
@@ -1351,6 +1461,7 @@ fn panel_vis_eq(a: &shell::PanelVis, b: &shell::PanelVis) -> bool {
         && a.remote_terminals == b.remote_terminals
         && a.file_browser == b.file_browser
         && a.path_editor == b.path_editor
+        && a.clipboard == b.clipboard
 }
 
 /// A `<label> N + -` font-size control for the tab strip: the label, the
@@ -1581,10 +1692,11 @@ fn scale_panel_fonts(ui: &mut Ui, size: f32) {
 }
 
 pub fn draw(state: &mut State, ui: &mut Ui) {
-    clipboard::capture(state, ui.ctx());
-    // Snapshot panel visibility so a change from the "Panels:" toggles or a
-    // panel's own close button is persisted at the end of the frame.
+    // Snapshot panel visibility so a change from the "Panels:" toggles, a
+    // panel's own close button, or the clipboard shortcut (handled by
+    // `capture`) is persisted at the end of the frame.
     let vis_before = state.ui.panel_vis;
+    clipboard::capture(state, ui.ctx());
 
     // Run the command submitted last frame. That frame already painted its
     // echo, so the user sees what they ran while a blocking built-in runs.
@@ -1661,7 +1773,7 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
         state.ui.panel_widths.file_browser = Some(r.response.rect.width());
     }
 
-    if state.ui.clipboard.visible {
+    if state.ui.panel_vis.clipboard {
         let max = central_reserve(ui, f32::INFINITY);
         Panel::right("clipboard_panel")
             .resizable(true)

@@ -87,6 +87,7 @@ Shortcuts to reduce typing:
 
 - Middle clicking a directory or command in an appropriate panel opens that directory or launches that command in a new tab
 - Middle click a tab to close it
+- Select CLI output text and right-click to copy it to the system clipboard and clipboard history
 - Most buttons have tooltips on hover
 
 

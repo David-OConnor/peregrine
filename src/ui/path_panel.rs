@@ -10,12 +10,12 @@ use std::{
 
 use egui::{
     Align, Button, CentralPanel, CollapsingHeader, Color32, ComboBox, Context, Frame, Key, Panel,
-    Response, RichText, ScrollArea, Sense, Stroke, TextEdit, TextFormat, TextStyle, TextWrapMode,
-    Ui, ViewportBuilder, ViewportClass, ViewportId, WidgetText,
+    Rect, Response, RichText, ScrollArea, Sense, Stroke, TextEdit, TextFormat, TextStyle,
+    TextWrapMode, Ui, ViewportBuilder, ViewportClass, ViewportId, WidgetText,
     text::{CCursor, CCursorRange, LayoutJob},
 };
 
-use super::{panel_header, plural, scale_panel_fonts};
+use super::{Divider, MIN_SPLIT_HEIGHT, panel_header, plural, scale_panel_fonts};
 use crate::{
     OutType,
     path_env::{self, DirPrograms, Scope},
@@ -405,6 +405,9 @@ pub struct PathPanel {
     /// The entries matching `search`, while it's not blank. See
     /// [Self::update_search].
     hits: Option<SearchHits>,
+    /// The height of the buttons above the details pane as last drawn, which
+    /// the pane leaves room for.
+    controls_height: f32,
 }
 
 impl Default for PathPanel {
@@ -418,6 +421,7 @@ impl Default for PathPanel {
             program_filter: String::new(),
             search: String::new(),
             hits: None,
+            controls_height: 0.,
         }
     }
 }
@@ -606,19 +610,25 @@ pub fn path_window(state: &mut State, ctx: &Context) {
 /// drops it). Missing dirs and duplicates are marked. Changes are kept
 /// apart per scope until saved.
 fn path_panel(state: &mut State, ui: &mut Ui) {
-    // Measured before anything is laid out, so the details pane is a third
-    // of the whole panel, as in the Files panel.
-    let details_height = ui.available_height() / 3.0;
+    // Measured before anything is laid out, so the details pane's share is
+    // of the whole panel, as in the Files panel. Its top edge drags up and
+    // down.
+    let divider = Divider::begin(ui, "path_details_divider", &mut state.ui.path_details_split);
 
     let cwd = state.cwd().to_path_buf();
     let home = state.home.clone();
-    let request = draw(
+    let (request, details_rect) = draw(
         &mut state.path_panel,
         &cwd,
         home.as_deref(),
-        details_height,
+        &divider,
+        state.ui.path_details_split,
         ui,
     );
+    // After the list, so the divider is on top of it for the pointer.
+    if divider.end(ui, details_rect, &mut state.ui.path_details_split) {
+        let _ = state.save();
+    }
 
     match request {
         Some(Request::Save) => match state.path_panel.save() {
@@ -647,13 +657,17 @@ fn path_panel(state: &mut State, ui: &mut Ui) {
     }
 }
 
+/// The panel's contents, with the details pane at `split` of its height (see
+/// [Divider]). Returns what the user asked for, and where the details pane
+/// was drawn.
 fn draw(
     panel: &mut PathPanel,
     cwd: &Path,
     home: Option<&Path>,
-    details_height: f32,
+    divider: &Divider,
+    split: f32,
     ui: &mut Ui,
-) -> Option<Request> {
+) -> (Option<Request>, Rect) {
     // Scope picker. `*` marks one with unsaved changes.
     ui.horizontal(|ui| {
         for scope in Scope::ALL {
@@ -733,15 +747,18 @@ fn draw(
     ui.separator();
 
     // The details claim the bottom of the panel, then the buttons the space
-    // above them; the list fills the rest.
+    // above them; the list fills the rest. Dragged up, the details leave
+    // room for the buttons (as tall as last time) and a little of the list.
     panel.update_details();
-    let mut request = details_pane(panel, details_height, ui);
+    let keep_above = panel.controls_height + MIN_SPLIT_HEIGHT;
+    let details_height = divider.height(ui, split, keep_above);
+    let (mut request, details_rect) = details_pane(panel, details_height, ui);
 
     let edit = panel.edit(scope);
     let editable = read_only.is_none();
     // Set when an entry is added, so the search can't hide it.
     let mut clear_search = false;
-    Panel::bottom("path_panel_controls")
+    let controls = Panel::bottom("path_panel_controls")
         .resizable(false)
         .frame(Frame::new().inner_margin(egui::Margin::symmetric(0, 4)))
         .show(ui, |ui| {
@@ -871,6 +888,7 @@ fn draw(
                     });
             }
         });
+    panel.controls_height = controls.response.rect.height();
 
     if clear_search {
         panel.search.clear();
@@ -899,11 +917,11 @@ fn draw(
         if changed {
             edit.text_changed();
         }
-        return request;
+        return (request, details_rect);
     }
 
     entry_list(edit, panel.hits.as_ref(), editable, ui);
-    request
+    (request, details_rect)
 }
 
 /// The scope's entries, one selectable row each, or an edit box for the row
@@ -1003,9 +1021,10 @@ fn entry_list(edit: &mut ScopeEdit, hits: Option<&SearchHits>, editable: bool, u
 /// The panel's lower pane: details of the selected entry (see [Details]),
 /// chiefly the executables in it. One a dir searched earlier hides (its
 /// name runs that one instead) is struck through, saying which file runs.
-fn details_pane(panel: &mut PathPanel, height: f32, ui: &mut Ui) -> Option<Request> {
+/// Returns what the user asked for, and where the pane was drawn.
+fn details_pane(panel: &mut PathPanel, height: f32, ui: &mut Ui) -> (Option<Request>, Rect) {
     let mut request = None;
-    Panel::bottom("path_details_panel")
+    let pane = Panel::bottom("path_details_panel")
         .resizable(false)
         .exact_size(height)
         .frame(Frame::new().inner_margin(egui::Margin::symmetric(0, 4)))
@@ -1106,7 +1125,7 @@ fn details_pane(panel: &mut PathPanel, height: f32, ui: &mut Ui) -> Option<Reque
                     }
                 });
         });
-    request
+    (request, pane.response.rect)
 }
 
 /// Under a row the search matched, the executables in its dir that it

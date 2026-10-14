@@ -54,6 +54,11 @@ const IMAGE_TEXTURE: TextureOptions = TextureOptions {
     ..TextureOptions::LINEAR
 };
 
+/// The longest side, in pixels, the Files panel's preview (see
+/// [ImagePreview]) scales an image down to: plenty for a pane at the bottom
+/// of a side panel, and quick to upload.
+const PREVIEW_MAX_SIDE: u32 = 2048;
+
 /// How often an open window checks its file's modification time.
 const RELOAD_POLL: Duration = Duration::from_secs(1);
 
@@ -85,7 +90,7 @@ fn is_text(path: &Path) -> bool {
             .is_some_and(|n| TEXT_FILE_NAMES.contains(&n.as_str()))
 }
 
-fn is_image(path: &Path) -> bool {
+pub fn is_image(path: &Path) -> bool {
     path.extension()
         .map(lowercase)
         .is_some_and(|e| IMAGE_EXTENSIONS.contains(&e.as_str()))
@@ -261,8 +266,9 @@ impl Doc {
     }
 
     fn start_decode(&mut self, ctx: &Context) {
+        let max_side = ctx.input(|i| i.max_texture_side) as u32;
         self.decoding = Some(Decoding {
-            rx: spawn_decode(ctx, self.id, self.path.clone()),
+            rx: spawn_decode(ctx, self.id, self.path.clone(), max_side),
             stale: false,
         });
     }
@@ -400,12 +406,17 @@ struct Decoded {
     size: [u32; 2],
 }
 
-/// Decode the image at `path` on a background thread, then repaint window
-/// `id` to show it: a big photo takes long enough to stall every window.
-fn spawn_decode(ctx: &Context, id: ViewportId, path: PathBuf) -> Receiver<Result<Decoded, String>> {
+/// Decode the image at `path` on a background thread, scaled down if a side
+/// is longer than `max_side`, then repaint window `id` to show it: a big
+/// photo takes long enough to stall every window.
+fn spawn_decode(
+    ctx: &Context,
+    id: ViewportId,
+    path: PathBuf,
+    max_side: u32,
+) -> Receiver<Result<Decoded, String>> {
     let (tx, rx) = mpsc::channel();
     let ctx = ctx.clone();
-    let max_side = ctx.input(|i| i.max_texture_side) as u32;
     thread::spawn(move || {
         let decoded = decode_image(&path, max_side)
             .map_err(|e| format!("Couldn't read {}: {e}", path.display()));
@@ -438,6 +449,119 @@ fn decode_image(path: &Path, max_side: u32) -> ImageResult<Decoded> {
         rgba.as_raw(),
     );
     Ok(Decoded { pixels, size })
+}
+
+/// The Files panel's preview of the selected image, under its details.
+/// Decoded in the background like a viewer window's image, but scaled down
+/// to at most [PREVIEW_MAX_SIDE].
+#[derive(Default)]
+pub struct ImagePreview {
+    /// The image previewed, and its modification time as selected, so an
+    /// edit (which re-reads the selection's details) re-reads it too. `None`
+    /// when the selection isn't an image.
+    file: Option<(PathBuf, Option<SystemTime>)>,
+    /// `file`'s picture, or why it couldn't be read. `None` until decoded.
+    picture: Option<Result<Picture, String>>,
+    decoding: Option<Decoding>,
+}
+
+impl ImagePreview {
+    /// Preview `file`, an image's path and modification time, or nothing.
+    /// Call every pass: a new file starts decoding, and a finished decode is
+    /// picked up.
+    pub fn set(&mut self, ctx: &Context, file: Option<(&Path, Option<SystemTime>)>) {
+        let current = self.file.as_ref().map(|(p, m)| (p.as_path(), *m));
+        if current != file {
+            self.file = file.map(|(p, m)| (p.to_path_buf(), m));
+            self.picture = None;
+            // One decode at a time, as in a viewer window, so arrowing
+            // through a folder of photos doesn't pile up threads: one already
+            // running is redone when it finishes.
+            match &mut self.decoding {
+                Some(decoding) => decoding.stale = true,
+                None => self.start_decode(ctx),
+            }
+        }
+        self.receive(ctx);
+    }
+
+    fn start_decode(&mut self, ctx: &Context) {
+        let Some((path, _)) = &self.file else {
+            return;
+        };
+        let max_side = ctx.input(|i| i.max_texture_side) as u32;
+        let rx = spawn_decode(
+            ctx,
+            ctx.viewport_id(),
+            path.clone(),
+            max_side.min(PREVIEW_MAX_SIDE),
+        );
+        self.decoding = Some(Decoding { rx, stale: false });
+    }
+
+    /// Show the picture from [spawn_decode], once it's ready.
+    fn receive(&mut self, ctx: &Context) {
+        let Some(decoding) = &self.decoding else {
+            return;
+        };
+        let decoded = match decoding.rx.try_recv() {
+            Ok(decoded) => decoded,
+            Err(TryRecvError::Empty) => return,
+            // The decoder panicked.
+            Err(TryRecvError::Disconnected) => Err("Couldn't decode the image".to_owned()),
+        };
+        let stale = decoding.stale;
+        self.decoding = None;
+        if stale {
+            self.start_decode(ctx);
+            return;
+        }
+        self.picture = Some(decoded.map(|d| Picture {
+            texture: ctx.load_texture("file_preview", d.pixels, IMAGE_TEXTURE),
+            size: d.size,
+        }));
+    }
+
+    /// The previewed image's size in pixels, once it's decoded.
+    pub fn size(&self) -> Option<[u32; 2]> {
+        match &self.picture {
+            Some(Ok(picture)) => Some(picture.size),
+            _ => None,
+        }
+    }
+
+    /// Draw the preview in all the space left in `ui`: as big as fits
+    /// without changing its shape, across the middle and at the top. A
+    /// spinner while it decodes.
+    pub fn show(&self, ui: &mut Ui) {
+        if self.file.is_none() {
+            return;
+        }
+        let picture = match &self.picture {
+            Some(Ok(picture)) => picture,
+            Some(Err(e)) => {
+                ui.label(RichText::new(e).color(ui.visuals().error_fg_color));
+                return;
+            }
+            None => {
+                ui.spinner();
+                return;
+            }
+        };
+        let space = ui.available_rect_before_wrap();
+        let size = vec2(picture.size[0] as f32, picture.size[1] as f32);
+        let scale = (space.width() / size.x).min(space.height() / size.y);
+        if !(scale > 0.) {
+            return;
+        }
+        let size = size * scale;
+        let min = pos2(space.center().x - size.x / 2., space.top());
+        let rect = Rect::from_min_size(min, size).round_to_pixels(ui.ctx().pixels_per_point());
+        ui.allocate_rect(space, Sense::hover());
+        let uv = Rect::from_min_max(pos2(0., 0.), pos2(1., 1.));
+        ui.painter()
+            .image(picture.texture.id(), rect, uv, Color32::WHITE);
+    }
 }
 
 impl FileViewers {
