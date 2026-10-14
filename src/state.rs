@@ -13,20 +13,22 @@ use shell::{
 
 use crate::{
     OutItem, OutType,
+    clipboard::{self, Paste},
     cmd_color::CmdColors,
     completion,
     deep_search::{self, DeepSearch},
     files::FileDetails,
-    markdown::MarkdownViewers,
     path_color,
     running::RunningCmd,
     ui::{self, path_panel::PathPanel},
+    viewer::FileViewers,
 };
 
 /// State specific to the GUI: the current input buffer, the captured terminal
 /// output, and a "please focus the input next frame" flag we use after
 /// running a command so the user can keep typing.
 pub struct StateUi {
+    pub clipboard: ui::clipboard::ClipboardPane,
     /// By tab
     pub cli_input: Vec<String>,
     /// Outer: Per tab. Inner: Out items in that tab.
@@ -111,6 +113,9 @@ pub struct StateUi {
     /// double-click can no longer follow, so double-clicking the selected
     /// row still opens it. Dropped by any other press in the meantime.
     pub rename_pending: Option<(PathBuf, f64)>,
+    /// Set while the last click was in the Files panel, so Ctrl+C / X / V
+    /// act on its files rather than on whatever else has the keyboard.
+    pub files_active: bool,
     /// Files-panel Deep search text, looked for in the contents (or names)
     /// of every file under the listed dir (see [State::start_deep_search]).
     /// Empty = off, and the panel lists the dir as usual. Cleared on cd,
@@ -137,6 +142,7 @@ pub struct StateUi {
 impl Default for StateUi {
     fn default() -> Self {
         Self {
+            clipboard: ui::clipboard::ClipboardPane::default(),
             cli_input: vec![String::new()],
             out: vec![Vec::new()],
             active_tab: 0,
@@ -164,6 +170,7 @@ impl Default for StateUi {
             browser_files_filter: Vec::new(),
             rename: None,
             rename_pending: None,
+            files_active: false,
             deep_search: String::new(),
             deep_search_edited: None,
             deep_search_opts: deep_search::Options::default(),
@@ -226,6 +233,8 @@ pub struct State {
     /// The Files panel's Deep search for `ui.deep_search`, running or done.
     /// While set, the panel lists its results instead of `browser_files`.
     pub deep_search: Option<DeepSearch>,
+    /// A Files-panel paste in progress (see [State::paste_files]).
+    pub paste: Option<Paste>,
     /// Where bookmarks + recent dirs are persisted.
     pub state_path: PathBuf,
     /// Cached git branch for each tab's cwd (parallel to `cwd`). `None`
@@ -249,9 +258,10 @@ pub struct State {
     /// alongside the font sizes. Longer paths are truncated from the front.
     pub bookmark_label_len: usize,
     pub recent_dir_label_len: usize,
-    /// Open Markdown viewer windows (double-clicked in the Files panel).
+    /// Open Markdown and text viewer windows (double-clicked in the Files
+    /// panel).
     /// Not persisted.
-    pub md_viewers: MarkdownViewers,
+    pub file_viewers: FileViewers,
     /// The PATH panel's lists and their unsaved edits. Not persisted.
     pub path_panel: PathPanel,
 }
@@ -284,6 +294,7 @@ impl Default for State {
             browser_dir: PathBuf::new(),
             selected_file: None,
             deep_search: None,
+            paste: None,
             state_path: save_data::default_path()
                 .unwrap_or_else(|| PathBuf::from(save_data::FILENAME)),
             branch: vec![branch],
@@ -292,7 +303,7 @@ impl Default for State {
             gui_font_size: ui::DEFAULT_GUI_FONT_SIZE,
             bookmark_label_len: ui::DEFAULT_DIR_LABEL_LEN,
             recent_dir_label_len: ui::DEFAULT_DIR_LABEL_LEN,
-            md_viewers: MarkdownViewers::default(),
+            file_viewers: FileViewers::default(),
             path_panel: PathPanel::default(),
         };
         s.refresh_all_filters();
@@ -527,7 +538,10 @@ impl State {
         }
         match crate::files::rename_entry(&r.path, &r.name) {
             Ok(new_path) if new_path != r.path => {
-                let selected = self.selected_file.as_ref().is_some_and(|d| d.path == r.path);
+                let selected = self
+                    .selected_file
+                    .as_ref()
+                    .is_some_and(|d| d.path == r.path);
                 self.refresh_browser_files();
                 if selected {
                     self.select_file(&new_path);
@@ -538,6 +552,66 @@ impl State {
                 format!("rename: can't rename {}: {e}", r.path.display()),
                 OutType::StdErr,
             ),
+        }
+    }
+
+    /// Put the selected Files row on the OS clipboard, to be copied (or with
+    /// `cut`, moved) wherever it's pasted: here, or in the OS file manager.
+    pub fn copy_selected(&mut self, cut: bool) {
+        let Some(sel) = &self.selected_file else {
+            return;
+        };
+        let paths = vec![sel.path.clone()];
+        self.ui.clipboard.history.record(clipboard::Content::Files { paths: paths.clone(), cut });
+        if let Err(e) = clipboard::set_files(&paths, cut) {
+            let cmd = if cut { "cut" } else { "copy" };
+            self.push_out(format!("{cmd}: {e}"), OutType::StdErr);
+        }
+    }
+
+    /// Copy the files on the OS clipboard into the active tab's cwd, or move
+    /// them if they were cut. Runs in the background; [Self::pump_paste]
+    /// picks up the outcome. Ignored while an earlier paste is still going.
+    pub fn paste_files(&mut self, ctx: &egui::Context) {
+        if self.paste.is_some() {
+            return;
+        }
+        match clipboard::get_files() {
+            Ok(Some((srcs, cut))) => {
+                self.ui.clipboard.history.record(clipboard::Content::Files { paths: srcs.clone(), cut });
+                let dest = self.cwd().to_path_buf();
+                self.paste = Some(Paste::start(srcs, dest, cut, ctx.clone()));
+            }
+            Ok(None) => self.push_out("paste: there are no files on the clipboard", OutType::StdErr),
+            Err(e) => self.push_out(format!("paste: {e}"), OutType::StdErr),
+        }
+    }
+
+    /// Once a paste has finished: report what failed, re-read the listing,
+    /// and select what was pasted if it was a single item. Pasted cut files
+    /// are taken off the clipboard, since they've moved. Called every frame.
+    pub fn pump_paste(&mut self) {
+        let Some(results) = self.paste.as_mut().and_then(Paste::try_finish) else {
+            return;
+        };
+        let paste = self.paste.take().unwrap();
+        let mut pasted = Vec::new();
+        let mut moved = Vec::new();
+        for (src, r) in paste.srcs.iter().zip(results) {
+            match r {
+                Ok(path) => {
+                    if paste.moving && *src != path { moved.push(src.clone()); }
+                    pasted.push(path);
+                }
+                Err(e) => self.push_out(format!("paste: {e}"), OutType::StdErr),
+            }
+        }
+        self.ui.clipboard.history.forget_paths(&moved);
+        // Even a partial move makes the old OS file list unsafe to reuse.
+        if !moved.is_empty() { clipboard::clear_if_holds(&paste.srcs); }
+        self.refresh_browser_files();
+        if let [path] = pasted.as_slice() {
+            self.select_file(path);
         }
     }
 
@@ -661,6 +735,7 @@ impl State {
             browser_dir: PathBuf::new(),
             selected_file: None,
             deep_search: None,
+            paste: None,
             state_path: path,
             branch,
             window_size: loaded.window_size,
@@ -668,7 +743,7 @@ impl State {
             gui_font_size: loaded.font_size.gui.unwrap_or(ui::DEFAULT_GUI_FONT_SIZE),
             bookmark_label_len: dir_label_len(loaded.dir_label_lens.bookmarks),
             recent_dir_label_len: dir_label_len(loaded.dir_label_lens.recent_dirs),
-            md_viewers: MarkdownViewers::default(),
+            file_viewers: FileViewers::default(),
             path_panel: PathPanel::default(),
         };
         s.refresh_all_filters();

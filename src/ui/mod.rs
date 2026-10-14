@@ -5,14 +5,16 @@ use std::{
 };
 
 use egui::{
-    Align, CentralPanel, Color32, DragValue, FontData, FontDefinitions, FontFamily, FontId,
-    FontSelection, Frame, Key, Layout, Modal, Panel, RichText, ScrollArea, TextEdit, TextFormat,
-    TextStyle, TextWrapMode, Ui, WidgetText,
+    Align, Button, CentralPanel, Color32, DragValue, FontData, FontDefinitions, FontFamily, FontId,
+    FontSelection, Frame, Key, Layout, Modal, Panel, Rect, RichText, ScrollArea, TextEdit,
+    TextFormat, TextStyle, TextWrapMode, Ui, WidgetText,
     text::{CCursor, CCursorRange, LayoutJob, TextWrapping},
 };
 use shell::{DirList, SshMode};
 
+mod file_browser;
 pub mod path_panel;
+pub mod clipboard;
 
 /// Renders a single-line "Search..." box that fills the available width and
 /// triggers `on_changed` when the buffer is edited. Pulled out so all three
@@ -46,12 +48,11 @@ use crate::{
     OutType, ansi,
     cmd_color::CmdColors,
     deep_search::{DeepSearch, MAX_MATCHES, Row},
-    files::{self, FileDetails, format_size, open_with_default_app},
-    markdown::is_markdown,
+    files::{FileDetails, format_size, open_with_default_app},
     path_color::{self, Part},
     render_with_tilde, run_command,
     state::{FileRename, State},
-    submit_command,
+    submit_command, viewer,
 };
 
 pub const WINDOW_WIDTH: f32 = 1400.;
@@ -153,10 +154,13 @@ const RECENT_DIRS_COL_WIDTH: f32 = 175.;
 const RIGHT_COL_WIDTH: f32 = 180.;
 const CWD_HIST_COL_WIDTH: f32 = 220.;
 const BROWSER_COL_WIDTH: f32 = 200.;
-/// The Files list splits into two columns once the panel is wide enough for
-/// each to fit this many monospace characters (so the threshold follows the
-/// GUI font size). See [file_browser].
+/// The Files list splits into as many columns as fit at least this many
+/// monospace characters each (so the threshold follows the GUI font size).
+/// See [file_browser] and [list_columns].
 const FILES_COL_MIN_CHARS: f32 = 26.;
+/// Likewise for the Command history and Cmds this dir lists, in button-text
+/// characters. Long commands wrap within their column.
+const CMD_COL_MIN_CHARS: f32 = 30.;
 const REMOTE_COL_WIDTH: f32 = 180.;
 
 /// The main terminal output/input column must always keep at least this many
@@ -173,6 +177,10 @@ const PANEL_FONT_REDUCTION: f32 = 2.;
 /// Width of every tab in the top strip, its `x` included. Longer labels are
 /// cut off at the edge (no ellipsis). See [tab_button].
 const TAB_WIDTH: f32 = 100.;
+
+/// Gap either side of the separator between tabs in the top strip, and the
+/// separator's own width. See [tabs_bar].
+const TAB_GAP: f32 = 2.;
 
 /// Max characters of a running command shown beside the input row; the rest
 /// is in its hover text.
@@ -276,9 +284,55 @@ fn cmd_label(ui: &Ui, colors: &CmdColors, i: usize, text: &str) -> LayoutJob {
     job
 }
 
-/// Display directory bookmarks as a clickable column. Clicking a row cd's
-/// to that bookmark; the `x` removes it from the list. The search box
-/// filters by case-insensitive substring against the full path.
+/// Rough width of `n` characters of `style` text, taking each to be as wide as
+/// a `0`.
+fn chars_width(ui: &Ui, style: TextStyle, n: f32) -> f32 {
+    let font = style.resolve(ui.style());
+    n * ui.ctx().fonts_mut(|f| f.glyph_width(&font, '0'))
+}
+
+/// Width a Bookmarks / Recent dirs column needs so none of its rows spill into
+/// the next: a `prefix_chars`-long index (and marker), a path cut to `max_len`
+/// chars (see [dir_label]), then the `x` button.
+fn dir_col_width(ui: &Ui, prefix_chars: usize, max_len: usize) -> f32 {
+    let s = ui.spacing();
+    // Both buttons' padding, and the gap between them.
+    let extra = 4.0 * s.button_padding.x + s.item_spacing.x;
+    chars_width(ui, TextStyle::Button, (prefix_chars + max_len + 1) as f32) + extra
+}
+
+/// Lay a list panel's `items` out in as many columns as fit across `ui`, each
+/// at least `min_width` wide (or just one if even that doesn't fit), drawing
+/// each with `row`. Filled down the first column, then the next, like `ls`,
+/// so the list still reads top to bottom.
+fn list_columns<T: Copy>(
+    ui: &mut Ui,
+    items: &[T],
+    min_width: f32,
+    mut row: impl FnMut(&mut Ui, T),
+) {
+    let gap = ui.spacing().item_spacing.x;
+    let n = ((ui.available_width() + gap) / (min_width + gap)).max(1.0) as usize;
+    if n == 1 {
+        for &item in items {
+            row(ui, item);
+        }
+        return;
+    }
+    let per_col = items.len().div_ceil(n).max(1);
+    ui.columns(n, |cols| {
+        for (col, chunk) in cols.iter_mut().zip(items.chunks(per_col)) {
+            for &item in chunk {
+                row(col, item);
+            }
+        }
+    });
+}
+
+/// Display directory bookmarks as a clickable list, in columns when the panel
+/// is wide enough. Clicking a row cd's to that bookmark; the `x` removes it
+/// from the list. The search box filters by case-insensitive substring against
+/// the full path.
 fn dir_bookmarks(state: &mut State, ui: &mut Ui) {
     panel_header(ui, "Bookmarks", &mut state.ui.panel_vis.bookmarks);
 
@@ -300,9 +354,12 @@ fn dir_bookmarks(state: &mut State, ui: &mut Ui) {
         .id_salt("bookmarks_scroll")
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            for &i in &state.ui.bookmarks_filter {
+            // `"<i>: "`, sized for the largest index.
+            let prefix_chars = state.dir_bookmarks.len().to_string().len() + 2;
+            let min_width = dir_col_width(ui, prefix_chars, max_len);
+            list_columns(ui, &state.ui.bookmarks_filter, min_width, |ui, i| {
                 let Some(bm) = state.dir_bookmarks.get(i) else {
-                    continue;
+                    return;
                 };
                 ui.horizontal(|ui| {
                     let label = dir_label(ui, format!("{i}: "), bm, home.as_deref(), max_len);
@@ -313,14 +370,14 @@ fn dir_bookmarks(state: &mut State, ui: &mut Ui) {
                         action = Some(ListAction::RemoveBookmark(i));
                     }
                 });
-            }
+            });
         });
 
     apply_action(state, action);
 }
 
 /// Display recent directories we've executed a command from, as a clickable
-/// column. Newest first. Stars mark dirs that are also bookmarked. The `x`
+/// list, in columns when the panel is wide enough. Newest first. Stars mark dirs that are also bookmarked. The `x`
 /// removes a row from the list, and "Cleanup missing" removes every row whose
 /// dir is gone. The search box filters by case-insensitive substring against
 /// the full path.
@@ -352,9 +409,13 @@ fn dir_history(state: &mut State, ui: &mut Ui) {
         .auto_shrink([false, false])
         .show(ui, |ui| {
             // Render newest-first so the most-recently-used dirs are at the top.
-            for &i in state.ui.recent_dirs_filter.iter().rev() {
+            let rows: Vec<usize> = state.ui.recent_dirs_filter.iter().rev().copied().collect();
+            // `"<i>: *"`, sized for the largest index.
+            let prefix_chars = state.recent_dirs.len().to_string().len() + 3;
+            let min_width = dir_col_width(ui, prefix_chars, max_len);
+            list_columns(ui, &rows, min_width, |ui, i| {
                 let Some(r) = state.recent_dirs.get(i) else {
-                    continue;
+                    return;
                 };
                 let star = if state.dir_bookmarks.contains(&r.path) {
                     "*"
@@ -383,14 +444,15 @@ fn dir_history(state: &mut State, ui: &mut Ui) {
                         action = Some(ListAction::RemoveRecentDir(r.path.clone()));
                     }
                 });
-            }
+            });
         });
 
     apply_action(state, action);
 }
 
-/// Display commands previously run in the active tab's cwd. Newest first.
-/// Same click behavior as the global history panel.
+/// Display commands previously run in the active tab's cwd. Newest first, in
+/// columns when the panel is wide enough. Same click behavior as the global
+/// history panel.
 fn cwd_cmd_history(state: &mut State, ui: &mut Ui) {
     panel_header(
         ui,
@@ -414,25 +476,28 @@ fn cwd_cmd_history(state: &mut State, ui: &mut Ui) {
             // stays user-resizable via its drag handle.
             ui.style_mut().wrap_mode = Some(TextWrapMode::Wrap);
 
-            for &i in state.ui.cwd_history_filter.iter().rev() {
+            let rows: Vec<usize> = state.ui.cwd_history_filter.iter().rev().copied().collect();
+            let min_width = chars_width(ui, TextStyle::Button, CMD_COL_MIN_CHARS);
+            list_columns(ui, &rows, min_width, |ui, i| {
                 let Some(item) = state.history.get(i) else {
-                    continue;
+                    return;
                 };
 
                 let label = cmd_label(ui, &state.cmd_colors, i, &item.text);
-                let btn = egui::Button::new(label)
+                let btn = Button::new(label)
                     .wrap()
                     .min_size(egui::vec2(ui.available_width(), 0.0));
                 if ui.add(btn).clicked() {
                     action = Some(ListAction::FillInput(item.text.clone()));
                 }
-            }
+            });
         });
 
     apply_action(state, action);
 }
 
-/// Display recent commands entered, newest first. Clicking the label copies
+/// Display recent commands entered, newest first, in columns when the panel
+/// is wide enough. Clicking the label copies
 /// the command into the input box so the user can edit or run it; the
 /// "In dir" button re-runs it in the directory it was originally run from.
 fn cmd_history(state: &mut State, ui: &mut Ui) {
@@ -455,12 +520,14 @@ fn cmd_history(state: &mut State, ui: &mut Ui) {
             ui.style_mut().wrap_mode = Some(TextWrapMode::Wrap);
 
             // Newest first.
-            for &i in state.ui.history_filter.iter().rev() {
+            let rows: Vec<usize> = state.ui.history_filter.iter().rev().copied().collect();
+            let min_width = chars_width(ui, TextStyle::Button, CMD_COL_MIN_CHARS);
+            list_columns(ui, &rows, min_width, |ui, i| {
                 let Some(item) = state.history.get(i) else {
-                    continue;
+                    return;
                 };
                 let label = cmd_label(ui, &state.cmd_colors, i, &item.text);
-                let btn = egui::Button::new(label)
+                let btn = Button::new(label)
                     .wrap()
                     .min_size(egui::vec2(ui.available_width(), 0.0));
                 if ui.add(btn).clicked() {
@@ -483,7 +550,7 @@ fn cmd_history(state: &mut State, ui: &mut Ui) {
                     action = Some(ListAction::RunHistoryInDir(i));
                 }
                 ui.separator();
-            }
+            });
         });
 
     apply_action(state, action);
@@ -493,7 +560,7 @@ fn apply_action(state: &mut State, action: Option<ListAction>) {
     match action {
         Some(ListAction::ChangeDir(p)) => state.change_dir(p),
         Some(ListAction::ChangeSavedDir(p, list)) => state.change_saved_dir(p, list),
-        Some(ListAction::OpenFile(p)) if is_markdown(&p) => state.md_viewers.open(p),
+        Some(ListAction::OpenFile(p)) if viewer::can_view(&p) => state.file_viewers.open(p),
         Some(ListAction::OpenFile(p)) => {
             if let Err(e) = open_with_default_app(&p) {
                 state.push_out(
@@ -672,6 +739,7 @@ fn term_in(state: &mut State, ui: &mut Ui) {
     let focused = ui.memory(|m| m.has_focus(input_id));
     let consume =
         |ui: &mut Ui, key| focused && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, key));
+
     let submitted = consume(ui, Key::Enter);
     let tab = consume(ui, Key::Tab);
     let up = !tab && consume(ui, Key::ArrowUp);
@@ -679,18 +747,20 @@ fn term_in(state: &mut State, ui: &mut Ui) {
     let cd_active = cd_cursor.is_some() || state.ui.cli_input[active].is_empty();
     let left = !tab && !up && !down && cd_active && consume(ui, Key::ArrowLeft);
     let right = !tab && !up && !down && !left && cd_active && consume(ui, Key::ArrowRight);
+
     // → (or End) with the caret at the end accepts the greyed history
     // suggestion, as in the CLI.
     let caret_at_end = TextEdit::load_state(ui.ctx(), input_id)
         .and_then(|s| s.cursor.char_range())
         .is_none_or(|r| {
-            r.is_empty() && r.primary.index == state.ui.cli_input[active].chars().count()
+            r.is_empty() && r.primary.index == egui::text::CharIndex(state.ui.cli_input[active].chars().count())
         });
     let hint = if focused && caret_at_end && running.is_none() {
         state.input_hint()
     } else {
         None
     };
+
     let accept_hint = hint.is_some()
         && !tab
         && !up
@@ -726,6 +796,10 @@ fn term_in(state: &mut State, ui: &mut Ui) {
     // pasted newlines are flattened to spaces below. `lock_focus` stops egui
     // from using Tab for widget-to-widget focus navigation, since we use it
     // for path autocompletion.
+    if let Some(text) = state.ui.clipboard.pending_text.take() {
+        ui.ctx().memory_mut(|m| m.request_focus(input_id));
+        ui.ctx().input_mut(|i| i.events.push(egui::Event::Paste(text)));
+    }
     let output = TextEdit::multiline(&mut state.ui.cli_input[active])
         .id(input_id)
         .desired_rows(1)
@@ -810,348 +884,6 @@ fn term_in(state: &mut State, ui: &mut Ui) {
     }
 }
 
-/// Files in the active tab's cwd, as a selectable list. Folders are
-/// sorted first and prefixed with 📁; executable files (Unix +x, or
-/// Windows `.exe`/`.msi`) are coloured green. The listing is refreshed
-/// by [State::refresh_browser_files] on every cwd change and after every
-/// command, so we just read what's already there. The search box under the
-/// hidden/dotfile toggles narrows the listing by name. When the panel is wide
-/// enough (see [FILES_COL_MIN_CHARS]) the list is laid out in two columns.
-///
-/// Clicking a row selects it, and the bottom third of the panel shows its
-/// details (see [file_details]). Double-clicking a folder row navigates into
-/// it (same path as clicking a bookmark or recent dir); double-clicking a
-/// Markdown file opens it in a viewer window (see `crate::markdown`); any
-/// other file opens with the OS's default associated program (see
-/// [open_with_default_app]). Clicking the already-selected row again renames
-/// it in place (see [rename_box]): Enter or clicking away applies the new
-/// name, Escape cancels.
-fn file_browser(state: &mut State, ui: &mut Ui) {
-    // Measured before anything is laid out, so the details pane is a third
-    // of the whole panel rather than of what's left under the header.
-    let details_height = ui.available_height() / 3.0;
-    // The whole pane, for the mouse Back/Forward buttons below.
-    let pane_rect = ui.max_rect();
-
-    panel_header(ui, "Files", &mut state.ui.panel_vis.file_browser);
-
-    // The directory being listed, colour-coded like the other panels' paths.
-    // Wraps rather than widening the panel when it's long.
-    let cwd_job = path_job(ui, state.cwd(), state.home.as_deref());
-    ui.add(egui::Label::new(cwd_job).wrap());
-
-    // Browser-style navigation row. Up goes to the parent dir; Back/Forward
-    // walk the per-tab history maintained in `State::change_dir`. Buttons are
-    // disabled when there's nowhere to go in that direction.
-    let i = state.ui.active_tab;
-    let can_up = state.cwd().parent().is_some();
-    let can_back = !state.ui.nav_back[i].is_empty();
-    let can_forward = !state.ui.nav_forward[i].is_empty();
-    // Common-destination shortcuts (see [files::shortcuts]): 🏠 Home,
-    // ⚙ app data, 🖥 Desktop, 📥 Downloads, 📦 programs, 🖴 root, 🗑 trash.
-    // Each is only enabled when the target actually exists, so we never `cd`
-    // into a missing dir and push a diagnostic. On Windows, 🖴 is a menu of
-    // drives and 🗑 opens the Recycle Bin in Explorer.
-    let home = state.home.clone();
-    let shortcuts = files::shortcuts(home.as_deref());
-    let mut go_up = false;
-    let mut go_back = false;
-    let mut go_forward = false;
-    let mut go_to: Option<PathBuf> = None;
-    #[cfg(windows)]
-    let mut open_bin = false;
-    // Wraps so the shortcuts drop to a second row in a narrow panel.
-    ui.horizontal_wrapped(|ui| {
-        if ui
-            .add_enabled(can_up, egui::Button::new("⬆"))
-            .on_hover_text("Parent directory")
-            .clicked()
-        {
-            go_up = true;
-        }
-        if ui
-            .add_enabled(can_back, egui::Button::new("⬅"))
-            .on_hover_text("Previous directory")
-            .clicked()
-        {
-            go_back = true;
-        }
-        if ui
-            .add_enabled(can_forward, egui::Button::new("➡"))
-            .on_hover_text("Next directory")
-            .clicked()
-        {
-            go_forward = true;
-        }
-        for s in shortcuts {
-            let ok = s.dir.as_ref().is_some_and(|d| d.is_dir());
-            if ui
-                .add_enabled(ok, egui::Button::new(s.glyph))
-                .on_hover_text(s.hover)
-                .clicked()
-            {
-                go_to = s.dir;
-            }
-        }
-        #[cfg(windows)]
-        {
-            // Read afresh each frame the menu is open, so a USB stick
-            // plugged in meanwhile shows up. A drive with no media is still
-            // listed, as in Explorer; picking it reports the `cd` error.
-            ui.menu_button("🖴", |ui| {
-                for d in files::drives() {
-                    if ui.button(format!("{} {}", d.glyph, d.name)).clicked() {
-                        go_to = Some(d.root);
-                    }
-                }
-            })
-            .response
-            .on_hover_text("This PC: devices and drives");
-            if ui
-                .button("🗑")
-                .on_hover_text("Recycle Bin (opens in Explorer)")
-                .clicked()
-            {
-                open_bin = true;
-            }
-        }
-    });
-    #[cfg(windows)]
-    if open_bin && let Err(e) = files::open_recycle_bin() {
-        state.push_out(
-            format!("open: failed to open the Recycle Bin: {e}"),
-            OutType::StdErr,
-        );
-    }
-    // Mouse buttons 4/5 (Back/Forward) act like ⬅/➡ while the pointer is
-    // anywhere over this pane.
-    if ui.rect_contains_pointer(pane_rect) {
-        ui.input(|i| {
-            go_back |= i.pointer.button_pressed(egui::PointerButton::Extra1);
-            go_forward |= i.pointer.button_pressed(egui::PointerButton::Extra2);
-        });
-    }
-    if go_up {
-        state.nav_up();
-    } else if go_back {
-        state.nav_back();
-    } else if go_forward {
-        state.nav_forward();
-    } else if let Some(target) = go_to {
-        state.change_dir(target);
-    }
-
-    // Listing filters. Each button is highlighted while the entries it
-    // covers are shown. The Hidden attribute is Windows-only, so elsewhere
-    // only the dotfile filter appears. The Open button after them does what
-    // the `open` command does: shows this dir in the OS's file manager.
-    let mut filters_changed = false;
-    let mut open_clicked = false;
-    ui.horizontal(|ui| {
-        let mut toggle = |ui: &mut Ui, on: &mut bool, label: &str, what: &str| {
-            let hover = if *on {
-                format!("Showing {what}. Click to hide them.")
-            } else {
-                format!("Hiding {what}. Click to show them.")
-            };
-            if ui
-                .add(egui::Button::selectable(*on, label))
-                .on_hover_text(hover)
-                .clicked()
-            {
-                *on = !*on;
-                filters_changed = true;
-            }
-        };
-        #[cfg(windows)]
-        toggle(
-            ui,
-            &mut state.ui.show_hidden_attr,
-            "👁 Hidden",
-            "files and folders with the Hidden attribute",
-        );
-        toggle(
-            ui,
-            &mut state.ui.show_dotfiles,
-            "👁 .dot",
-            "files and folders whose names start with \".\"",
-        );
-        if ui
-            .button("📂 Native browser")
-            .on_hover_text("Open this folder in the system file manager")
-            .clicked()
-        {
-            open_clicked = true;
-        }
-    });
-    if filters_changed {
-        state.refresh_browser_files();
-        let _ = state.save();
-    }
-    if open_clicked {
-        let cwd = state.cwd().to_path_buf();
-        shell::commands::open_dir(&cwd, &mut |kind, msg| {
-            state.push_out(msg, crate::out_type_for(kind));
-        });
-    }
-
-    // Text filter on names in this dir; cleared on cd (see
-    // [State::refresh_browser_files]).
-    if search_box(ui, &mut state.ui.files_search, "files_search") {
-        state.refresh_browser_files_filter();
-    }
-    deep_search_bar(state, ui);
-
-    ui.separator();
-
-    // Added before the list so it claims the bottom of the panel; the list
-    // then fills the space left above it.
-    Panel::bottom("file_details_panel")
-        .resizable(false)
-        .exact_size(details_height)
-        .frame(Frame::new().inner_margin(egui::Margin::symmetric(0, 4)))
-        .show_inside(ui, |ui| {
-            file_details(state.selected_file.as_ref(), state.home.as_deref(), ui);
-        });
-
-    // While a Deep search is set, its results stand in for the listing.
-    if let Some(search) = &state.deep_search {
-        let selected = state.selected_file.as_ref().map(|d| d.path.as_path());
-        let home = state.home.as_deref();
-        let action = deep_search_results(search, &state.ui.files_search, selected, home, ui);
-        apply_action(state, action);
-        return;
-    }
-
-    // Explorer-style rename: a click on the already-selected row starts one,
-    // once it's clear the click isn't the first half of a double-click. Any
-    // other press in the meantime calls it off.
-    let (now, pressed) = ui.input(|i| (i.time, i.pointer.any_pressed()));
-    let dbl_click_delay = ui
-        .ctx()
-        .options(|o| o.input_options.max_double_click_delay);
-    if pressed {
-        state.ui.rename_pending = None;
-    }
-    if let Some((path, t)) = state.ui.rename_pending.clone() {
-        let wait = t + dbl_click_delay - now;
-        if wait > 0.0 {
-            ui.ctx().request_repaint_after_secs(wait as f32);
-        } else {
-            state.ui.rename_pending = None;
-            if state.selected_file.as_ref().is_some_and(|d| d.path == path) {
-                state.start_rename(&path);
-            }
-        }
-    }
-
-    let selected = state.selected_file.as_ref().map(|d| d.path.as_path());
-    let dark = ui.visuals().dark_mode;
-    let mut action: Option<ListAction> = None;
-    // A click on the selected row, which may become a rename (see above).
-    let mut clicked_selected: Option<PathBuf> = None;
-    // Set when the rename box loses focus: `true` to apply the new name,
-    // `false` if Escape cancelled it. Kept apart from `action` so a click on
-    // another row in the same frame can't drop the rename.
-    let mut rename_done: Option<bool> = None;
-
-    ScrollArea::vertical()
-        .id_salt("file_browser_scroll")
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            // Rows butt up against each other, like a file manager's list.
-            ui.spacing_mut().item_spacing.y = 0.0;
-
-            if state.ui.browser_files_filter.is_empty() && !state.ui.files_search.is_empty() {
-                ui.label(RichText::new("No matches.").italics().weak());
-            }
-            let mut row = |ui: &mut Ui, i: usize| {
-                let Some(f) = state.browser_files.get(i) else {
-                    return;
-                };
-                if let Some(r) = state.ui.rename.as_mut().filter(|r| r.path == f.path) {
-                    if let Some(apply) = rename_box(ui, r, f.is_folder) {
-                        rename_done = Some(apply);
-                    }
-                    return;
-                }
-                let text = if f.is_folder {
-                    format!("📁 {}", f.disp_name)
-                } else {
-                    f.disp_name.clone()
-                };
-                let mut rich = RichText::new(text).monospace();
-                if f.is_folder {
-                    // Same colour this folder has in any path shown elsewhere.
-                    let path = render_with_tilde(&f.path, home.as_deref());
-                    if let Some(c) = path_color::last_color(&path, Some("~"), dark) {
-                        rich = rich.color(c);
-                    }
-                } else if f.is_executable {
-                    rich = rich.color(COLOR_EXECUTABLE);
-                }
-                // Full width so the whole row is clickable and the selection
-                // highlight spans the column. Long names are truncated; the
-                // details pane shows the full name.
-                let row = egui::Button::selectable(selected == Some(f.path.as_path()), rich)
-                    .truncate()
-                    .min_size(egui::vec2(ui.available_width(), 0.0));
-                let resp = ui.add(row);
-                // A double-click's first click has already selected the row.
-                // Then a folder navigates into it; a file opens with its
-                // associated program, just like a desktop file manager.
-                if resp.double_clicked() {
-                    action = Some(if f.is_folder {
-                        ListAction::ChangeDir(f.path.clone())
-                    } else {
-                        ListAction::OpenFile(f.path.clone())
-                    });
-                } else if resp.clicked() {
-                    if selected == Some(f.path.as_path()) {
-                        clicked_selected = Some(f.path.clone());
-                    } else {
-                        action = Some(ListAction::SelectFile(f.path.clone()));
-                    }
-                }
-            };
-
-            // Two columns once each fits FILES_COL_MIN_CHARS characters.
-            let font = TextStyle::Monospace.resolve(ui.style());
-            let char_width = ui.ctx().fonts_mut(|f| f.glyph_width(&font, '0'));
-            let col_gap = ui.spacing().item_spacing.x;
-            let two_cols = ui.available_width() >= 2.0 * FILES_COL_MIN_CHARS * char_width + col_gap;
-            let rows = &state.ui.browser_files_filter;
-            if two_cols {
-                // Filled down the left column first, then the right, like
-                // `ls`, so the folders stay together at the top left.
-                let (left, right) = rows.split_at(rows.len().div_ceil(2));
-                ui.columns(2, |cols| {
-                    for &i in left {
-                        row(&mut cols[0], i);
-                    }
-                    for &i in right {
-                        row(&mut cols[1], i);
-                    }
-                });
-            } else {
-                for &i in rows {
-                    row(ui, i);
-                }
-            }
-        });
-
-    match rename_done {
-        Some(true) => state.commit_rename(),
-        Some(false) => state.ui.rename = None,
-        None => {}
-    }
-    if let Some(path) = clicked_selected {
-        state.ui.rename_pending = Some((path, now));
-        ui.ctx().request_repaint_after_secs(dbl_click_delay as f32);
-    }
-    apply_action(state, action);
-}
-
 /// The edit box that stands in for a Files row while it's being renamed.
 /// Returns `Some(true)` once editing ends with Enter or a click elsewhere,
 /// and `Some(false)` if Escape cancelled it.
@@ -1168,6 +900,7 @@ fn rename_box(ui: &mut Ui, r: &mut FileRename, is_folder: bool) -> Option<bool> 
             .font(TextStyle::Monospace)
             .desired_width(f32::INFINITY)
             .show(ui);
+
         if !r.focused {
             // Like Explorer, select the name but not its extension, so typing
             // replaces just the name; a folder's whole name is selected.
@@ -1211,7 +944,7 @@ fn deep_search_bar(state: &mut State, ui: &mut Ui) {
     ui.horizontal(|ui| {
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if ui
-                .add(egui::Button::selectable(opts.regex, ".*"))
+                .add(Button::selectable(opts.regex, ".*"))
                 .on_hover_text("Treat the Deep search as a regular expression, not plain text")
                 .clicked()
             {
@@ -1457,7 +1190,7 @@ fn deep_search_results(
                         }
                     };
                     let is_selected = matches!(row, Row::File(_)) && selected == Some(&hit.path);
-                    let button = egui::Button::selectable(is_selected, text)
+                    let button = Button::selectable(is_selected, text)
                         .truncate()
                         .min_size(egui::vec2(ui.available_width(), row_height));
                     let resp = ui.add(button);
@@ -1710,6 +1443,8 @@ fn panel_toggles(state: &mut State, ui: &mut Ui) {
         ui.toggle_value(&mut v.recent_cmds_in_dir, "Cmds this dir");
         // Opens a window of its own rather than a side panel.
         ui.toggle_value(&mut v.path_editor, "PATH");
+        ui.toggle_value(&mut state.ui.clipboard.visible, "Clipboard")
+            .on_hover_text("Toggle clipboard history (Ctrl+Shift+V)");
     });
 }
 
@@ -1810,23 +1545,27 @@ fn tab_button(ui: &mut Ui, text: &str, selected: bool, closable: bool) -> (egui:
     } else {
         0.
     };
+
     let label_width = TAB_WIDTH - 2. * ui.spacing().button_padding.x - close_width;
-    // The font a plain-text button label would get. PLACEHOLDER colour lets
+    // The font a plain-text button label would get. PLACEHOLDER color lets
     // the button apply its own (selected/hovered).
     let mut job = LayoutJob::simple_singleline(
         text.to_owned(),
         FontSelection::Default.resolve_with_fallback(ui.style(), TextStyle::Button.into()),
         Color32::PLACEHOLDER,
     );
+
     job.wrap = TextWrapping {
         overflow_character: None,
         ..TextWrapping::truncate_at_width(label_width.max(0.))
     };
+
     let galley = ui.ctx().fonts_mut(|f| f.layout_job(job));
     let cut = galley.elided;
 
-    let button = egui::Button::selectable(selected, WidgetText::from(galley))
-        .min_size(egui::vec2(TAB_WIDTH, 0.));
+    let button =
+        Button::selectable(selected, WidgetText::from(galley)).min_size(egui::vec2(TAB_WIDTH, 0.));
+
     // Left-align the label; horizontal layouts centre button text.
     let layout = ui.layout().with_main_align(Align::Min);
     let mut tab = ui.with_layout(layout, |ui| ui.add(button)).inner;
@@ -1837,14 +1576,13 @@ fn tab_button(ui: &mut Ui, text: &str, selected: bool, closable: bool) -> (egui:
     let close_clicked = closable && {
         let rect = tab.rect;
         let close_rect =
-            egui::Rect::from_min_max(egui::pos2(rect.right() - close_width, rect.top()), rect.max);
-        ui.put(
-            close_rect,
-            egui::Button::new("x").frame_when_inactive(false),
-        )
-        .on_hover_text("Close tab")
-        .clicked()
+            Rect::from_min_max(egui::pos2(rect.right() - close_width, rect.top()), rect.max);
+
+        ui.put(close_rect, Button::new("x").frame_when_inactive(false))
+            .on_hover_text("Close tab")
+            .clicked()
     };
+
     (tab, close_clicked)
 }
 
@@ -1853,11 +1591,14 @@ fn tab_button(ui: &mut Ui, text: &str, selected: bool, closable: bool) -> (egui:
 /// tab) closes it (unavailable when only one tab is left), and `+` appends a
 /// fresh tab inheriting the active tab's cwd.
 fn tabs_bar(state: &mut State, ui: &mut Ui) {
+    const TAB_SECTION_PADDING: f32 = 20.;
+
     // Snapshot the data we need so the inner closure doesn't fight the
     // borrow checker with the mutable `state` we mutate at the end.
     let active = state.ui.active_tab;
     let n = state.cwd.len();
     let home = state.home.clone();
+
     let labels: Vec<String> = state
         .cwd
         .iter()
@@ -1885,48 +1626,60 @@ fn tabs_bar(state: &mut State, ui: &mut Ui) {
     let mut to_close: Option<usize> = None;
     let mut add_new = false;
     let mut connect_remote: Option<usize> = None;
-    let mut font_delta = 0.0_f32;
-    let mut gui_font_delta = 0.0_f32;
+    let mut font_delta = 0.;
+    let mut gui_font_delta = 0.;
     let mut label_len_done = false;
 
     ui.horizontal(|ui| {
         // Font-size controls sit to the left of the tab strip: one for the
         // terminal panes, one for the side panels. Then the path lengths
         // for the Bookmarks and Recent dirs panels, which resize separately.
-        font_delta = font_size_control(ui, "CLI font size: ", font_size, "terminal");
+        font_delta = font_size_control(ui, "CLI text: ", font_size, "terminal");
         ui.separator();
-        gui_font_delta = font_size_control(ui, "GUI font size: ", gui_font_size, "panel");
+        gui_font_delta = font_size_control(ui, "GUI text: ", gui_font_size, "panel");
         ui.separator();
         label_len_done |=
             dir_label_len_control(ui, "Bookmark chars: ", &mut bookmark_label_len, "bookmark");
         ui.separator();
+
         label_len_done |= dir_label_len_control(
             ui,
             "Recent dir chars: ",
             &mut recent_dir_label_len,
             "recent dir",
         );
+
         ui.separator();
         // Breathing room either side of the tab section.
-        ui.add_space(20.0);
+        ui.add_space(TAB_SECTION_PADDING);
 
-        for (i, leaf) in labels.iter().enumerate() {
-            let text = format!("{i}: {leaf}");
-            // Only the active tab shows its `x`, Firefox-style.
-            let (tab, close_clicked) = tab_button(ui, &text, i == active, n > 1 && i == active);
-            if tab.clicked() {
-                to_select = Some(i);
+        // Tighter than the default spacing, so tabs and their separators sit
+        // close together. Scoped so the rest of the strip keeps the default.
+        ui.scope(|ui| {
+            ui.spacing_mut().item_spacing.x = TAB_GAP;
+
+            for (i, leaf) in labels.iter().enumerate() {
+                let text = format!("{i}: {leaf}");
+                // Only the active tab shows its `x`, Firefox-style.
+                let (tab, close_clicked) = tab_button(ui, &text, i == active, n > 1 && i == active);
+                if tab.clicked() {
+                    to_select = Some(i);
+                }
+
+                // Middle-click closes, same as the `x`.
+                if close_clicked || (n > 1 && tab.middle_clicked()) {
+                    to_close = Some(i);
+                }
+
+                ui.add(egui::Separator::default().spacing(TAB_GAP));
             }
-            // Middle-click closes, same as the `x`.
-            if close_clicked || (n > 1 && tab.middle_clicked()) {
-                to_close = Some(i);
-            }
-            ui.separator();
-        }
+        });
+
         if ui.button("+ tab").on_hover_text("New tab").clicked() {
             add_new = true;
         }
-        ui.add_space(20.0);
+
+        ui.add_space(TAB_SECTION_PADDING);
         // One-click SSH connect per saved remote, e.g. `ssh 0 192.168.1.10`.
         // Connects the active tab — same as typing `ssh <index>`.
         for (i, host) in &remotes {
@@ -1947,6 +1700,7 @@ fn tabs_bar(state: &mut State, ui: &mut Ui) {
     if gui_font_delta != 0.0 {
         state.adjust_gui_font_size(gui_font_delta);
     }
+
     // Applied every frame so the panels follow a drag live; saved once done.
     state.bookmark_label_len = bookmark_label_len;
     state.recent_dir_label_len = recent_dir_label_len;
@@ -2086,6 +1840,7 @@ fn stale_dir_popup(state: &mut State, ctx: &egui::Context) {
 }
 
 pub fn draw(state: &mut State, ui: &mut Ui) {
+    clipboard::capture(state, ui.ctx());
     // Snapshot panel visibility so a change from the "Panels:" toggles or a
     // panel's own close button is persisted at the end of the frame.
     let vis_before = state.ui.panel_vis;
@@ -2101,6 +1856,8 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
     // wrap up any that have finished. Their reader threads request a repaint
     // whenever there's news.
     state.pump_running();
+    // Likewise a Files-panel paste.
+    state.pump_paste();
 
     // Pump any live PTY output into the active tab's pane. While a PTY session
     // is active, keep requesting repaints so streamed output (e.g. `top`) keeps
@@ -2111,7 +1868,7 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
 
     Panel::top("tabs_panel")
         .resizable(false)
-        .show_inside(ui, |ui| {
+        .show(ui, |ui| {
             shrink_panel_fonts(ui);
             tabs_bar(state, ui);
             panel_toggles(state, ui);
@@ -2130,7 +1887,7 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
             .resizable(true)
             .default_size(prev.bookmarks.unwrap_or(BOOKMARK_COL_WIDTH))
             .max_size(max)
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 scale_panel_fonts(ui, gui_font_size);
                 dir_bookmarks(state, ui);
             });
@@ -2143,7 +1900,7 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
             .resizable(true)
             .default_size(prev.recent_dirs.unwrap_or(RECENT_DIRS_COL_WIDTH))
             .max_size(max)
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 scale_panel_fonts(ui, gui_font_size);
                 dir_history(state, ui);
             });
@@ -2156,11 +1913,23 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
             .resizable(true)
             .default_size(prev.file_browser.unwrap_or(BROWSER_COL_WIDTH))
             .max_size(max)
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 scale_panel_fonts(ui, gui_font_size);
-                file_browser(state, ui);
+                file_browser::file_browser(state, ui);
             });
         state.ui.panel_widths.file_browser = Some(r.response.rect.width());
+    }
+
+    if state.ui.clipboard.visible {
+        let max = central_reserve(ui, f32::INFINITY);
+        Panel::right("clipboard_panel")
+            .resizable(true)
+            .default_size(260.0)
+            .max_size(max)
+            .show(ui, |ui| {
+                scale_panel_fonts(ui, gui_font_size);
+                clipboard::draw(state, ui);
+            });
     }
 
     if state.ui.panel_vis.remote_terminals {
@@ -2169,7 +1938,7 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
             .resizable(true)
             .default_size(prev.remote_terminals.unwrap_or(REMOTE_COL_WIDTH))
             .max_size(max)
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 scale_panel_fonts(ui, gui_font_size);
                 remote_terminals(state, ui);
             });
@@ -2184,7 +1953,7 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
             .resizable(true)
             .default_size(prev.recent_cmds.unwrap_or(RIGHT_COL_WIDTH))
             .max_size(max)
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 scale_panel_fonts(ui, gui_font_size);
                 cmd_history(state, ui);
             });
@@ -2197,7 +1966,7 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
             .resizable(true)
             .default_size(prev.recent_cmds_in_dir.unwrap_or(CWD_HIST_COL_WIDTH))
             .max_size(max)
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 scale_panel_fonts(ui, gui_font_size);
                 cwd_cmd_history(state, ui);
             });
@@ -2224,19 +1993,19 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
     Panel::bottom("term_in_panel")
         .resizable(false)
         .frame(term_frame)
-        .show_inside(ui, |ui| {
+        .show(ui, |ui| {
             term_in(state, ui);
         });
 
     CentralPanel::default()
         .frame(term_frame)
-        .show_inside(ui, |ui| {
+        .show(ui, |ui| {
             term_out(state, ui);
         });
 
-    // Markdown viewer windows are child viewports: they only stay open while
+    // File viewer windows are child viewports: they only stay open while
     // the main window's pass keeps showing them.
-    state.md_viewers.show(ui.ctx());
+    state.file_viewers.show(ui.ctx());
 
     // Likewise the PATH editor's window.
     path_panel::path_window(state, ui.ctx());

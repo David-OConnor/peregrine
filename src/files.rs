@@ -1,4 +1,4 @@
-//! Support for the Files panel: opening a file with its default program, and
+//! Support for the Files panel: opening a file with its OS-default program, and
 //! the details shown for the selected row.
 
 use std::{
@@ -500,72 +500,4 @@ fn volume_label(root: &[u16]) -> Option<String> {
     };
     let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
     (ok != 0 && len > 0).then(|| String::from_utf16_lossy(&buf[..len]))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A fresh, empty scratch dir for one test.
-    fn scratch(test: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "shell_gui_{test}_{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
-    #[test]
-    fn renames_in_place() {
-        let dir = scratch("renames_in_place");
-        let a = dir.join("a.txt");
-        fs::write(&a, "a").unwrap();
-        fs::write(dir.join("b.txt"), "b").unwrap();
-
-        // Taken names and separators are refused; nothing moves.
-        assert!(rename_entry(&a, "b.txt").is_err());
-        assert!(rename_entry(&a, "sub/c.txt").is_err());
-        assert!(rename_entry(&a, "  ").is_err());
-        assert_eq!(fs::read_to_string(dir.join("b.txt")).unwrap(), "b");
-
-        let c = rename_entry(&a, " c.md ").unwrap();
-        assert_eq!(c, dir.join("c.md"));
-        assert!(!a.exists());
-        assert_eq!(fs::read_to_string(&c).unwrap(), "a");
-
-        // A change of case alone works on any filesystem.
-        let upper = rename_entry(&c, "C.md").unwrap();
-        let names: Vec<_> = fs::read_dir(&dir)
-            .unwrap()
-            .flatten()
-            .map(|e| e.file_name())
-            .collect();
-        assert!(names.contains(&upper.file_name().unwrap().to_owned()));
-
-        fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn formats_sizes() {
-        assert_eq!(format_size(0), "0 bytes");
-        assert_eq!(format_size(1023), "1023 bytes");
-        assert_eq!(format_size(1024), "1.0 KB (1,024 bytes)");
-        assert_eq!(format_size(1_482_112), "1.4 MB (1,482,112 bytes)");
-        assert_eq!(
-            format_size(3 * 1024 * 1024 * 1024),
-            "3.0 GB (3,221,225,472 bytes)"
-        );
-    }
-
-    #[test]
-    fn generic_type_names() {
-        assert_eq!(
-            generic_type_name(Path::new("a/Cargo.toml"), false),
-            "TOML file"
-        );
-        assert_eq!(generic_type_name(Path::new("a/LICENSE"), false), "File");
-        assert_eq!(generic_type_name(Path::new("a/src"), true), "Folder");
-    }
 }

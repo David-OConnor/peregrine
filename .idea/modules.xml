@@ -2,7 +2,7 @@
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
-      <module fileurl="file://$PROJECT_DIR$/.idea/shell_gui.iml" filepath="$PROJECT_DIR$/.idea/shell_gui.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/peregrine.iml" filepath="$PROJECT_DIR$/.idea/peregrine.iml" />
     </modules>
   </component>
 </project>

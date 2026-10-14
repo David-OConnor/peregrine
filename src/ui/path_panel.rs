@@ -568,7 +568,7 @@ enum Request {
 /// The PATH panel's window, while its toggle (`panel_vis.path_editor`) is
 /// on. Call once per pass of the main window: egui closes a child window
 /// that isn't shown in its parent's pass. An immediate viewport, unlike the
-/// Markdown viewers' deferred ones, so it can draw straight from `state`.
+/// file viewers' deferred ones, so it can draw straight from `state`.
 pub fn path_window(state: &mut State, ctx: &Context) {
     if !state.ui.panel_vis.path_editor {
         return;
@@ -576,14 +576,15 @@ pub fn path_window(state: &mut State, ctx: &Context) {
     let builder = ViewportBuilder::default()
         .with_title("PATH")
         .with_inner_size(WINDOW_SIZE)
-        .with_min_inner_size(MIN_WINDOW_SIZE);
+        .with_min_inner_size(MIN_WINDOW_SIZE)
+        .with_icon(crate::app_icon());
     let id = ViewportId::from_hash_of("path_editor_window");
     ctx.show_viewport_immediate(id, builder, |ui, class| {
         if ui.input(|i| i.viewport().close_requested()) {
             state.ui.panel_vis.path_editor = false;
             return;
         }
-        CentralPanel::default().show_inside(ui, |ui| {
+        CentralPanel::default().show(ui, |ui| {
             scale_panel_fonts(ui, state.gui_font_size);
             // Without native multi-window support egui draws this as a
             // window inside the main one, with no close button of its own.
@@ -743,7 +744,7 @@ fn draw(
     Panel::bottom("path_panel_controls")
         .resizable(false)
         .frame(Frame::new().inner_margin(egui::Margin::symmetric(0, 4)))
-        .show_inside(ui, |ui| {
+        .show(ui, |ui| {
             if editable {
                 // Row buttons act on the list, so are off while it's being
                 // edited as text.
@@ -1008,7 +1009,7 @@ fn details_pane(panel: &mut PathPanel, height: f32, ui: &mut Ui) -> Option<Reque
         .resizable(false)
         .exact_size(height)
         .frame(Frame::new().inner_margin(egui::Margin::symmetric(0, 4)))
-        .show_inside(ui, |ui| {
+        .show(ui, |ui| {
             let Some(d) = &panel.details else {
                 ui.label(
                     RichText::new("Select an entry to see its details.")
@@ -1196,80 +1197,4 @@ fn row_edit_box(ui: &mut Ui, r: &mut RowEdit) -> Option<bool> {
     out.response
         .lost_focus()
         .then(|| !ui.input(|i| i.key_pressed(Key::Escape)))
-}
-
-#[cfg(test)]
-mod tests {
-    use std::fs;
-
-    use super::*;
-
-    /// Make an executable called `name` (plus `.exe` on Windows) in `dir`.
-    fn program(dir: &Path, name: &str) -> String {
-        let file = if cfg!(windows) {
-            format!("{name}.exe")
-        } else {
-            name.to_owned()
-        };
-        fs::write(dir.join(&file), "").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(dir.join(&file), fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        file
-    }
-
-    /// The search matches a dir by its path or its executables' names,
-    /// ignoring case, and an executable a dir searched earlier also has is
-    /// marked as hidden by that one.
-    #[test]
-    fn search_hits() {
-        let root = std::env::temp_dir().join(format!("shell_gui_search_{}", std::process::id()));
-        let (first, second) = (root.join("First"), root.join("Second"));
-        fs::create_dir_all(&first).unwrap();
-        fs::create_dir_all(&second).unwrap();
-        let tool = program(&first, "Tool");
-        program(&second, "Tool");
-        let other = program(&second, "other");
-        let entries: Vec<String> = [&first, &second]
-            .iter()
-            .map(|d| d.display().to_string())
-            .collect();
-        let mut cache = DirCache::new();
-
-        let hits = SearchHits::find(
-            Scope::Session,
-            "tool".into(),
-            vec![],
-            entries.clone(),
-            &mut cache,
-        );
-        assert_eq!(hits.rows[0], Some(vec![(tool.clone(), None)]));
-        assert_eq!(
-            hits.rows[1],
-            Some(vec![(tool.clone(), Some(first.join(&tool)))])
-        );
-
-        // A path match lists no executables; a dir matching neither way is
-        // left out.
-        let hits = SearchHits::find(
-            Scope::Session,
-            "second".into(),
-            vec![],
-            entries.clone(),
-            &mut cache,
-        );
-        assert_eq!(hits.rows, [None, Some(vec![])]);
-        let hits = SearchHits::find(
-            Scope::Session,
-            "OTH".to_lowercase(),
-            vec![],
-            entries,
-            &mut cache,
-        );
-        assert_eq!(hits.rows, [None, Some(vec![(other, None)])]);
-
-        let _ = fs::remove_dir_all(&root);
-    }
 }

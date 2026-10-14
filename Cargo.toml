@@ -1,23 +1,23 @@
 [package]
-name = "shell_gui"
+name = "peregrine"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-chrono = "0.4.44"
+chrono = "0.4.45"
 
-egui = "0.34.3"
-eframe = "0.34.3"
-#egui-file-dialog = "0.13.0" #  For file dialogs.
+egui = "0.36.2"
+eframe = "0.36.2"
 
 # Markdown viewer windows (see `src/markdown.rs`). egui_commonmark 0.23 is the
 # release built against egui 0.34. `better_syntax_highlighting` colours fenced
 # code blocks via syntect (pure-Rust regex, no C deps); the default features
 # load local images the document references.
-egui_commonmark = { version = "0.23.0", features = ["better_syntax_highlighting"] }
+egui_commonmark = { version = "0.25.0", features = ["better_syntax_highlighting"] }
 # Image loaders for those pictures. `http` fetches remote images (README
 # badges etc.) on a background thread via ehttp.
-egui_extras = { version = "0.34.3", features = ["file", "http", "image", "gif", "webp", "svg"] }
+#egui_extras = { version = "0.34.3", features = ["file", "http", "image", "gif", "webp", "svg"] }
+
 # Same parser egui_commonmark uses: the viewer finds `<details>` blocks with it
 # so they can render as collapsible sections. Adds nothing new to the build.
 pulldown-cmark = { version = "0.13", default-features = false }
@@ -56,3 +56,16 @@ windows-sys = { version = "0.61", features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
+# Files panel Cut / Copy / Paste (see `src/clipboard.rs`): file lists on the
+# clipboard, plus Explorer's "Preferred DropEffect" marking a cut. Already
+# built for egui's own clipboard (via arboard), so nothing new.
+clipboard-win = { version = "5.4", features = ["std"] }
+
+# The same, elsewhere: arboard reads and writes the clipboard's file list.
+# egui's clipboard already builds it.
+[target.'cfg(not(windows))'.dependencies]
+arboard = { version = "3.6", default-features = false }
+
+[build-dependencies]
+# Embeds `resources/icon.ico` in the Windows `.exe` (see `build.rs`).
+winresource = "0.1.31"

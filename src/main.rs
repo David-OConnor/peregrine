@@ -5,6 +5,7 @@
 )]
 
 mod ansi;
+mod clipboard;
 mod cmd_color;
 mod completion;
 mod deep_search;
@@ -16,8 +17,12 @@ mod running;
 mod state;
 mod ui;
 mod util;
+mod viewer;
 
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::{Arc, LazyLock},
+};
 
 use chrono::{DateTime, Utc};
 use shell::{HistoryItem, NavState, RecentDir, commands::OutKind, save_data};
@@ -46,6 +51,19 @@ fn out_type_for(kind: OutKind) -> OutType {
         OutKind::Stderr => OutType::StdErr,
         OutKind::StderrOk => OutType::StdErrOk,
     }
+}
+
+/// The app icon, for the title bar and taskbar button of every window (the
+/// main one, the file viewers, the PATH editor). Decoded once and shared, so
+/// the child viewports' builders, rebuilt every frame, compare equal by
+/// pointer. The `.exe`'s own icon, which Explorer, shortcuts and Start show,
+/// is `resources/icon.ico`, embedded by `build.rs`.
+fn app_icon() -> Arc<egui::IconData> {
+    static ICON: LazyLock<Arc<egui::IconData>> = LazyLock::new(|| {
+        let png = include_bytes!("../resources/icon.png");
+        Arc::new(eframe::icon_data::from_png_bytes(png).expect("resources/icon.png is a valid PNG"))
+    });
+    Arc::clone(&ICON)
 }
 
 /// One line / chunk of terminal output. Lines from the same command are kept
@@ -248,12 +266,13 @@ fn main() {
         // panel would have nowhere left to keep its width.
         viewport: egui::ViewportBuilder::default()
             .with_inner_size(inner_size)
-            .with_min_inner_size([MIN_CENTRAL_WIDTH, 200.]),
+            .with_min_inner_size([MIN_CENTRAL_WIDTH, 200.])
+            .with_icon(app_icon()),
         ..Default::default()
     };
 
     eframe::run_native(
-        "Shell",
+        "Peregrine",
         options,
         Box::new(|cc| {
             ui::install_fonts(&cc.egui_ctx);

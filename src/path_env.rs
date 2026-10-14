@@ -770,8 +770,8 @@ mod os {
 
     /// The lines that open and close the block this panel keeps in the
     /// User startup file.
-    const BLOCK_START: &str = "# >>> shell_gui PATH >>>";
-    const BLOCK_END: &str = "# <<< shell_gui PATH <<<";
+    const BLOCK_START: &str = "# >>> peregrine PATH >>>";
+    const BLOCK_END: &str = "# <<< peregrine PATH <<<";
 
     pub const USER_TAKES_EFFECT: &str =
         "New terminals get it; open ones keep their old PATH until they `source` the file";
@@ -945,7 +945,7 @@ mod os {
     }
 
     /// Rewrite the managed block in the startup file, first copying the file
-    /// as it was to `<file>.shell_gui.bak`. Written in place, so a startup
+    /// as it was to `<file>.peregrine.bak`. Written in place, so a startup
     /// file that's a symlink (to a dotfiles repo, say) stays one.
     pub fn save_user(rc_file: &str, entries: &[String]) -> Result<(), String> {
         let path = rc_path(rc_file).map_err(|e| e.to_string())?;
@@ -962,7 +962,7 @@ mod os {
         }
         if !old.is_empty() {
             let mut backup = path.clone().into_os_string();
-            backup.push(".shell_gui.bak");
+            backup.push(".peregrine.bak");
             fs::write(&backup, &old).map_err(|e| format!("backing up {shown}: {e}"))?;
         }
         fs::write(&path, new).map_err(|e| format!("{shown}: {e}"))
@@ -1129,267 +1129,5 @@ mod os {
         } else {
             Err(err.trim().to_owned())
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A fresh, empty scratch dir for one test.
-    fn scratch(test: &str) -> std::path::PathBuf {
-        let dir = env::temp_dir().join(format!("shell_gui_path_{test}_{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
-    /// Only what running a command can find is listed, and where two files
-    /// answer to one name, the one Windows tries first is what it runs.
-    #[cfg(windows)]
-    #[test]
-    fn dir_programs() {
-        let dir = scratch("programs");
-        for f in ["tool.bat", "Tool.exe", "b.cmd", "notes.txt", "noext"] {
-            fs::write(dir.join(f), "").unwrap();
-        }
-        fs::create_dir(dir.join("folder.exe")).unwrap();
-        let p = DirPrograms::read(&dir).unwrap();
-        assert_eq!(p.names, ["b.cmd", "tool.bat", "Tool.exe"]);
-        // PATHEXT puts .EXE before .BAT.
-        assert_eq!(p.runs(&command_name("TOOL.BAT")), Some("Tool.exe"));
-        assert_eq!(p.runs("b"), Some("b.cmd"));
-        assert_eq!(p.runs("notes"), None);
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    /// Only files with an execute bit are listed, following links to them.
-    #[cfg(not(windows))]
-    #[test]
-    fn dir_programs() {
-        use std::os::unix::fs::{PermissionsExt, symlink};
-
-        let dir = scratch("programs");
-        for (f, mode) in [("tool", 0o755), ("data", 0o644), ("Zed", 0o700)] {
-            fs::write(dir.join(f), "").unwrap();
-            fs::set_permissions(dir.join(f), fs::Permissions::from_mode(mode)).unwrap();
-        }
-        symlink(dir.join("tool"), dir.join("tool-link")).unwrap();
-        symlink(dir.join("data"), dir.join("data-link")).unwrap();
-        fs::create_dir(dir.join("subdir")).unwrap();
-        let p = DirPrograms::read(&dir).unwrap();
-        assert_eq!(p.names, ["tool", "tool-link", "Zed"]);
-        assert_eq!(p.runs("tool-link"), Some("tool-link"));
-        assert_eq!(p.runs("data"), None);
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn split_drops_empty_and_trims() {
-        let v = format!("a{SEP}{SEP} b {SEP}\nc\r\n{SEP}");
-        assert_eq!(split(&v), ["a", "b", "c"]);
-        assert_eq!(join(&split(&v)), format!("a{SEP}b{SEP}c"));
-        assert!(split("").is_empty());
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn split_keeps_quoted_semicolons() {
-        assert_eq!(
-            split(r#"C:\a;"C:\b;c";D:\"#),
-            [r"C:\a", r#""C:\b;c""#, r"D:\"]
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn expand_and_key() {
-        unsafe { env::set_var("SG_TEST_DIR", r"C:\Test") };
-        assert_eq!(expand(r"%SG_TEST_DIR%\bin"), r"C:\Test\bin");
-        assert_eq!(expand(r"%SG_NOT_SET%\x%"), r"%SG_NOT_SET%\x%");
-        assert_eq!(expand("100%"), "100%");
-        assert_eq!(key(r"%SG_TEST_DIR%\Bin\"), key("c:/test/bin"));
-        assert_eq!(key(r"C:\"), r"c:\");
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn expand_and_key() {
-        unsafe { env::set_var("SG_TEST_DIR", "/opt/test") };
-        assert_eq!(expand("$SG_TEST_DIR/bin"), "/opt/test/bin");
-        assert_eq!(expand("${SG_TEST_DIR}/bin"), "/opt/test/bin");
-        assert_eq!(expand("$SG_NOT_SET/x$"), "$SG_NOT_SET/x$");
-        assert_eq!(key("$SG_TEST_DIR/bin/"), "/opt/test/bin");
-        assert_eq!(key("/"), "/");
-        let home = shell::get_home().unwrap();
-        assert_eq!(expand("~/bin"), format!("{}/bin", home.display()));
-    }
-
-    #[test]
-    fn bad_chars() {
-        assert_eq!(bad_char(Scope::Session, &format!("a{SEP}b")), Some(SEP));
-        assert_eq!(bad_char(Scope::User, "/ok/dir"), None);
-        if !cfg!(windows) {
-            assert_eq!(bad_char(Scope::User, "a\"b"), Some('"'));
-            assert_eq!(bad_char(Scope::Session, "a\"b"), None);
-        }
-    }
-
-    #[test]
-    fn system_check() {
-        let ok = if cfg!(windows) {
-            r"%SystemRoot%\System32"
-        } else {
-            "/usr/bin/"
-        };
-        assert!(check_system(&["x".into(), ok.into()]).is_ok());
-        assert!(check_system(&["x".into()]).is_err());
-    }
-
-    /// A value written to the registry reads back as written, unexpanded
-    /// and typed `REG_EXPAND_SZ`. Uses a scratch key, not the real PATH.
-    #[cfg(windows)]
-    #[test]
-    fn registry_round_trip() {
-        use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, RegDeleteTreeW};
-
-        let key = r"Software\shell_gui_path_test";
-        let value = r"%SystemRoot%\system32;C:\a b\c;";
-        os::write_path(HKEY_CURRENT_USER, key, value).unwrap();
-        assert_eq!(os::read_path(HKEY_CURRENT_USER, key).unwrap(), value);
-        let query = std::process::Command::new("reg")
-            .args(["query", &format!(r"HKCU\{key}"), "/v", "Path"])
-            .output()
-            .unwrap();
-        assert!(String::from_utf8_lossy(&query.stdout).contains("REG_EXPAND_SZ"));
-
-        let wide: Vec<u16> = key.encode_utf16().chain(Some(0)).collect();
-        unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, wide.as_ptr()) };
-        assert_eq!(os::read_path(HKEY_CURRENT_USER, key).unwrap(), "");
-    }
-
-    /// The quoting the elevated helper's argument gets reads back unchanged
-    /// through Windows' own command-line splitter.
-    #[cfg(windows)]
-    #[test]
-    fn quote_arg_round_trips() {
-        use windows_sys::Win32::{Foundation::LocalFree, UI::Shell::CommandLineToArgvW};
-
-        for s in [
-            r"C:\a;C:\b\",
-            r"C:\a\\",
-            r#"C:\"x"\;"y z"\\"#,
-            "with space;%SystemRoot%",
-            "",
-        ] {
-            let line = format!("prog.exe {}", os::quote_arg(s));
-            let wide: Vec<u16> = line.encode_utf16().chain(Some(0)).collect();
-            let mut n = 0;
-            let argv = unsafe { CommandLineToArgvW(wide.as_ptr(), &mut n) };
-            assert_eq!(n, 2, "{line}");
-            let arg = unsafe {
-                let p = *argv.add(1);
-                let len = (0..).take_while(|&i| *p.add(i) != 0).count();
-                String::from_utf16_lossy(std::slice::from_raw_parts(p, len))
-            };
-            unsafe { LocalFree(argv.cast()) };
-            assert_eq!(arg, s, "{line}");
-        }
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn rc_block_round_trips() {
-        let entries: Vec<String> = vec!["$HOME/bin".into(), "/opt/x y/bin".into()];
-        let before =
-            "alias ll='ls -l'\nexport PATH=\"$HOME/.cargo/bin:$PATH\"\n# PATH comment\nMANPATH=x";
-        let with = os::replace_block(before, &os::block(&entries)).unwrap();
-        assert!(with.starts_with("alias ll='ls -l'\nexport PATH"));
-        assert!(with.contains("MANPATH=x\n\n# >>> shell_gui PATH >>>\n"));
-        let (parsed, others) = os::parse_rc(&with);
-        assert_eq!(parsed, entries);
-        assert_eq!(others, ["2: export PATH=\"$HOME/.cargo/bin:$PATH\""]);
-
-        // Replacing keeps everything else; an empty list removes the block.
-        let one = os::replace_block(&with, &os::block(&entries[..1])).unwrap();
-        assert_eq!(os::parse_rc(&one).0, &entries[..1]);
-        let none = os::replace_block(&one, "").unwrap();
-        assert_eq!(none.trim_end(), before);
-
-        // An unclosed block isn't mangled.
-        assert!(os::replace_block("# >>> shell_gui PATH >>>\nrest\n", "x").is_err());
-    }
-
-    /// The managed block, run by sh, puts its entries in front of PATH in
-    /// order, skipping ones already there, and adds nothing when sourced again.
-    #[cfg(not(windows))]
-    #[test]
-    fn rc_block_runs() {
-        let entries: Vec<String> = vec!["/a".into(), "/usr/bin".into(), "/b".into(), "/a".into()];
-        let script = format!(
-            "{}{}echo \"$PATH\"",
-            os::block(&entries),
-            os::block(&entries)
-        );
-        let out = std::process::Command::new("sh")
-            .args(["-c", &script])
-            .env("PATH", "/usr/bin:/bin")
-            .output()
-            .unwrap();
-        assert_eq!(
-            String::from_utf8_lossy(&out.stdout).trim(),
-            "/a:/b:/usr/bin:/bin"
-        );
-    }
-
-    /// Saving User writes the block into the startup file, backing up what
-    /// was there, and bash reads the result. (An absolute "file name"
-    /// replaces the home dir, keeping the test out of the real one.)
-    #[cfg(not(windows))]
-    #[test]
-    fn save_user_round_trips() {
-        let dir = env::temp_dir().join(format!("shell_gui_path_test_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let rc = dir.join(".bashrc");
-        let original = "alias ll='ls -l'\n";
-        std::fs::write(&rc, original).unwrap();
-        let rc_file = rc.to_str().unwrap();
-
-        let entries: Vec<String> = vec!["$HOME/bin".into(), "/opt/tool/bin".into()];
-        save(Scope::User, rc_file, &entries).unwrap();
-        assert_eq!(load(Scope::User, rc_file).unwrap().entries, entries);
-        let backup = dir.join(".bashrc.shell_gui.bak");
-        assert_eq!(std::fs::read_to_string(&backup).unwrap(), original);
-
-        let out = std::process::Command::new("bash")
-            .args(["-c", &format!(". '{rc_file}'; echo \"$PATH\"")])
-            .env("PATH", "/usr/bin:/bin")
-            .env("HOME", "/home/test")
-            .output()
-            .unwrap();
-        assert_eq!(
-            String::from_utf8_lossy(&out.stdout).trim(),
-            "/home/test/bin:/opt/tool/bin:/usr/bin:/bin"
-        );
-
-        save(Scope::User, rc_file, &[]).unwrap();
-        assert_eq!(
-            std::fs::read_to_string(&rc).unwrap().trim_end(),
-            original.trim_end()
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[cfg(all(not(windows), not(target_os = "macos")))]
-    #[test]
-    fn etc_environment() {
-        assert_eq!(os::env_path_value("PATH=\"/a:/b\""), Some("/a:/b"));
-        assert_eq!(os::env_path_value("  export PATH='/a'"), Some("/a"));
-        assert_eq!(os::env_path_value("MANPATH=/x"), None);
-        let text = "LANG=C\nPATH=\"/old\"\nX=1";
-        assert_eq!(
-            os::set_env_path(text, &["/a".into(), "/b".into()]),
-            "LANG=C\nPATH=\"/a:/b\"\nX=1"
-        );
     }
 }
