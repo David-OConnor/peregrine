@@ -159,6 +159,28 @@ pub(super) fn bookmark_star(ui: &mut Ui, bookmarked: bool, small: bool) -> egui:
     ui.add(button).on_hover_text(hover)
 }
 
+/// The Bookmarks panel button that toggles the current dir's bookmark, named
+/// by its final directory: "☆ Bookmark synthesis" for `~/code/bio_web/synthesis`,
+/// or "x Rem synthesis" once it's bookmarked. The hover text has the full path.
+fn cwd_bookmark_button(ui: &mut Ui, state: &State) -> egui::Response {
+    let cwd = state.cwd();
+    let bookmarked = state.dir_bookmarks.iter().any(|p| p == cwd);
+    // A root (e.g. `C:\`) has no final name; show it whole.
+    let name = cwd
+        .file_name()
+        .map_or_else(|| cwd.display().to_string(), |n| n.to_string_lossy().into_owned());
+    let (text, hover) = if bookmarked {
+        (format!("x Rem {name}"), "Remove this dir from bookmarks")
+    } else {
+        (format!("{STAR_OFF} Bookmark {name}"), "Bookmark this dir")
+    };
+    let path = ui::path_job(ui, cwd, state.home.as_deref());
+    ui.button(text).on_hover_ui(|ui| {
+        ui.label(hover);
+        ui.label(path);
+    })
+}
+
 /// The most characters any of `paths` takes in its [dir_label]:
 /// `opts.max_len`, unless they're all shorter, as names usually are. Taken
 /// over the whole list, not just the rows the search box leaves, so the
@@ -319,7 +341,7 @@ pub(super) fn dir_bookmarks(state: &mut State, ui: &mut Ui) {
     }
 
     ui.horizontal_wrapped(|ui| {
-        if ui.button("+ bookmark current dir").clicked() {
+        if cwd_bookmark_button(ui, state).clicked() {
             let msg = state.toggle_bookmark_cwd();
             state.push_out(msg, OutType::StdOut);
         }
@@ -369,8 +391,9 @@ pub(super) fn dir_bookmarks(state: &mut State, ui: &mut Ui) {
     ui::apply_action(state, action);
 }
 
-/// Display recent directories we've executed a command from, as a clickable
-/// list, in columns when the panel is wide enough. Newest first. Dirs that are
+/// Display recent directories we've executed a command from or acted on in
+/// the Files panel (see [State::touch_recent_dir]), as a clickable list, in
+/// columns when the panel is wide enough. Newest first. Dirs that are
 /// also bookmarked have a pale green background (see [BOOKMARKED_FILL]). In
 /// "Names" mode each name takes its parent dir's colour, so siblings group
 /// visually. Clicking a row cd's there, and middle-clicking opens it in a new

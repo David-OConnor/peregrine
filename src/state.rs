@@ -5,7 +5,7 @@ use std::{
 
 use chrono::Utc;
 use shell::{
-    BrowserFile, DirLabelLens, DirList, FilesPanelPrefs, FontSizes, HistoryItem, NavState,
+    BrowserFile, CmdHistoryPrefs, DirLabelLens, DirList, FilesPanelPrefs, FontSizes, HistoryItem, NavState,
     OpenTabs, PaneSplits, PanelVis, PanelWidths, RecentDir, RemoteSession, RemoteTerminal, SshMode,
     WindowSize, apply_completion, current_branch, dir_missing, get_home, read_browser_files,
     remove_missing_recent_dirs, remove_saved_dir, save_data, ssh, ssh::secrets, stale_dir_list,
@@ -145,6 +145,54 @@ pub struct StateUi {
     pub remote_user: String,
     pub remote_password: String,
     pub remote_edit_idx: Option<usize>,
+
+    /// Recently closed tabs, most recent last, for
+    /// [State::reopen_closed_tab]. Capped at [CLOSED_TABS_MAX]; not
+    /// persisted.
+    pub closed_tabs: Vec<DetachedTab>,
+}
+
+/// Most closed tabs kept for [State::reopen_closed_tab].
+const CLOSED_TABS_MAX: usize = 20;
+
+/// A tab's own state while it's out of the tab strip: one just closed, kept
+/// so it can be reopened, or a new one about to go in. A running command or
+/// SSH session ends with its tab, so neither is kept.
+pub struct DetachedTab {
+    /// Where it sits (or sat) in the strip.
+    index: usize,
+    cwd: PathBuf,
+    cli_input: String,
+    out: Vec<OutItem>,
+    nav_back: Vec<PathBuf>,
+    nav_forward: Vec<PathBuf>,
+}
+
+impl DetachedTab {
+    /// A fresh tab at `cwd`, to go in at `index`.
+    fn new(index: usize, cwd: PathBuf) -> Self {
+        Self {
+            index,
+            cwd,
+            cli_input: String::new(),
+            out: Vec::new(),
+            nav_back: Vec::new(),
+            nav_forward: Vec::new(),
+        }
+    }
+}
+
+/// Where the tab at `i` ends up once the tab at `from` moves to `to`.
+fn moved_tab_index(i: usize, from: usize, to: usize) -> usize {
+    if i == from {
+        to
+    } else if from < i && i <= to {
+        i - 1
+    } else if to <= i && i < from {
+        i + 1
+    } else {
+        i
+    }
 }
 
 impl Default for StateUi {
@@ -191,6 +239,7 @@ impl Default for StateUi {
             remote_user: String::new(),
             remote_password: String::new(),
             remote_edit_idx: None,
+            closed_tabs: Vec::new(),
         }
     }
 }
@@ -277,6 +326,9 @@ pub struct State {
     /// path lengths.
     pub bookmark_names: bool,
     pub recent_dir_names: bool,
+    /// Whether each Cmd history row shows the "In <dir>" button that re-runs
+    /// it where it was first run. Off by default; persisted.
+    pub cmd_history_show_dir: bool,
     /// Open Markdown and text viewer windows (double-clicked in the Files
     /// panel).
     /// Not persisted.
@@ -325,6 +377,7 @@ impl Default for State {
             recent_dir_label_len: ui::dirs::DEFAULT_DIR_LABEL_LEN,
             bookmark_names: true,
             recent_dir_names: true,
+            cmd_history_show_dir: false,
             file_viewers: FileViewers::default(),
             path_panel: PathPanel::default(),
         };
@@ -395,7 +448,7 @@ impl State {
         } else {
             self.branch[i]
                 .as_deref()
-                .map(|b| format!(" \x1b[95mbranch: {}\x1b[0m", truncate_branch(b, 10)))
+                .map(|b| format!(" \x1b[95mbr: {}\x1b[0m", truncate_branch(b, 10)))
                 .unwrap_or_default()
         };
         // Locally, colour-code the cwd like the input row does; the output
@@ -516,8 +569,13 @@ impl State {
     /// Start a Deep search of the active tab's cwd for `ui.deep_search`,
     /// replacing (and stopping) any earlier one; an empty search just ends
     /// it, returning the panel to the dir listing. `ctx` is repainted as
-    /// results come in. The selection is kept only if it's still shown.
+    /// results come in. The selection is kept only if it's still shown. A
+    /// search moves the dir to the top of Recent dirs.
     pub fn start_deep_search(&mut self, ctx: &egui::Context) {
+        if !self.ui.deep_search.is_empty() {
+            let cwd = self.cwd().to_path_buf();
+            self.touch_recent_dir(&cwd);
+        }
         let query = &self.ui.deep_search;
         self.deep_search = (!query.is_empty()).then(|| {
             DeepSearch::start(
@@ -550,7 +608,8 @@ impl State {
 
     /// Finish an in-place rename, applying the edited name. A blank or
     /// unchanged name leaves the entry as it was; a failure is reported in
-    /// the output pane. The renamed entry stays selected if it was.
+    /// the output pane. The renamed entry stays selected if it was, and its
+    /// dir moves to the top of Recent dirs.
     pub fn commit_rename(&mut self) {
         let Some(r) = self.ui.rename.take() else {
             return;
@@ -568,6 +627,9 @@ impl State {
                 if selected {
                     self.select_file(&new_path);
                 }
+                if let Some(dir) = new_path.parent() {
+                    self.touch_recent_dir(dir);
+                }
             }
             Ok(_) => {}
             Err(e) => self.push_out(
@@ -579,12 +641,18 @@ impl State {
 
     /// Put the selected Files row on the OS clipboard, to be copied (or with
     /// `cut`, moved) wherever it's pasted: here, or in the OS file manager.
+    /// Its dir moves to the top of Recent dirs.
     pub fn copy_selected(&mut self, cut: bool) {
         let Some(sel) = &self.selected_file else {
             return;
         };
         let paths = vec![sel.path.clone()];
-        self.ui.clipboard.history.record(clipboard::Content::Files { paths: paths.clone(), cut });
+        if let Some(dir) = paths[0].parent() {
+            self.touch_recent_dir(dir);
+        }
+        let content = clipboard::Content::Files { paths: paths.clone(), cut };
+        self.ui.clipboard.sys.set(content.clone());
+        self.ui.clipboard.history.record(content);
         if let Err(e) = clipboard::set_files(&paths, cut) {
             let cmd = if cut { "cut" } else { "copy" };
             self.push_out(format!("{cmd}: {e}"), OutType::StdErr);
@@ -594,14 +662,21 @@ impl State {
     /// Copy the files on the OS clipboard into the active tab's cwd, or move
     /// them if they were cut. Runs in the background; [Self::pump_paste]
     /// picks up the outcome. Ignored while an earlier paste is still going.
+    /// The cwd moves to the top of Recent dirs.
     pub fn paste_files(&mut self, ctx: &egui::Context) {
         if self.paste.is_some() {
             return;
         }
         match clipboard::get_files() {
             Ok(Some((srcs, cut))) => {
-                self.ui.clipboard.history.record(clipboard::Content::Files { paths: srcs.clone(), cut });
+                // Files the watcher already knows keep their entry's time.
+                let content = clipboard::Content::Files { paths: srcs.clone(), cut };
+                if !self.ui.clipboard.sys.holds(&content) {
+                    self.ui.clipboard.sys.set(content.clone());
+                    self.ui.clipboard.history.record(content);
+                }
                 let dest = self.cwd().to_path_buf();
+                self.touch_recent_dir(&dest);
                 self.paste = Some(Paste::start(srcs, dest, cut, ctx.clone()));
             }
             Ok(None) => self.push_out("paste: there are no files on the clipboard", OutType::StdErr),
@@ -681,6 +756,10 @@ impl State {
                 files: Some(self.ui.files_details_split),
                 path: Some(self.ui.path_details_split),
             },
+            CmdHistoryPrefs {
+                show_dir: Some(self.cmd_history_show_dir),
+            },
+            &self.ui.clipboard.history.entries,
             &self.state_path,
         )
     }
@@ -749,6 +828,13 @@ impl State {
         ui.history_nav = (0..n).map(|_| NavState::new()).collect();
         ui.nav_back = (0..n).map(|_| Vec::new()).collect();
         ui.nav_forward = (0..n).map(|_| Vec::new()).collect();
+        ui.clipboard.history = clipboard::History::from_saved(loaded.clipboard);
+        // The OS clipboard most likely still holds the newest entry. Saying
+        // so means the watcher's first look doesn't record it again with a
+        // new time; if it holds something else, the watcher corrects this.
+        if let Some(newest) = ui.clipboard.history.entries.first() {
+            ui.clipboard.sys.set(newest.content.clone());
+        }
 
         let mut s = Self {
             ui,
@@ -777,6 +863,7 @@ impl State {
             recent_dir_label_len: dir_label_len(loaded.dir_label_lens.recent_dirs),
             bookmark_names: loaded.dir_label_lens.bookmark_names.unwrap_or(true),
             recent_dir_names: loaded.dir_label_lens.recent_dir_names.unwrap_or(true),
+            cmd_history_show_dir: loaded.cmd_history.show_dir.unwrap_or(false),
             file_viewers: FileViewers::default(),
             path_panel: PathPanel::default(),
         };
@@ -806,40 +893,94 @@ impl State {
 
     /// Open a new tab inheriting the active tab's cwd. Switches focus to it.
     pub fn add_tab(&mut self) {
-        let new_cwd = self.cwd().to_path_buf();
+        let tab = DetachedTab::new(self.cwd.len(), self.cwd().to_path_buf());
         // New tab inherits the active tab's branch (same cwd → same repo).
         let inherited_branch = self.branch[self.ui.active_tab].clone();
-
-        self.cwd.push(new_cwd);
-        self.ui.cli_input.push(String::new());
-        self.ui.out.push(Vec::new());
-        self.ui.history_nav.push(NavState::new());
-        self.ui.nav_back.push(Vec::new());
-        self.ui.nav_forward.push(Vec::new());
-        self.branch.push(inherited_branch);
-        // New tabs start local; a connection isn't inherited.
-        self.active_remote.push(None);
-        self.running.push(None);
-
-        self.ui.active_tab = self.cwd.len() - 1;
-        self.ui.focus_input = true;
+        self.insert_tab(tab, inherited_branch);
 
         self.refresh_cwd_history_filter();
         self.refresh_browser_files();
     }
 
-    /// Close a tab. No-op if it's the last remaining one (we keep at least
-    /// one tab open so the invariant holds).
+    /// Put `tab` into the strip at its index (clamped to the end) and make it
+    /// the active tab. The caller refreshes whatever follows the cwd.
+    fn insert_tab(&mut self, tab: DetachedTab, branch: Option<String>) {
+        let i = tab.index.min(self.cwd.len());
+
+        self.cwd.insert(i, tab.cwd);
+        self.ui.cli_input.insert(i, tab.cli_input);
+        self.ui.out.insert(i, tab.out);
+        self.ui.history_nav.insert(i, NavState::new());
+        self.ui.nav_back.insert(i, tab.nav_back);
+        self.ui.nav_forward.insert(i, tab.nav_forward);
+        self.branch.insert(i, branch);
+        // Tabs go in local and idle; a connection isn't inherited.
+        self.active_remote.insert(i, None);
+        self.running.insert(i, None);
+
+        self.ui.active_tab = i;
+        self.ui.focus_input = true;
+    }
+
+    /// Bring back the most recently closed tab, where it was, with its
+    /// output, input, and Back/Forward history. Skips any whose dir has gone
+    /// since. No-op when there's none.
+    pub fn reopen_closed_tab(&mut self) {
+        while let Some(tab) = self.ui.closed_tabs.pop() {
+            if !tab.cwd.is_dir() {
+                continue;
+            }
+            let _ = env::set_current_dir(&tab.cwd);
+            let branch = current_branch(&tab.cwd);
+            self.insert_tab(tab, branch);
+
+            self.refresh_cwd_history_filter();
+            self.refresh_browser_files();
+            return;
+        }
+    }
+
+    /// Move the tab at `from` to `to`, shifting the tabs between over by one.
+    /// The active tab stays active wherever it lands.
+    pub fn move_tab(&mut self, from: usize, to: usize) {
+        let n = self.cwd.len();
+        if from >= n || to >= n || from == to {
+            return;
+        }
+
+        fn shift<T>(v: &mut Vec<T>, from: usize, to: usize) {
+            let item = v.remove(from);
+            v.insert(to, item);
+        }
+        shift(&mut self.cwd, from, to);
+        shift(&mut self.ui.cli_input, from, to);
+        shift(&mut self.ui.out, from, to);
+        shift(&mut self.ui.history_nav, from, to);
+        shift(&mut self.ui.nav_back, from, to);
+        shift(&mut self.ui.nav_forward, from, to);
+        shift(&mut self.branch, from, to);
+        shift(&mut self.active_remote, from, to);
+        shift(&mut self.running, from, to);
+
+        self.ui.active_tab = moved_tab_index(self.ui.active_tab, from, to);
+    }
+
+    /// Close a tab, keeping it for [Self::reopen_closed_tab]. No-op if it's
+    /// the last remaining one (we keep at least one tab open so the
+    /// invariant holds).
     pub fn close_tab(&mut self, idx: usize) {
         if self.cwd.len() <= 1 || idx >= self.cwd.len() {
             return;
         }
-        self.cwd.remove(idx);
-        self.ui.cli_input.remove(idx);
-        self.ui.out.remove(idx);
+        let closed = DetachedTab {
+            index: idx,
+            cwd: self.cwd.remove(idx),
+            cli_input: self.ui.cli_input.remove(idx),
+            out: self.ui.out.remove(idx),
+            nav_back: self.ui.nav_back.remove(idx),
+            nav_forward: self.ui.nav_forward.remove(idx),
+        };
         self.ui.history_nav.remove(idx);
-        self.ui.nav_back.remove(idx);
-        self.ui.nav_forward.remove(idx);
         self.branch.remove(idx);
         // Tear down any SSH session attached to the closed tab.
         if let Some(session) = self.active_remote.remove(idx) {
@@ -847,6 +988,12 @@ impl State {
         }
         // Dropping a command still running there stops it.
         self.running.remove(idx);
+
+        let closed_tabs = &mut self.ui.closed_tabs;
+        closed_tabs.push(closed);
+        if closed_tabs.len() > CLOSED_TABS_MAX {
+            closed_tabs.remove(0);
+        }
 
         if self.ui.active_tab >= self.cwd.len() {
             self.ui.active_tab = self.cwd.len() - 1;
@@ -939,6 +1086,28 @@ impl State {
             })
             .map(|(i, _)| i)
             .collect();
+    }
+
+    /// Move `dir` to the top of Recent dirs, adding it if it isn't there yet.
+    /// Done for the dir a command runs in (see `run_command`), and by
+    /// [Self::touch_recent_dir]. Not saved.
+    pub fn record_recent_dir(&mut self, dir: &Path) {
+        self.recent_dirs.retain(|r| r.path != dir);
+        self.recent_dirs.push(RecentDir {
+            path: dir.to_path_buf(),
+            dt: Utc::now(),
+        });
+        self.refresh_recent_dirs_filter();
+    }
+
+    /// [Self::record_recent_dir] and save, for a dir something was done in
+    /// from the Files panel: a file opened, copied, renamed or pasted there,
+    /// a Deep search of it, or it bookmarked or shown in the OS file manager.
+    /// Just passing through a dir doesn't count, so Recent dirs isn't
+    /// cluttered with every dir browsed on the way.
+    pub fn touch_recent_dir(&mut self, dir: &Path) {
+        self.record_recent_dir(dir);
+        let _ = self.save();
     }
 
     /// Re-assign the history panels' command colours after `history`
@@ -1666,6 +1835,28 @@ impl eframe::App for State {
         // show their output or stop them.
         for cmd in &mut self.running {
             cmd.take();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Moving each tab of a strip of four to each slot keeps every tab's
+    /// index in step with where `Vec::remove` + `insert` puts it.
+    #[test]
+    fn moved_tab_index_follows_the_move() {
+        for from in 0..4 {
+            for to in 0..4 {
+                let mut tabs: Vec<usize> = (0..4).collect();
+                let tab = tabs.remove(from);
+                tabs.insert(to, tab);
+                for i in 0..4 {
+                    let landed = tabs.iter().position(|&t| t == i).unwrap();
+                    assert_eq!(moved_tab_index(i, from, to), landed, "{i}: {from} -> {to}");
+                }
+            }
         }
     }
 }

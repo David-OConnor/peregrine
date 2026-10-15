@@ -25,7 +25,7 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
-use shell::{HistoryItem, NavState, RecentDir, commands::OutKind, save_data};
+use shell::{HistoryItem, NavState, commands::OutKind, save_data};
 use state::State;
 
 use crate::{
@@ -88,17 +88,6 @@ pub fn render_with_tilde(p: &Path, home: Option<&Path>) -> String {
         }
     }
     p.display().to_string()
-}
-
-/// Record `cwd` in the recent-dirs list. If the path is already present we
-/// remove the old entry and push a fresh one to the end so the list stays
-/// deduped and the newest entry sits at the top of the display.
-fn record_recent_dir(recent: &mut Vec<RecentDir>, cwd: &Path) {
-    recent.retain(|r| r.path != cwd);
-    recent.push(RecentDir {
-        path: cwd.to_path_buf(),
-        dt: Utc::now(),
-    });
 }
 
 /// Echo a command line into the output pane and queue it to run at the start
@@ -221,8 +210,7 @@ pub fn run_command(state: &mut State, input: &str, ctx: &egui::Context) {
     // Persist regardless so the new history entry hits disk.
     if cmd != "cd" {
         let cwd = state.cwd().to_path_buf();
-        record_recent_dir(&mut state.recent_dirs, &cwd);
-        state.refresh_recent_dirs_filter();
+        state.record_recent_dir(&cwd);
     }
     if let Err(e) = state.save() {
         state.push_out(

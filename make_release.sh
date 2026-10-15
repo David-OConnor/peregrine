@@ -34,6 +34,11 @@ for file in "$exe" "$readme" "$setup" "$icon"; do
 done
 chmod +x "$exe" "$setup"
 
+# The zip takes the setup script as it is on disk, not as git stores it. On Windows, that copy can
+# have CRLF endings (core.autocrlf, or an editor), which makes bash fail on the first line for
+# whoever installs the release. Strip them here so the archive is right regardless.
+sed -i 's/\r$//' "$setup"
+
 # Recreate the archive so files from an earlier release cannot remain in it.
 archive="${app_name}_${version}_linux.zip"
 rm -f -- "$archive"

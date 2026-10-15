@@ -10,54 +10,241 @@
 //!
 //! A paste runs on a background thread ([Paste]), so copying a big folder
 //! doesn't freeze the window.
+//!
+//! [SysClipboard] tracks what's on the OS clipboard, so the history can mark
+//! the entry that a plain paste would give, and take in what other apps copy.
 
 use std::{
     ffi::OsStr,
     fs, io,
     path::{Path, PathBuf},
+    sync::{Arc, Mutex, Weak},
     thread::{self, JoinHandle},
+    time::Duration,
 };
 
-/// One copy operation. A group of files remains a single history entry.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Content {
-    Text(String),
-    Files { paths: Vec<PathBuf>, cut: bool },
-}
+use chrono::Utc;
 
-/// Bounded, session-only history. Never persisted to disk.
+/// One copy operation, and a history entry: it, and when it was last put on
+/// the clipboard. Copying it again moves the entry to the top with a new
+/// time. They live in `shell` so the state file can hold the history.
+pub use shell::{ClipboardContent as Content, ClipboardEntry as Entry};
+
+/// Bounded history, newest first. Saved in the state file (see
+/// [crate::state::State::save]), so it carries over between runs.
 #[derive(Default)]
 pub struct History {
-    pub entries: Vec<Content>,
+    pub entries: Vec<Entry>,
+    /// Set when `entries` changes, until `ui::draw` saves it.
+    pub unsaved: bool,
 }
 
 impl History {
     pub const LIMIT: usize = 100;
     pub const MAX_ENTRY_BYTES: usize = 1024 * 1024;
 
-    pub fn record(&mut self, content: Content) {
-        let size = match &content {
+    /// The history as the state file had it, within the limits.
+    pub fn from_saved(mut entries: Vec<Entry>) -> Self {
+        entries.retain(|e| Self::fits(&e.content));
+        entries.truncate(Self::LIMIT);
+        Self {
+            entries,
+            unsaved: false,
+        }
+    }
+
+    /// Whether `content` is small enough to record, and not empty.
+    pub fn fits(content: &Content) -> bool {
+        let size = match content {
             Content::Text(text) => text.len(),
             Content::Files { paths, .. } => paths.iter().map(|p| p.as_os_str().len()).sum(),
         };
-        if size == 0 || size > Self::MAX_ENTRY_BYTES {
+        size != 0 && size <= Self::MAX_ENTRY_BYTES
+    }
+
+    pub fn record(&mut self, content: Content) {
+        if !Self::fits(&content) {
             return;
         }
-        self.entries.retain(|old| old != &content);
-        self.entries.insert(0, content);
+        self.entries.retain(|old| old.content != content);
+        self.entries.insert(
+            0,
+            Entry {
+                content,
+                added: Utc::now(),
+            },
+        );
         self.entries.truncate(Self::LIMIT);
+        self.unsaved = true;
+    }
+
+    pub fn remove(&mut self, index: usize) {
+        self.entries.remove(index);
+        self.unsaved = true;
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.unsaved = true;
+    }
+
+    /// Every entry's content, newest first.
+    #[cfg(test)]
+    pub fn contents(&self) -> Vec<Content> {
+        self.entries.iter().map(|e| e.content.clone()).collect()
     }
 
     /// Remove moved paths from every historical file group, including copies.
     /// Failed paths remain available for retry after a partial move.
     pub fn forget_paths(&mut self, paths: &[PathBuf]) {
+        if paths.is_empty() {
+            return;
+        }
         for entry in &mut self.entries {
-            if let Content::Files { paths: held, .. } = entry {
+            if let Content::Files { paths: held, .. } = &mut entry.content {
                 held.retain(|p| !paths.contains(p));
             }
         }
-        self.entries
-            .retain(|entry| !matches!(entry, Content::Files { paths, .. } if paths.is_empty()));
+        self.entries.retain(
+            |entry| !matches!(&entry.content, Content::Files { paths, .. } if paths.is_empty()),
+        );
+        self.unsaved = true;
+    }
+}
+
+/// What's on the OS clipboard, as far as we know. Peregrine's own copies and
+/// pastes [set](Self::set) it directly; [watch](Self::watch) starts a
+/// background thread that picks up what other apps copy, for the history.
+#[derive(Default)]
+pub struct SysClipboard {
+    seen: Arc<Mutex<Seen>>,
+    watching: bool,
+}
+
+#[derive(Default)]
+struct Seen {
+    /// `None` when it holds nothing we'd record, e.g. an image, text too big
+    /// for the history, or something a password manager has marked private.
+    current: Option<Content>,
+    /// What the watcher found there that Peregrine didn't put there, oldest
+    /// first, waiting to be added to the history. Several can pile up while
+    /// the window is minimized and not drawing.
+    found: Vec<Content>,
+}
+
+impl Seen {
+    /// Take in what the watcher just read from the clipboard. Returns whether
+    /// it's news: the same as Peregrine put there itself isn't.
+    fn observe(&mut self, content: Option<Content>) -> bool {
+        if self.current == content {
+            return false;
+        }
+        self.current = content.clone();
+        if let Some(content) = content {
+            self.found.push(content);
+            if self.found.len() > History::LIMIT {
+                self.found.remove(0);
+            }
+        }
+        true
+    }
+}
+
+impl SysClipboard {
+    /// How often the watcher looks for changes. Where the OS numbers the
+    /// clipboard's contents (Windows), that's a check of the number, which
+    /// costs next to nothing, and the clipboard is only read when it has
+    /// changed. Elsewhere the clipboard is read each time, so less often.
+    const POLL_NUMBERED: Duration = Duration::from_secs(1);
+    const POLL_READ: Duration = Duration::from_secs(30);
+
+    fn seen(&self) -> std::sync::MutexGuard<'_, Seen> {
+        self.seen.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Note that `content` was just put on the OS clipboard.
+    pub fn set(&self, content: Content) {
+        self.seen().current = Some(content);
+    }
+
+    /// Whether we know the OS clipboard holds `content`.
+    pub fn holds(&self, content: &Content) -> bool {
+        self.seen().current.as_ref() == Some(content)
+    }
+
+    /// What other apps have copied since the last call, oldest first.
+    pub fn take_found(&self) -> Vec<Content> {
+        std::mem::take(&mut self.seen().found)
+    }
+
+    /// As if the watcher had just read `content` from the clipboard.
+    #[cfg(test)]
+    pub fn observe(&self, content: Option<Content>) -> bool {
+        self.seen().observe(content)
+    }
+
+    /// The index of the `history` entry the OS clipboard holds, if any.
+    pub fn find_in(&self, history: &History) -> Option<usize> {
+        let seen = self.seen();
+        let current = seen.current.as_ref()?;
+        history.entries.iter().position(|e| e.content == *current)
+    }
+
+    /// Start the watcher thread, if it isn't running yet. It repaints `ctx`
+    /// when what's on the clipboard changes, and ends once `self` is dropped.
+    pub fn watch(&mut self, ctx: &egui::Context) {
+        if std::mem::replace(&mut self.watching, true) {
+            return;
+        }
+        let seen = Arc::downgrade(&self.seen);
+        let ctx = ctx.clone();
+        let spawned = thread::Builder::new()
+            .name("clipboard watch".to_owned())
+            .spawn(move || watch(&seen, &ctx));
+        if spawned.is_err() {
+            self.watching = false;
+        }
+    }
+}
+
+fn watch(seen: &Weak<Mutex<Seen>>, ctx: &egui::Context) {
+    let mut seq_seen = None;
+    loop {
+        let seq = os::seq_num();
+        if seq.is_none() || seq != seq_seen {
+            // Unreadable (another app has it open): try again next time.
+            if let Ok(content) = os::get() {
+                seq_seen = seq;
+                // Line endings as egui gives a pasted text, which is how it
+                // was recorded.
+                let content = content
+                    .map(|c| match c {
+                        Content::Text(text) if text.contains('\r') => {
+                            Content::Text(text.replace("\r\n", "\n"))
+                        }
+                        c => c,
+                    })
+                    .filter(History::fits);
+                let Some(seen) = seen.upgrade() else {
+                    return;
+                };
+                if seen
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .observe(content)
+                {
+                    ctx.request_repaint();
+                }
+            }
+        }
+        if seen.strong_count() == 0 {
+            return;
+        }
+        thread::sleep(if seq.is_some() {
+            SysClipboard::POLL_NUMBERED
+        } else {
+            SysClipboard::POLL_READ
+        });
     }
 }
 
@@ -109,7 +296,13 @@ pub fn clear_if_holds(paths: &[PathBuf]) {
 mod os {
     use std::path::PathBuf;
 
-    use clipboard_win::{Clipboard, formats::CF_HDROP, raw};
+    use clipboard_win::{
+        Clipboard,
+        formats::{CF_HDROP, CF_UNICODETEXT},
+        raw,
+    };
+
+    use super::{Content, History};
 
     /// Explorer's flags for a copy (`DROPEFFECT_COPY | DROPEFFECT_LINK`)
     /// and a cut (`DROPEFFECT_MOVE`).
@@ -148,6 +341,11 @@ mod os {
 
     pub fn get_files() -> Result<Option<(Vec<PathBuf>, bool)>, String> {
         let _clip = open()?;
+        read_files()
+    }
+
+    /// [get_files], with the clipboard already open.
+    fn read_files() -> Result<Option<(Vec<PathBuf>, bool)>, String> {
         if !raw::is_format_avail(CF_HDROP) {
             return Ok(None);
         }
@@ -171,11 +369,64 @@ mod os {
             let _ = raw::empty();
         }
     }
+
+    /// Changes whenever the clipboard's contents do. Reading it doesn't open
+    /// the clipboard, so it's cheap enough to poll.
+    pub fn seq_num() -> Option<u32> {
+        raw::seq_num().map(|n| n.get())
+    }
+
+    /// Whether the app that set the clipboard asked clipboard monitors and
+    /// histories to leave it alone, as password managers do: either format
+    /// present, or the second one holding 0.
+    fn is_private() -> bool {
+        let format = |name| raw::register_format(name).map(|f| f.get());
+        if format("ExcludeClipboardContentFromMonitorProcessing").is_some_and(raw::is_format_avail)
+        {
+            return true;
+        }
+        format("CanIncludeInClipboardHistory")
+            .filter(|&f| raw::is_format_avail(f))
+            .is_some_and(|f| {
+                let mut buf = Vec::new();
+                raw::get_vec(f, &mut buf).is_ok() && buf.get(..4) == Some(&0u32.to_le_bytes()[..])
+            })
+    }
+
+    /// The clipboard's files, else its text. `None` if it holds neither, or
+    /// if it's [private](is_private). Only failing to open the clipboard is
+    /// an error.
+    pub fn get() -> Result<Option<Content>, String> {
+        let _clip = open()?;
+        if is_private() {
+            return Ok(None);
+        }
+        if let Ok(Some((paths, cut))) = read_files() {
+            return Ok(Some(Content::Files { paths, cut }));
+        }
+        if !raw::is_format_avail(CF_UNICODETEXT) {
+            return Ok(None);
+        }
+        // It's UTF-16, so at most twice the size it'll be as UTF-8. Skip
+        // reading text too big for the history (plus a little for the
+        // closing NUL and allocation rounding).
+        let limit = 2 * History::MAX_ENTRY_BYTES + 1024;
+        if raw::size(CF_UNICODETEXT).is_some_and(|n| n.get() > limit) {
+            return Ok(None);
+        }
+        let mut buf = Vec::new();
+        if raw::get_string(&mut buf).is_err() {
+            return Ok(None);
+        }
+        Ok(String::from_utf8(buf).ok().map(Content::Text))
+    }
 }
 
 #[cfg(not(windows))]
 mod os {
     use std::{path::PathBuf, sync::Mutex};
+
+    use super::Content;
 
     /// Kept open: on X11 the clipboard's contents are served by the app that
     /// set them, for as long as it holds a clipboard handle.
@@ -216,6 +467,20 @@ mod os {
     pub fn clear() {
         let _ = with(|c| c.clear());
         *CUT.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    /// There's no cheap way to tell that the clipboard has changed, so the
+    /// watcher reads it every time.
+    pub fn seq_num() -> Option<u32> {
+        None
+    }
+
+    /// The clipboard's files, else its text, else `None`.
+    pub fn get() -> Result<Option<Content>, String> {
+        if let Some((paths, cut)) = get_files()? {
+            return Ok(Some(Content::Files { paths, cut }));
+        }
+        Ok(with(|c| c.get_text()).ok().map(Content::Text))
     }
 }
 
@@ -399,12 +664,42 @@ mod tests {
         }
         assert_eq!(history.entries.len(), History::LIMIT);
         history.record(Content::Text("80".into()));
-        assert_eq!(history.entries[0], Content::Text("80".into()));
+        assert_eq!(history.entries[0].content, Content::Text("80".into()));
         assert_eq!(history.entries.len(), History::LIMIT);
         history.record(Content::Text(String::new()));
         history.record(Content::Text("x".repeat(History::MAX_ENTRY_BYTES + 1)));
         assert_eq!(history.entries.len(), History::LIMIT);
-        assert_eq!(history.entries[0], Content::Text("80".into()));
+        assert_eq!(history.entries[0].content, Content::Text("80".into()));
+    }
+
+    #[test]
+    fn sys_clipboard_marks_only_the_matching_entry() {
+        let mut history = History::default();
+        history.record(Content::Text("a".into()));
+        history.record(Content::Text("b".into()));
+        let sys = SysClipboard::default();
+        assert_eq!(sys.find_in(&history), None);
+        sys.set(Content::Text("a".into()));
+        assert_eq!(sys.find_in(&history), Some(1));
+        sys.set(Content::Text("c".into()));
+        assert_eq!(sys.find_in(&history), None);
+    }
+
+    #[test]
+    fn watcher_reports_only_what_peregrine_did_not_put_there() {
+        let sys = SysClipboard::default();
+        sys.set(Content::Text("ours".into()));
+        assert!(!sys.observe(Some(Content::Text("ours".into()))));
+        assert!(sys.take_found().is_empty());
+        assert!(sys.observe(Some(Content::Text("a".into()))));
+        assert!(sys.observe(None));
+        assert!(sys.observe(Some(Content::Text("b".into()))));
+        assert!(sys.holds(&Content::Text("b".into())));
+        assert_eq!(
+            sys.take_found(),
+            vec![Content::Text("a".into()), Content::Text("b".into())]
+        );
+        assert!(sys.take_found().is_empty());
     }
 
     #[test]
@@ -423,7 +718,7 @@ mod tests {
         history.record(Content::Text("keep".into()));
         history.forget_paths(&[a]);
         assert_eq!(
-            history.entries,
+            history.contents(),
             vec![
                 Content::Text("keep".into()),
                 Content::Files {
@@ -446,7 +741,7 @@ mod tests {
         capture.output_hook(&egui::Context::default(), &mut output);
         assert_eq!(output.platform_output.commands.len(), 2);
         assert_eq!(
-            capture.pending.entries,
+            capture.pending.contents(),
             vec![
                 Content::Text("second".into()),
                 Content::Text("first".into())

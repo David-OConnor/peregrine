@@ -1,4 +1,4 @@
-//! Colour-coding for commands in the Command history and In this dir panels,
+//! Colour-coding for commands in the Cmd history and In this dir panels,
 //! so runs of the same program are easy to spot down the list.
 //!
 //! Only the base command (the first word, split the way `run_command` does)

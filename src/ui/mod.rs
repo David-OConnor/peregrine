@@ -16,6 +16,7 @@ mod file_browser;
 pub mod path_panel;
 pub mod clipboard;
 pub mod dirs;
+mod tab_keys;
 
 /// Renders a single-line "Search" box that fills the available width and
 /// triggers `on_changed` when the buffer is edited. Pulled out so all three
@@ -141,7 +142,7 @@ const BROWSER_COL_WIDTH: f32 = 200.;
 /// monospace characters each (so the threshold follows the GUI font size).
 /// See [file_browser] and [list_columns].
 const FILES_COL_MIN_CHARS: f32 = 26.;
-/// Likewise for the Command history and Cmds this dir lists, in button-text
+/// Likewise for the Cmd history and Cmds this dir lists, in button-text
 /// characters. Long commands wrap within their column.
 const CMD_COL_MIN_CHARS: f32 = 30.;
 const REMOTE_COL_WIDTH: f32 = 180.;
@@ -164,6 +165,23 @@ const TAB_WIDTH: f32 = 100.;
 /// Gap either side of the separator between tabs in the top strip, and the
 /// separator's own width. See [tabs_bar].
 const TAB_GAP: f32 = 2.;
+
+/// The active tab's fill and label colour: purple, so it can't be mistaken
+/// for the blue "on" state of the panel toggles below. See [tab_button].
+const TAB_ACTIVE_FILL: Color32 = Color32::from_rgb(128, 64, 208);
+const TAB_ACTIVE_TEXT: Color32 = Color32::WHITE;
+
+/// Background of the tab section of the top strip (the tabs and `+ tab`),
+/// setting it apart from the controls beside it and the panel-toggle row
+/// beneath. A deep violet or a light lavender, per theme. See [tabs_bar].
+const TAB_BAR_FILL_DARK: Color32 = Color32::from_rgb(36, 28, 66);
+const TAB_BAR_FILL_LIGHT: Color32 = Color32::from_rgb(226, 220, 248);
+/// Padding between that background's edge and the tabs, and its rounding.
+const TAB_SECTION_MARGIN: egui::Margin = egui::Margin::symmetric(6, 3);
+const TAB_SECTION_ROUNDING: u8 = 4;
+
+/// Width of the line marking where a dragged tab will land. See [tabs_bar].
+const TAB_DROP_MARKER_WIDTH: f32 = 2.;
 
 /// Max characters of a running command shown beside the input row; the rest
 /// is in its hover text.
@@ -207,7 +225,7 @@ enum ListAction {
     RemoveRecentDir(PathBuf),
     FillInput(String),
     /// Run a command in a new tab at the active tab's cwd, as middle-clicking
-    /// a Command history or Cmds this dir row does.
+    /// a Cmd history or Cmds this dir row does.
     RunInNewTab(String),
     /// Re-run the history item at this index in its original working dir,
     /// without changing the GUI's CWD. Delegates to the `hisd` built-in.
@@ -242,7 +260,7 @@ fn path_job_on(
     path_color::layout_job(&parts, font, Some(bold), text_color)
 }
 
-/// A Command history / In this dir button label: `"<i>: "`, then the command
+/// A Cmd history / In this dir button label: `"<i>: "`, then the command
 /// `text` with its base command bold and colour-coded (see [CmdColors]).
 /// Uncoloured runs take the button's own text colour.
 fn cmd_label(ui: &Ui, colors: &CmdColors, i: usize, text: &str) -> LayoutJob {
@@ -445,7 +463,7 @@ fn cwd_cmd_history(state: &mut State, ui: &mut Ui) {
     apply_action(state, action);
 }
 
-/// What a click on a Command history / Cmds this dir row does: a left click
+/// What a click on a Cmd history / Cmds this dir row does: a left click
 /// copies `text` into the input box, a middle click runs it in a new tab.
 fn cmd_click(resp: egui::Response, text: &str) -> Option<ListAction> {
     if resp.middle_clicked() {
@@ -461,9 +479,25 @@ fn cmd_click(resp: egui::Response, text: &str) -> Option<ListAction> {
 /// is wide enough. Clicking the label copies
 /// the command into the input box so the user can edit or run it, and
 /// middle-clicking runs it in a new tab (see [cmd_click]); the "In dir"
-/// button re-runs it in the directory it was originally run from.
+/// button, shown while "Show dir" is on, re-runs it in the directory it was
+/// originally run from.
 fn cmd_history(state: &mut State, ui: &mut Ui) {
-    panel_header(ui, "Command history", &mut state.ui.panel_vis.recent_cmds);
+    panel_header(ui, "Cmd history", &mut state.ui.panel_vis.recent_cmds);
+
+    let show_dir = state.cmd_history_show_dir;
+    let hover = if show_dir {
+        "Showing the dir each command was run in. Click to hide it."
+    } else {
+        "Hiding the dir each command was run in. Click to show it."
+    };
+    if ui
+        .add(Button::selectable(show_dir, "Show dir"))
+        .on_hover_text(hover)
+        .clicked()
+    {
+        state.cmd_history_show_dir = !show_dir;
+        let _ = state.save();
+    }
 
     if search_box(ui, &mut state.ui.history_search, "history_search") {
         state.refresh_history_filter();
@@ -494,6 +528,9 @@ fn cmd_history(state: &mut State, ui: &mut Ui) {
                     .min_size(egui::vec2(ui.available_width(), 0.0));
                 if let Some(a) = cmd_click(ui.add(btn), &item.text) {
                     action = Some(a);
+                }
+                if !show_dir {
+                    return;
                 }
                 // "In <leaf>" sits on its own row underneath so it
                 // doesn't fight the wrapping command-text button for
@@ -528,9 +565,14 @@ fn apply_action(state: &mut State, action: Option<ListAction>) {
             let msg = state.toggle_bookmark(p);
             state.push_out(msg, OutType::StdOut);
         }
-        Some(ListAction::OpenFile(p)) if viewer::can_view(&p) => state.file_viewers.open(p),
+        // Either way, the file's dir moves to the top of Recent dirs.
         Some(ListAction::OpenFile(p)) => {
-            if let Err(e) = open_with_default_app(&p) {
+            if let Some(dir) = p.parent() {
+                state.touch_recent_dir(dir);
+            }
+            if viewer::can_view(&p) {
+                state.file_viewers.open(p);
+            } else if let Err(e) = open_with_default_app(&p) {
                 state.push_out(
                     format!("open: failed to open {}: {e}", p.display()),
                     OutType::StdErr,
@@ -657,7 +699,7 @@ fn term_in(state: &mut State, ui: &mut Ui) {
         if let Some(b) = branch {
             if show_branch {
                 ui.label(
-                    RichText::new(format!("branch: {}", shell::truncate_branch(&b, 10)))
+                    RichText::new(format!("br: {}", shell::truncate_branch(&b, 10)))
                         .color(COLOR_BRANCH)
                         .monospace(),
                 );
@@ -1523,9 +1565,18 @@ fn tab_button(ui: &mut Ui, text: &str, selected: bool, closable: bool) -> (egui:
     let button =
         Button::selectable(selected, WidgetText::from(galley)).min_size(egui::vec2(TAB_WIDTH, 0.));
 
-    // Left-align the label; horizontal layouts centre button text.
+    // Left-align the label; horizontal layouts centre button text. A selected
+    // button takes its fill and text colour from the selection visuals, so
+    // swap in the tab colours for just this button.
     let layout = ui.layout().with_main_align(Align::Min);
-    let mut tab = ui.with_layout(layout, |ui| ui.add(button)).inner;
+    let mut tab = ui
+        .with_layout(layout, |ui| {
+            let selection = &mut ui.visuals_mut().selection;
+            selection.bg_fill = TAB_ACTIVE_FILL;
+            selection.stroke.color = TAB_ACTIVE_TEXT;
+            ui.add(button)
+        })
+        .inner;
     if cut {
         tab = tab.on_hover_text(text);
     }
@@ -1535,8 +1586,11 @@ fn tab_button(ui: &mut Ui, text: &str, selected: bool, closable: bool) -> (egui:
         let close_rect =
             Rect::from_min_max(egui::pos2(rect.right() - close_width, rect.top()), rect.max);
 
-        ui.put(close_rect, Button::new("x").frame_when_inactive(false))
-            .on_hover_text("Close tab")
+        // Only the active tab is closable, so match its label colour.
+        let x = RichText::new("x").color(TAB_ACTIVE_TEXT);
+        let shortcut = ui.ctx().format_shortcut(&tab_keys::CLOSE_TAB);
+        ui.put(close_rect, Button::new(x).frame_when_inactive(false))
+            .on_hover_text(format!("Close tab ({shortcut})"))
             .clicked()
     };
 
@@ -1544,9 +1598,10 @@ fn tab_button(ui: &mut Ui, text: &str, selected: bool, closable: bool) -> (egui:
 }
 
 /// Top-of-window tab strip. Each tab labels itself with its cwd's leaf
-/// folder; clicking selects, the active tab's `x` (or middle-clicking any
-/// tab) closes it (unavailable when only one tab is left), and `+` appends a
-/// fresh tab inheriting the active tab's cwd.
+/// folder; clicking selects, dragging moves it along the strip, the active
+/// tab's `x` (or middle-clicking any tab) closes it (unavailable when only
+/// one tab is left), and `+` appends a fresh tab inheriting the active tab's
+/// cwd. The keyboard shortcuts are in [tab_keys].
 fn tabs_bar(state: &mut State, ui: &mut Ui) {
     const TAB_SECTION_PADDING: f32 = 20.;
 
@@ -1579,6 +1634,8 @@ fn tabs_bar(state: &mut State, ui: &mut Ui) {
 
     let mut to_select: Option<usize> = None;
     let mut to_close: Option<usize> = None;
+    // A tab dropped after dragging, and the index it lands at.
+    let mut to_move: Option<(usize, usize)> = None;
     let mut add_new = false;
     let mut connect_remote: Option<usize> = None;
     let mut font_delta = 0.;
@@ -1594,31 +1651,95 @@ fn tabs_bar(state: &mut State, ui: &mut Ui) {
         // Breathing room either side of the tab section.
         ui.add_space(TAB_SECTION_PADDING);
 
-        // Tighter than the default spacing, so tabs and their separators sit
-        // close together. Scoped so the rest of the strip keeps the default.
-        ui.scope(|ui| {
-            ui.spacing_mut().item_spacing.x = TAB_GAP;
+        // The tabs and `+ tab` sit on a background of their own, setting them
+        // apart from the controls either side and the panel toggles below.
+        let fill = if ui.visuals().dark_mode {
+            TAB_BAR_FILL_DARK
+        } else {
+            TAB_BAR_FILL_LIGHT
+        };
+        Frame::new()
+            .fill(fill)
+            .inner_margin(TAB_SECTION_MARGIN)
+            .corner_radius(TAB_SECTION_ROUNDING)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    // Tighter than the default spacing, so tabs and their separators sit
+                    // close together. Scoped so the rest of the strip keeps the default.
+                    ui.scope(|ui| {
+                        ui.spacing_mut().item_spacing.x = TAB_GAP;
 
-            for (i, leaf) in labels.iter().enumerate() {
-                let text = format!("{i}: {leaf}");
-                // Only the active tab shows its `x`, Firefox-style.
-                let (tab, close_clicked) = tab_button(ui, &text, i == active, n > 1 && i == active);
-                if tab.clicked() {
-                    to_select = Some(i);
-                }
+                        let mut tab_rects = Vec::with_capacity(n);
+                        let mut dragged = None;
+                        let mut dropped = None;
 
-                // Middle-click closes, same as the `x`.
-                if close_clicked || (n > 1 && tab.middle_clicked()) {
-                    to_close = Some(i);
-                }
+                        for (i, leaf) in labels.iter().enumerate() {
+                            // Numbered from 1, to match Ctrl/Cmd + 1-8.
+                            let text = format!("{}: {leaf}", i + 1);
+                            // Only the active tab shows its `x`, Firefox-style.
+                            let is_active = i == active;
+                            let (tab, close_clicked) =
+                                tab_button(ui, &text, is_active, n > 1 && is_active);
+                            // A press that moves becomes a drag; one that doesn't is
+                            // still a click.
+                            let tab = tab.interact(egui::Sense::drag());
+                            if tab.clicked() {
+                                to_select = Some(i);
+                            }
 
-                ui.add(egui::Separator::default().spacing(TAB_GAP));
-            }
-        });
+                            // Middle-click closes, same as the `x`.
+                            if close_clicked || (n > 1 && tab.middle_clicked()) {
+                                to_close = Some(i);
+                            }
 
-        if ui.button("+ tab").on_hover_text("New tab").clicked() {
-            add_new = true;
-        }
+                            if tab.dragged_by(egui::PointerButton::Primary) {
+                                dragged = Some(i);
+                            }
+                            if tab.drag_stopped_by(egui::PointerButton::Primary) {
+                                dropped = Some(i);
+                            }
+                            tab_rects.push(tab.rect);
+
+                            ui.add(egui::Separator::default().spacing(TAB_GAP));
+                        }
+
+                        let pointer = ui.input(|i| i.pointer.latest_pos());
+                        if let (Some(from), Some(pos)) = (dragged.or(dropped), pointer) {
+                            // The gap the pointer is nearest: 0 is before the first tab,
+                            // `n` after the last.
+                            let slot = tab_rects.iter().filter(|r| r.center().x < pos.x).count();
+
+                            if dragged.is_some() {
+                                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                                // Mark where the tab would land, unless that's where it is.
+                                if slot != from && slot != from + 1 {
+                                    let x = match slot {
+                                        0 => tab_rects[0].left() - 1.5 * TAB_GAP,
+                                        s if s == n => tab_rects[n - 1].right() + 1.5 * TAB_GAP,
+                                        s => (tab_rects[s - 1].right() + tab_rects[s].left()) / 2.,
+                                    };
+                                    let stroke =
+                                        egui::Stroke::new(TAB_DROP_MARKER_WIDTH, TAB_ACTIVE_FILL);
+                                    ui.painter().vline(x, tab_rects[0].y_range(), stroke);
+                                }
+                            } else {
+                                // Taking the tab out first shifts the later slots left.
+                                let to = if slot > from { slot - 1 } else { slot };
+                                to_move = Some((from, to));
+                            }
+                        }
+                    });
+
+                    let shortcut = ui.ctx().format_shortcut(&tab_keys::NEW_TAB);
+                    if ui
+                        .button("+ tab")
+                        .on_hover_text(format!("New tab ({shortcut})"))
+                        .clicked()
+                    {
+                        add_new = true;
+                    }
+                });
+            });
 
         ui.add_space(TAB_SECTION_PADDING);
         // One-click SSH connect per saved remote, e.g. `ssh 0 192.168.1.10`.
@@ -1646,6 +1767,11 @@ fn tabs_bar(state: &mut State, ui: &mut Ui) {
     }
     if let Some(i) = to_close {
         state.close_tab(i);
+    }
+    // A dragged tab becomes the active one, as in a browser.
+    if let Some((from, to)) = to_move {
+        state.move_tab(from, to);
+        state.select_tab(to);
     }
     if add_new {
         state.add_tab();
@@ -1696,6 +1822,8 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
     // panel's own close button, or the clipboard shortcut (handled by
     // `capture`) is persisted at the end of the frame.
     let vis_before = state.ui.panel_vis;
+    // Take in what other apps copy, whether or not the panel is open.
+    state.ui.clipboard.sys.watch(ui.ctx());
     clipboard::capture(state, ui.ctx());
 
     // Run the command submitted last frame. That frame already painted its
@@ -1704,6 +1832,10 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
         run_command(state, &input, &ctx);
     }
+
+    // After that command, which runs in the tab it was typed in, and before
+    // any widget, so the input box never sees these keys.
+    tab_keys::handle(state, ui.ctx());
 
     // Bring in output from shell commands running in the background, and
     // wrap up any that have finished. Their reader threads request a repaint
@@ -1871,9 +2003,11 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
         ui.ctx().request_repaint();
     }
 
-    // Persist on any change so the layout survives restart.
+    // Persist on any change so the layout and clipboard history survive
+    // restart.
     let drag_done = state.ui.panel_widths_unsaved && !pointer_down;
-    if drag_done || !panel_vis_eq(&vis_before, &state.ui.panel_vis) {
+    let clipboard_changed = std::mem::take(&mut state.ui.clipboard.history.unsaved);
+    if drag_done || clipboard_changed || !panel_vis_eq(&vis_before, &state.ui.panel_vis) {
         state.ui.panel_widths_unsaved = false;
         let _ = state.save();
     }

@@ -3,9 +3,11 @@
 
 An integrated and powerful terminal and file browser. For Linux, Windows, and MacOS. I built this for my own file-system and CLI workflows. Wherever I notice a friction point, I update this program to address it. For example, when using a `cd` command to navigate in a terminal, I've made it trivial to access ones I've used before, or to find the right directory using just the final dir's name without typing its full path. Another example is moving files and folders between my software projects without managing a collection of file browser tabs, or repeatedly typing full paths.
 
-It's based on the abstraction that navigating a filesystem in a GUI, and executing commands in a terminal are complementary operations that should interact.
+It's based on the abstraction that navigating a filesystem in a GUI, and executing commands in a terminal are complementary operations that should interact. It also integrates a clipboard manager with history, a system PATH viewer/editor, and lightweight viewers for text and image files.
 
-This application includes the CLI component from [Shell](https://github.com/david-oconnor/shell), and shares its relevant systems including directory and command history and bookmarks. For information on terminal commands,see [its Readme](https://github.com/David-OConnor/shell/blob/main/README.md).
+This application takes its CLI component from [Shell](https://github.com/david-oconnor/shell), and shares its relevant systems including directory and command history and bookmarks. For information on terminal commands,see [its Readme](https://github.com/David-OConnor/shell/blob/main/README.md).
+
+Use is intuitive, leveraging what you already know about file browsers and terminals. Additional functionality this application provides is mostly obvious; exceptions and assumptions are included in this readme.
 
 
 ## Install
@@ -14,15 +16,13 @@ This application includes the CLI component from [Shell](https://github.com/davi
 
 
 ## Who this is for, and its purpose
-This may be useful to those who execute CLI commands regularly, and finds native terminal behavior naive. For example, if you regularly execute commands like `git`, `python`, `cargo`, `gmx`, `orca`, `cd`, `ls`, `grep`/`rg` in a terminal. It makes accessing you usual workflows easier by remembering directories and commands. It has intuitive bookmark, history, and autocomplete systems.
+This may be useful to those who execute CLI commands regularly, and find the OS's native file browser and terminal to be naive. For example, if you regularly execute commands like `git`, `python`, `cargo`, `gmx`, `orca`, `cd`, `ls`, `grep`/`rg` in a terminal. It makes accessing you usual workflows easier by remembering directories and commands. It has intuitive bookmark, history, and autocomplete systems.
 
 If you are navigating to a regularly-used directory via CLI and are doing too much typing, this may help.
 
 
 ## Who this is not for
-If you use a fully CLI or keyboard-driven workflow, or if your terminal program must be available when you are using an arbitrary computer or via SSH, this is not what you're looking for.
-
-If you perform all file operations in a terminal, or all in a GUI, this is not for you - it's for workflows that use both.
+If you use a fully CLI or keyboard-driven workflow, or if your terminal program must be available when you are using an arbitrary computer or via SSH, this is not what you're looking for. If you perform all file operations in a terminal, or all in a GUI, this is not for you - it's for workflows that use both. This is not a new shell scripting language, and its CLI functionality runs on top of your OS's native terminal.
 
 
 ## Everything is searchable
@@ -58,7 +58,7 @@ Broken / WIP. Don't use.
 
 
 ## Clipboard
-Peregrine includes an advanced clipboard, which stores multiple items. 
+Peregrine includes an advanced clipboard, which stores multiple items. Its history is kept between runs, in the state file (`shell_state.ss`).
 
 
 ## Shortcuts and integrations
@@ -83,16 +83,29 @@ Shortcuts to reduce typing:
 - `fmt`: `cargo +nightly fmt`
 
 
-## Misc tips
+## Non-obvious functionality
 
-- Middle clicking a directory or command in an appropriate panel opens that directory or launches that command in a new tab
+- Most controls have tooltips on hover. These list what it does, and its keyboard shortcut.
+- Middle clicking a directory or command in a panel opens that directory or launches that command in a new tab
 - Middle click a tab to close it
-- Select CLI output text and right-click to copy it to the system clipboard and clipboard history
-- Most buttons have tooltips on hover
+- Drag a tab left or right to reorder it
+- Select CLI output text and right-click to copy it to the system clipboard and clipboard history (Supplements *Ctrl + C*)
+
 
 
 ## Keyboard shortcuts
-- Ctrl + v, Ctrl + c, Ctrl + x paste, copy, and cut using the native advanced clipboard, and/or system one
-- Ctrl + shift + v: Toggle the clipboard pane
+- **Ctrl + V**, **Ctrl + C**, **Ctrl + X** paste, copy, and cut using the native advanced clipboard, and/or system one
+- **Ctrl + Shift + V**: Toggle the clipboard pane
 - Image viewer: Left and Right arrow keys cycle to the prev and next image in the directory
 - File browser: Enter opens a file (Same as double-clicking)
+
+### Tabs
+On Mac, use **Cmd** in place of **Ctrl**, except for the **Ctrl + Tab** and **Ctrl + PageUp / PageDown** shortcuts, which use **Ctrl** on every OS.
+
+- **Ctrl + T** or **Ctrl + N**: New tab, in the current tab's directory
+- **Ctrl + W**: Close the current tab
+- **Ctrl + Shift + T**: Reopen the last closed tab, with its output and Back/Forward history
+- **Ctrl + Tab** or **Ctrl + PageDown**: Next tab. On Mac, also **Cmd + Option + Right**
+- **Ctrl + Shift + Tab** or **Ctrl + PageUp**: Previous tab. On Mac, also **Cmd + Option + Left**
+- **Ctrl + 1** to **Ctrl + 8**: Jump to that tab, counting from the left
+- **Ctrl + 9**: Jump to the last tab

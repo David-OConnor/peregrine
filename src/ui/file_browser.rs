@@ -134,15 +134,22 @@ pub(crate) fn file_browser(state: &mut State, ui: &mut Ui) {
             });
         });
     });
+    // Bookmarking this dir, or showing it in the file manager, moves it to
+    // the top of Recent dirs (see [State::touch_recent_dir]).
     if star_clicked {
         let msg = state.toggle_bookmark_cwd();
         state.push_out(msg, OutType::StdOut);
+        if !bookmarked {
+            let cwd = state.cwd().to_path_buf();
+            state.touch_recent_dir(&cwd);
+        }
     }
     if open_clicked {
         let cwd = state.cwd().to_path_buf();
         shell::commands::open_dir(&cwd, &mut |kind, msg| {
             state.push_out(msg, crate::out_type_for(kind));
         });
+        state.touch_recent_dir(&cwd);
     }
 
     // Browser-style navigation row. Up goes to the parent dir; Back/Forward
