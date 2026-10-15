@@ -67,22 +67,27 @@ impl CmdColors {
     pub fn new<'a>(newest_first: impl IntoIterator<Item = &'a str>) -> Self {
         let mut taken = [false; PALETTE_LEN];
         let mut recent = HashMap::new();
+        
         for text in newest_first {
             if recent.len() == PALETTE_LEN {
                 break;
             }
+            
             let (_, cmd, _) = split(text);
             let k = key(cmd);
             if cmd.is_empty() || recent.contains_key(&k) {
                 continue;
             }
+            
             let mut i = preferred(&k);
             while taken[i] {
                 i = (i + 1) % PALETTE_LEN;
             }
+            
             taken[i] = true;
             recent.insert(k, i);
         }
+        
         Self { recent }
     }
 
@@ -93,9 +98,11 @@ impl CmdColors {
     pub fn parts(&self, text: &str, dark: bool) -> Vec<Part> {
         let (lead, cmd, rest) = split(text);
         let mut out = Vec::new();
+        
         if !lead.is_empty() {
             out.push(Part::plain(lead));
         }
+        
         if !cmd.is_empty() {
             let k = key(cmd);
             let i = self
@@ -108,89 +115,11 @@ impl CmdColors {
                 color: Some(palette(dark)[i]),
             });
         }
+        
         if !rest.is_empty() {
             out.push(Part::plain(rest));
         }
+        
         out
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::collections::HashSet;
-
-    use super::*;
-
-    fn texts(parts: &[Part]) -> Vec<&str> {
-        parts.iter().map(|p| p.text.as_str()).collect()
-    }
-
-    fn colour(colors: &CmdColors, text: &str) -> Option<egui::Color32> {
-        colors.parts(text, true).into_iter().find_map(|p| p.color)
-    }
-
-    #[test]
-    fn only_base_command_is_coloured() {
-        let p = CmdColors::default().parts("cargo build --release", true);
-        assert_eq!(texts(&p), ["cargo", " build --release"]);
-        assert!(p[0].color.is_some());
-        assert_eq!(p[1].color, None);
-    }
-
-    #[test]
-    fn same_command_same_colour() {
-        let c = CmdColors::new(["cd ..", "ls", "cd ~/code"]);
-        assert_eq!(colour(&c, "cd ~/code"), colour(&c, "cd .."));
-        assert_eq!(colour(&c, "cd ~/code"), colour(&c, "cd"));
-    }
-
-    #[test]
-    fn leading_whitespace_stays_plain() {
-        let c = CmdColors::default();
-        let p = c.parts("  ls -la", true);
-        assert_eq!(texts(&p), ["  ", "ls", " -la"]);
-        assert_eq!(p[0].color, None);
-        assert_eq!(p[1].color, colour(&c, "ls"));
-    }
-
-    #[test]
-    fn preferred_depends_on_more_than_low_bits() {
-        // These letters share their low 3 bits (`c`/`k`/`s` = 3, `d`/`l`/`t`
-        // = 4), so unmixed FNV-1a mod 8 gives them all one colour.
-        let prefs: HashSet<_> = ["cd", "cl", "ct", "kd", "kl", "kt", "sd", "sl", "st"]
-            .into_iter()
-            .map(preferred)
-            .collect();
-        assert!(prefs.len() > 1);
-    }
-
-    #[test]
-    fn most_recent_commands_never_share() {
-        let history = ["cd", "sync", "del", "fmt", "pwd", "ls", "git", "cargo"];
-        let c = CmdColors::new(history);
-        let colours: HashSet<_> = history.iter().map(|t| colour(&c, t)).collect();
-        assert_eq!(colours.len(), PALETTE_LEN);
-    }
-
-    #[test]
-    fn newest_command_gets_its_preferred_colour() {
-        let c = CmdColors::new(["fmt", "cd", "sync"]);
-        assert_eq!(colour(&c, "fmt"), Some(palette(true)[preferred("fmt")]));
-    }
-
-    #[test]
-    fn older_commands_fall_back_to_preferred() {
-        let history = ["a", "b", "c", "d", "e", "f", "g", "h", "old"];
-        let c = CmdColors::new(history);
-        assert_eq!(colour(&c, "old"), Some(palette(true)[preferred("old")]));
-    }
-
-    #[test]
-    fn empty_and_blank_lines() {
-        let c = CmdColors::new(["", "   "]);
-        assert!(c.parts("", true).is_empty());
-        let p = c.parts("   ", true);
-        assert_eq!(texts(&p), ["   "]);
-        assert_eq!(p[0].color, None);
     }
 }

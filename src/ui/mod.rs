@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     path::{Path, PathBuf},
     sync::Arc,
     time::SystemTime,
@@ -12,6 +13,7 @@ use egui::{
 };
 use shell::{DirList, SshMode};
 
+mod about;
 mod file_browser;
 pub mod path_panel;
 pub mod clipboard;
@@ -50,7 +52,7 @@ use crate::{
     OutType, ansi,
     cmd_color::CmdColors,
     deep_search::{DeepSearch, MAX_MATCHES, Row},
-    files::{FileDetails, format_size, open_with_default_app},
+    files::{FileDetails, SelectionSummary, format_size, open_with_default_app},
     path_color::{self, Part},
     render_with_tilde, run_command,
     state::{FileRename, State},
@@ -218,8 +220,6 @@ enum ListAction {
     /// Open a file with the OS's default associated program, the way a
     /// double-click does in Explorer / a Linux file manager.
     OpenFile(PathBuf),
-    /// Select a Files-panel row, showing its details in the pane below.
-    SelectFile(PathBuf),
     RemoveBookmark(usize),
     /// Drop a path from Recent dirs (the dir itself is untouched).
     RemoveRecentDir(PathBuf),
@@ -579,7 +579,6 @@ fn apply_action(state: &mut State, action: Option<ListAction>) {
                 );
             }
         }
-        Some(ListAction::SelectFile(p)) => state.select_file(&p),
         Some(ListAction::RemoveBookmark(i)) => {
             if i < state.dir_bookmarks.len() {
                 let path = state.dir_bookmarks.remove(i);
@@ -944,6 +943,11 @@ fn rename_box(ui: &mut Ui, r: &mut FileRename, is_folder: bool) -> Option<bool> 
 /// it doesn't walk the whole tree once per letter typed.
 const DEEP_SEARCH_DELAY: f64 = 0.3;
 
+/// The Deep search box's, for the Files panel to tell it has the keyboard.
+fn deep_search_id() -> egui::Id {
+    egui::Id::new("files_deep_search")
+}
+
 /// The Files panel's Deep search box, followed on its row by the switch
 /// between searching file names and contents and the regex toggle (see
 /// `crate::deep_search`). A search starts once typing pauses for
@@ -986,7 +990,7 @@ fn deep_search_bar(state: &mut State, ui: &mut Ui) {
                     TextEdit::singleline(&mut state.ui.deep_search)
                         .hint_text("Deep search")
                         .desired_width(f32::INFINITY)
-                        .id_salt("deep_search"),
+                        .id(deep_search_id()),
                 )
                 .on_hover_text(format!(
                     "Search the {what} in this folder and its subfolders, \
@@ -1051,20 +1055,22 @@ fn append_highlighted(
 /// (or in file-name mode, folder) found, by its path relative to the
 /// searched dir. In file-name mode the matches in its name are highlighted,
 /// and folders are marked and coloured as in the listing, on pale green when
-/// they're among `bookmarks` (see [dirs::BOOKMARKED_FILL]); otherwise it
+/// they're among `bookmarks` (see [dirs::bookmarked_fill]); otherwise it
 /// shows how many lines matched, and those lines follow it, numbered, with
 /// the matches highlighted. `name_filter` (the panel's Search box) narrows
-/// the results by that path. Clicking a row selects its file or folder;
-/// double-clicking opens the file or goes into the folder, and
-/// middle-clicking a folder opens it in a new tab, as in the listing.
+/// the results by that path. Clicking a row selects its file or folder (with
+/// Ctrl and Shift, several of them); double-clicking opens the file or goes
+/// into the folder, and middle-clicking a folder opens it in a new tab;
+/// rows drag onto folders: all as in the listing (see
+/// [file_browser::row_action]). The rows in `selected` are highlighted.
 fn deep_search_results(
     search: &DeepSearch,
     name_filter: &str,
-    selected: Option<&Path>,
+    selected: &HashSet<PathBuf>,
     bookmarks: &[PathBuf],
     home: Option<&Path>,
     ui: &mut Ui,
-) -> Option<ListAction> {
+) -> Option<file_browser::RowAction> {
     if let Some(e) = &search.error {
         ui.label(RichText::new(format!("Invalid search: {e}")).color(ui.visuals().error_fg_color));
         return None;
@@ -1160,11 +1166,16 @@ fn deep_search_results(
             .id_salt("deep_search_scroll")
             .auto_shrink([false, false])
             .show_rows(ui, row_height, rows.len(), |ui, range| {
+                // Under the rows, so it only gets clicks that miss them.
+                if let Some(a) = file_browser::background_action(ui) {
+                    action = Some(a);
+                }
+                file_browser::drag_autoscroll(ui);
                 for &row in &rows[range] {
                     let (Row::File(i) | Row::Line(i, _)) = row;
                     let hit = &search.hits[i];
-                    let is_selected = matches!(row, Row::File(_)) && selected == Some(&hit.path);
-                    // As in the listing: pale green unless selected.
+                    let is_selected = matches!(row, Row::File(_)) && selected.contains(&hit.path);
+                    // As in the listing: green unless selected.
                     let bookmarked = matches!(row, Row::File(_))
                         && hit.is_folder
                         && !is_selected
@@ -1185,16 +1196,14 @@ fn deep_search_results(
                                 });
                             let mut job = LayoutJob::default();
                             let mut base = plain.clone();
-                            if bookmarked {
+                            if bookmarked && !dark {
                                 base.color = dirs::BOOKMARKED_TEXT;
                             }
                             if hit.is_folder {
                                 // Same colour this folder has in any path
-                                // shown elsewhere, from the light-background
-                                // palette on the green.
+                                // shown elsewhere.
                                 job.append("📁 ", 0.0, base.clone());
                                 let tilde = render_with_tilde(&hit.path, home);
-                                let dark = dark && !bookmarked;
                                 if let Some(c) = path_color::last_color(&tilde, Some("~"), dark) {
                                     base.color = c;
                                 }
@@ -1219,21 +1228,18 @@ fn deep_search_results(
                     };
                     let mut button = Button::selectable(is_selected, text)
                         .truncate()
+                        .sense(egui::Sense::click_and_drag())
                         .min_size(egui::vec2(ui.available_width(), row_height));
                     if bookmarked {
-                        button = button.fill(dirs::BOOKMARKED_FILL).frame_when_inactive(true);
+                        button = button.fill(dirs::bookmarked_fill(dark)).frame_when_inactive(true);
                     }
                     let resp = ui.add(button);
-                    if hit.is_folder && resp.middle_clicked() {
-                        action = Some(ListAction::NewTabDir(hit.path.clone()));
-                    } else if resp.double_clicked() {
-                        action = Some(if hit.is_folder {
-                            ListAction::ChangeDir(hit.path.clone())
-                        } else {
-                            ListAction::OpenFile(hit.path.clone())
-                        });
-                    } else if resp.clicked() {
-                        action = Some(ListAction::SelectFile(hit.path.clone()));
+                    // A matching line's row stands for its file. These can't
+                    // be renamed in place, so none is the only one selected.
+                    if let Some(a) =
+                        file_browser::row_action(ui, &resp, &hit.path, hit.is_folder, false)
+                    {
+                        action = Some(a);
                     }
                 }
             });
@@ -1241,15 +1247,42 @@ fn deep_search_results(
     action
 }
 
+/// One "Label  value" line of the Files details pane, wrapping when the
+/// value is long.
+fn detail_field(ui: &mut Ui, label: &str, value: WidgetText) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new(label).weak());
+        ui.label(value);
+    });
+}
+
+/// A time as the Files details pane shows it, e.g. `2025-10-15 14:05`.
+fn detail_time(t: SystemTime) -> String {
+    chrono::DateTime::<chrono::Local>::from(t)
+        .format("%Y-%m-%d %H:%M")
+        .to_string()
+}
+
+/// Most names [file_details] lists while several rows are selected.
+const MAX_SELECTED_NAMES: usize = 200;
+
 /// The Files panel's lower pane: type, size, dates and attributes of the
 /// selected row, read when it was selected (see [FileDetails::read]). Under
-/// them, an image's `preview` fills the rest of the pane.
+/// them, an image's `preview` fills the rest of the pane. While more than
+/// one row is selected, their `summary` instead: how many files and
+/// folders, the files' total size, when they were last modified, and their
+/// names.
 fn file_details(
     details: Option<&FileDetails>,
+    summary: Option<&SelectionSummary>,
     home: Option<&Path>,
     preview: &viewer::ImagePreview,
     ui: &mut Ui,
 ) {
+    if let Some(s) = summary {
+        selection_details(s, home, ui);
+        return;
+    }
     let Some(d) = details else {
         ui.label(
             RichText::new("Select a file to see its details.")
@@ -1257,19 +1290,6 @@ fn file_details(
                 .weak(),
         );
         return;
-    };
-
-    // One "Label  value" line per field, wrapping when the value is long.
-    let field = |ui: &mut Ui, label: &str, value: WidgetText| {
-        ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new(label).weak());
-            ui.label(value);
-        });
-    };
-    let time = |t: SystemTime| {
-        chrono::DateTime::<chrono::Local>::from(t)
-            .format("%Y-%m-%d %H:%M")
-            .to_string()
     };
 
     // Only as tall as the text, so the preview gets the rest; it scrolls
@@ -1281,22 +1301,22 @@ fn file_details(
             ui.style_mut().wrap_mode = Some(TextWrapMode::Wrap);
 
             ui.label(RichText::new(&d.name).strong());
-            field(ui, "Type", d.type_name.clone().into());
+            detail_field(ui, "Type", d.type_name.clone().into());
             if let Some(size) = d.size {
-                field(ui, "Size", format_size(size).into());
+                detail_field(ui, "Size", format_size(size).into());
             }
             if let Some([w, h]) = preview.size() {
-                field(ui, "Dimensions", format!("{w} × {h}").into());
+                detail_field(ui, "Dimensions", format!("{w} × {h}").into());
             }
             if let Some(n) = d.item_count {
                 let s = if n == 1 { "" } else { "s" };
-                field(ui, "Contains", format!("{n} item{s}").into());
+                detail_field(ui, "Contains", format!("{n} item{s}").into());
             }
             if let Some(t) = d.modified {
-                field(ui, "Modified", time(t).into());
+                detail_field(ui, "Modified", detail_time(t).into());
             }
             if let Some(t) = d.created {
-                field(ui, "Created", time(t).into());
+                detail_field(ui, "Created", detail_time(t).into());
             }
             let attrs: Vec<&str> = [
                 (d.readonly, "Read-only"),
@@ -1307,15 +1327,69 @@ fn file_details(
             .filter_map(|(on, name)| on.then_some(name))
             .collect();
             if !attrs.is_empty() {
-                field(ui, "Attributes", attrs.join(", ").into());
+                detail_field(ui, "Attributes", attrs.join(", ").into());
             }
             if let Some(target) = &d.link_target {
-                field(ui, "Link to", path_job(ui, target, home).into());
+                detail_field(ui, "Link to", path_job(ui, target, home).into());
             }
-            field(ui, "Path", path_job(ui, &d.path, home).into());
+            detail_field(ui, "Path", path_job(ui, &d.path, home).into());
         });
     ui.add_space(4.);
     preview.show(ui);
+}
+
+/// [file_details] while several rows are selected.
+fn selection_details(s: &SelectionSummary, home: Option<&Path>, ui: &mut Ui) {
+    ScrollArea::vertical()
+        .id_salt("file_details_scroll")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.style_mut().wrap_mode = Some(TextWrapMode::Wrap);
+
+            ui.label(RichText::new(format!("{} items selected", s.items.len())).strong());
+            let files = plural(s.files, "file", "files");
+            let folders = plural(s.folders, "folder", "folders");
+            let counts = match (s.files, s.folders) {
+                (_, 0) => files,
+                (0, _) => folders,
+                _ => format!("{files}, {folders}"),
+            };
+            detail_field(ui, "Selected", counts.into());
+            if s.files > 0 {
+                let mut size = format_size(s.size);
+                if s.folders > 0 {
+                    size.push_str(", not counting the folders");
+                }
+                detail_field(ui, "Size", size.into());
+            }
+            if let Some((oldest, newest)) = s.modified {
+                let (oldest, newest) = (detail_time(oldest), detail_time(newest));
+                let when = if oldest == newest {
+                    oldest
+                } else {
+                    format!("{oldest} to {newest}")
+                };
+                detail_field(ui, "Modified", when.into());
+            }
+            if let Some(dir) = &s.dir {
+                detail_field(ui, "In", path_job(ui, dir, home).into());
+            }
+
+            ui.add_space(4.);
+            ui.spacing_mut().item_spacing.y = 0.;
+            for (name, is_folder) in s.items.iter().take(MAX_SELECTED_NAMES) {
+                let text = if *is_folder {
+                    format!("📁 {name}")
+                } else {
+                    name.clone()
+                };
+                ui.label(RichText::new(text).monospace());
+            }
+            if s.items.len() > MAX_SELECTED_NAMES {
+                let more = s.items.len() - MAX_SELECTED_NAMES;
+                ui.label(RichText::new(format!("and {more} more")).italics().weak());
+            }
+        });
 }
 
 /// Saved SSH remotes. Lists each `user@host:port` with Connect / Edit / delete
@@ -1640,8 +1714,27 @@ fn tabs_bar(state: &mut State, ui: &mut Ui) {
     let mut connect_remote: Option<usize> = None;
     let mut font_delta = 0.;
     let mut gui_font_delta = 0.;
+    let mut set_dark = None;
 
     ui.horizontal(|ui| {
+        // The theme toggle comes first, showing the theme a click switches to.
+        let dark = ui.visuals().dark_mode;
+        let (icon, other) = if dark { ("☀", "light") } else { ("🌙", "dark") };
+        if ui
+            .button(icon)
+            .on_hover_text(format!("Switch to {other} mode"))
+            .clicked()
+        {
+            set_dark = Some(!dark);
+        }
+        if ui
+            .button("About")
+            .on_hover_text("Show Peregrine's version, source code, and state file location")
+            .clicked()
+        {
+            state.ui.about = !state.ui.about;
+        }
+        ui.separator();
         // Font-size controls sit to the left of the tab strip: one for the
         // terminal panes, one for the side panels.
         font_delta = font_size_control(ui, "CLI text: ", font_size, "terminal");
@@ -1756,6 +1849,9 @@ fn tabs_bar(state: &mut State, ui: &mut Ui) {
         }
     });
 
+    if let Some(dark) = set_dark {
+        state.set_dark_mode(ui.ctx(), dark);
+    }
     if font_delta != 0.0 {
         state.adjust_font_size(font_delta);
     }
@@ -1843,6 +1939,7 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
     state.pump_running();
     // Likewise a Files-panel paste.
     state.pump_paste();
+    state.pump_delete(ui.ctx());
 
     // Pump any live PTY output into the active tab's pane. While a PTY session
     // is active, keep requesting repaints so streamed output (e.g. `top`) keeps
@@ -1995,7 +2092,9 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
     // Likewise the PATH editor's window.
     path_panel::path_window(state, ui.ctx());
 
+    about::show(state, ui.ctx());
     dirs::stale_dir_popup(state, ui.ctx());
+    file_browser::delete_popup(state, ui.ctx());
 
     // A command was submitted this frame: paint its echo, then come straight
     // back to run it.

@@ -4,10 +4,60 @@
 use std::{
     env, fs, io,
     path::{Path, PathBuf},
+    thread::{self, JoinHandle},
     time::SystemTime,
 };
 
 use shell::BrowserFile;
+
+/// A confirmed deletion, moving items to the OS trash on a worker thread.
+pub struct Delete {
+    pub paths: Vec<PathBuf>,
+    handle: Option<JoinHandle<Vec<Result<(), String>>>>,
+}
+
+impl Delete {
+    pub fn start(mut paths: Vec<PathBuf>, ctx: egui::Context) -> Self {
+        // Deep search can select both a folder and one of its descendants.
+        // Move the folder first, then count its contents as handled too.
+        paths.sort_by_key(|p| p.components().count());
+        paths.dedup();
+        let sources = paths.clone();
+        let handle = thread::spawn(move || {
+            let mut moved_dirs: Vec<PathBuf> = Vec::new();
+            let results = sources
+                .iter()
+                .map(|path| {
+                    if moved_dirs.iter().any(|dir| path.starts_with(dir)) {
+                        return Ok(());
+                    }
+                    let is_dir = fs::symlink_metadata(path).is_ok_and(|md| md.is_dir());
+                    // Never fall back to permanent deletion if trashing fails.
+                    trash::delete(path).map_err(|e| e.to_string())?;
+                    if is_dir {
+                        moved_dirs.push(path.clone());
+                    }
+                    Ok(())
+                })
+                .collect();
+            ctx.request_repaint();
+            results
+        });
+        Self {
+            paths,
+            handle: Some(handle),
+        }
+    }
+
+    pub fn try_finish(&mut self) -> Option<Vec<Result<(), String>>> {
+        if !self.handle.as_ref()?.is_finished() {
+            return None;
+        }
+        Some(self.handle.take()?.join().unwrap_or_else(|_| {
+            vec![Err("the delete operation crashed".to_owned()); self.paths.len()]
+        }))
+    }
+}
 
 /// What the Files panel's details pane shows for the selected row. Read once
 /// on selection (and again when the listing refreshes) by [FileDetails::read],
@@ -78,6 +128,80 @@ impl FileDetails {
             is_executable: !md.is_dir() && is_executable(path, &md),
             hidden_attr: false,
         })
+    }
+}
+
+/// What the details pane shows while several rows are selected, in place of
+/// a [FileDetails]. Read by [SelectionSummary::read] when the selection
+/// changes, likewise.
+pub struct SelectionSummary {
+    /// Each one's name, and whether it's a folder, in listing order.
+    pub items: Vec<(String, bool)>,
+    pub files: usize,
+    pub folders: usize,
+    /// The files' total size. As in Explorer, folders' contents aren't
+    /// counted, since that means walking every one of them.
+    pub size: u64,
+    /// The oldest and newest of their modification times.
+    pub modified: Option<(SystemTime, SystemTime)>,
+    /// The dir they're all in, if it's the same one.
+    pub dir: Option<PathBuf>,
+}
+
+impl SelectionSummary {
+    /// Stat each of `paths`. One that's gone since it was listed counts as
+    /// a file with no size.
+    pub fn read(paths: &[PathBuf]) -> Self {
+        let mut s = Self {
+            items: Vec::with_capacity(paths.len()),
+            files: 0,
+            folders: 0,
+            size: 0,
+            modified: None,
+            dir: paths.first().and_then(|p| p.parent()).map(Path::to_path_buf),
+        };
+        for path in paths {
+            let md = fs::metadata(path).ok();
+            let is_folder = md.as_ref().is_some_and(fs::Metadata::is_dir);
+            if is_folder {
+                s.folders += 1;
+            } else {
+                s.files += 1;
+                s.size += md.as_ref().map_or(0, fs::Metadata::len);
+            }
+            if let Some(t) = md.and_then(|md| md.modified().ok()) {
+                s.modified = Some(s.modified.map_or((t, t), |(lo, hi)| (lo.min(t), hi.max(t))));
+            }
+            if s.dir.as_deref() != path.parent() {
+                s.dir = None;
+            }
+            let name = path.file_name().unwrap_or(path.as_os_str());
+            s.items.push((name.to_string_lossy().into_owned(), is_folder));
+        }
+        s
+    }
+}
+
+/// Whether `a` and `b` are on the same drive (Windows) or filesystem
+/// (elsewhere), where a move is just a rename. A file manager moves what's
+/// dragged to a folder on the same one, and copies it to another.
+#[cfg(windows)]
+pub fn same_volume(a: &Path, b: &Path) -> bool {
+    use std::path::Component;
+    // The drive letter or UNC share each starts with.
+    let prefix = |p: &Path| match p.components().next() {
+        Some(Component::Prefix(pre)) => Some(pre.as_os_str().to_string_lossy().to_lowercase()),
+        _ => None,
+    };
+    prefix(a) == prefix(b)
+}
+
+#[cfg(unix)]
+pub fn same_volume(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (fs::metadata(a), fs::metadata(b)) {
+        (Ok(a), Ok(b)) => a.dev() == b.dev(),
+        _ => true,
     }
 }
 

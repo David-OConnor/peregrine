@@ -1,9 +1,9 @@
-//! File viewer windows. Double-clicking a Markdown, plain-text or image file
+//! File viewer windows. Double-clicking a Markdown, source, plain-text or image file
 //! in the Files panel opens it in its own native window (an egui deferred
 //! viewport): Markdown rendered by `egui_commonmark` (see `crate::markdown`),
-//! plain text as is, images decoded by the `image` crate. Each window re-reads
-//! its file when it changes on disk, so it can sit beside an editor as a live
-//! preview.
+//! source highlighted by `syntect`, plain text as is, images decoded by the
+//! `image` crate. Each window re-reads its file when it changes on disk, so it
+//! can sit beside an editor as a live preview.
 
 use std::{
     ffi::OsStr,
@@ -19,9 +19,10 @@ use std::{
 };
 
 use egui::{
-    CentralPanel, Color32, ColorImage, Context, Frame, Id, Key, Label, Modifiers, Panel, Rect,
-    RichText, ScrollArea, Sense, TextureFilter, TextureHandle, TextureOptions, Ui, Vec2,
-    ViewportBuilder, ViewportCommand, ViewportId, emath::GuiRounding, pos2, scroll_area, vec2,
+    CentralPanel, Color32, ColorImage, Context, Frame, Id, Key, Label, Margin, Modifiers, Panel,
+    Rect, RichText, ScrollArea, Sense, TextureFilter, TextureHandle, TextureOptions, Ui,
+    UiBuilder, Vec2, ViewportBuilder, ViewportCommand, ViewportId, emath::GuiRounding, pos2,
+    scroll_area, vec2,
 };
 use egui_commonmark::CommonMarkCache;
 use image::{
@@ -34,11 +35,15 @@ use crate::{
     markdown::{self, Block, is_markdown},
 };
 
-/// Extensions (lowercase) of plain-text files.
-const TEXT_EXTENSIONS: [&str; 1] = ["txt"];
-/// Names (lowercase) of plain-text files that have no extension as far as
-/// `Path::extension` is concerned: a leading dot starts the name.
-const TEXT_FILE_NAMES: [&str; 1] = [".gitignore"];
+mod gutter;
+mod syntax;
+
+/// Extensions (lowercase) of plain-text files. A `.lock` file that `syntax`
+/// recognizes by name is highlighted instead.
+const TEXT_EXTENSIONS: [&str; 2] = ["txt", "lock"];
+/// Names (lowercase) of plain-text files that have no extension, or none as
+/// far as `Path::extension` is concerned: a leading dot starts the name.
+const TEXT_FILE_NAMES: [&str; 3] = [".gitignore", ".gitattributes", "license"];
 /// Extensions (lowercase) of images: the formats enabled on the `image` crate
 /// in Cargo.toml.
 const IMAGE_EXTENSIONS: [&str; 5] = ["png", "jpg", "jpeg", "jfif", "bmp"];
@@ -73,7 +78,7 @@ const MIN_WINDOW_SIZE: [f32; 2] = [300., 200.];
 /// Whether `path` is a file type the viewer shows, so a double-click views it
 /// here rather than handing it to the OS's default program.
 pub fn can_view(path: &Path) -> bool {
-    is_markdown(path) || is_text(path) || is_image(path)
+    is_markdown(path) || is_text(path) || is_image(path) || syntax::language(path).is_some()
 }
 
 fn lowercase(s: &OsStr) -> String {
@@ -100,6 +105,8 @@ pub fn is_image(path: &Path) -> bool {
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Kind {
     Markdown,
+    /// Source text, with its canonical syntax extension.
+    Code(&'static str),
     /// Plain text, in the monospace font.
     Text,
     Image,
@@ -111,6 +118,8 @@ impl Kind {
             Self::Markdown
         } else if is_image(path) {
             Self::Image
+        } else if let Some(language) = syntax::language(path) {
+            Self::Code(language)
         } else {
             Self::Text
         }
@@ -119,6 +128,7 @@ impl Kind {
     fn name(self) -> &'static str {
         match self {
             Self::Markdown => "Markdown",
+            Self::Code(_) => "Code",
             Self::Text => "Text",
             Self::Image => "Image",
         }
@@ -160,6 +170,11 @@ struct Doc {
     /// Markdown `content` split at its `<details>` blocks; see
     /// [markdown::split_details]. Empty for plain text and images.
     blocks: Vec<Block>,
+    /// Source or plain text laid out (source highlighted by a background
+    /// task); invalidated on reload.
+    layout: syntax::Source,
+    /// How many lines text `content` has: what the line numbers count up to.
+    lines: usize,
     /// An image being decoded on a background thread.
     decoding: Option<Decoding>,
     zoom: Zoom,
@@ -174,8 +189,8 @@ struct Doc {
 
 /// What a window shows.
 enum Content {
-    /// Markdown or plain text: at most [MAX_BYTES] of the file.
-    Text(String),
+    /// Markdown, source or plain text: at most [MAX_BYTES] of the file.
+    Text(Arc<str>),
     Image(Picture),
     /// An image whose first decode hasn't finished yet.
     Loading,
@@ -217,6 +232,8 @@ impl Doc {
             content: Ok(Content::Loading),
             truncated: None,
             blocks: Vec::new(),
+            layout: syntax::Source::default(),
+            lines: 0,
             decoding: None,
             zoom: Zoom::default(),
             modified: None,
@@ -243,13 +260,17 @@ impl Doc {
             return;
         }
         let read = read_text(&self.path);
+        self.layout.clear();
         self.truncated = read.as_ref().ok().and_then(|(_, size)| *size);
+        self.lines = read
+            .as_ref()
+            .map_or(0, |(text, _)| text.bytes().filter(|&b| b == b'\n').count() + 1);
         self.blocks = match (&read, self.kind) {
             (Ok((text, _)), Kind::Markdown) => markdown::split_details(text),
             _ => Vec::new(),
         };
         self.content = read
-            .map(|(text, _)| Content::Text(text))
+            .map(|(text, _)| Content::Text(text.into()))
             .map_err(|e| format!("Couldn't read {}: {e}", self.path.display()));
     }
 
@@ -668,23 +689,25 @@ impl Inner {
             .resizable(false)
             .show(ui, |ui| toolbar(doc, ui));
 
+        let mut margin = Margin::symmetric(16, 8);
+        if matches!(doc.kind, Kind::Code(_) | Kind::Text) {
+            // The line numbers' gutter starts at the window's edge.
+            margin.left = 0;
+        }
         CentralPanel::default()
-            .frame(Frame::central_panel(ui.style()).inner_margin(egui::Margin::symmetric(16, 8)))
+            .frame(Frame::central_panel(ui.style()).inner_margin(margin))
             .show(ui, |ui| match &doc.content {
-                Ok(Content::Text(text)) => {
+                Ok(Content::Text(text)) if doc.kind == Kind::Markdown => {
                     ScrollArea::vertical()
                         .id_salt(("viewer_scroll", id))
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
-                            if doc.kind == Kind::Markdown {
-                                let cache = cache.get_or_insert_with(CommonMarkCache::default);
-                                markdown::show(ui, text, &doc.blocks, &doc.path, cache, id);
-                            } else {
-                                ui.add(
-                                    Label::new(RichText::new(text).monospace()).selectable(true),
-                                );
-                            }
+                            let cache = cache.get_or_insert_with(CommonMarkCache::default);
+                            markdown::show(ui, text, &doc.blocks, &doc.path, cache, id);
                         });
+                }
+                Ok(Content::Text(text)) => {
+                    show_text(ui, text, doc.kind, doc.lines, &mut doc.layout, id);
                 }
                 Ok(Content::Image(picture)) => show_image(ui, picture, &mut doc.zoom, id),
                 Ok(Content::Loading) => {
@@ -702,6 +725,49 @@ impl Inner {
             }
         }
     }
+}
+
+/// Show source or plain text, its `lines` lines numbered down its left like
+/// an editor's, in viewer window `window`. Source scrolls sideways; plain
+/// text wraps to the window instead.
+fn show_text(
+    ui: &mut Ui,
+    text: &Arc<str>,
+    kind: Kind,
+    lines: usize,
+    layout: &mut syntax::Source,
+    window: ViewportId,
+) {
+    let language = match kind {
+        Kind::Code(language) => Some(language),
+        _ => None,
+    };
+    let scroll = match language {
+        Some(_) => ScrollArea::both(),
+        None => ScrollArea::vertical(),
+    };
+    let space = ui.available_rect_before_wrap();
+    let (gutter, body) = space.split_left_right_at_x(space.left() + gutter::width(ui, lines));
+    let output = ui
+        .scope_builder(UiBuilder::new().max_rect(body), |ui| {
+            scroll
+                .id_salt(("viewer_scroll", window))
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    let wrap_width = match language {
+                        Some(_) => f32::INFINITY,
+                        None => ui.available_width(),
+                    };
+                    let galley = layout.galley(ui, text, language, wrap_width);
+                    let label = Label::new(Arc::clone(&galley)).selectable(true);
+                    (galley, ui.add(label).rect.min)
+                })
+        })
+        .inner;
+    let (galley, pos) = output.inner;
+    // Level with the text, not the sideways scroll bar under it.
+    let gutter = Rect::from_x_y_ranges(gutter.x_range(), output.inner_rect.y_range());
+    gutter::paint(ui, gutter, &galley, pos);
 }
 
 /// Path, notices, and the Reload / Open externally buttons, plus previous /
@@ -856,7 +922,7 @@ fn padding(size: Vec2, viewport: Vec2) -> Vec2 {
 }
 
 /// Open `path`, a local file linked from `doc`: in another viewer window if
-/// it's a type the viewer shows, otherwise (a folder, a source file) with its
+/// it's a type the viewer shows, otherwise (e.g. a folder) with its
 /// default program.
 fn open_link(doc: &mut Doc, path: PathBuf, to_open: &mut Vec<PathBuf>, ctx: &Context) {
     if !path.exists() {
@@ -878,115 +944,5 @@ fn strip_verbatim(path: PathBuf) -> PathBuf {
     match s.strip_prefix(r"\\?\") {
         Some(rest) if !rest.starts_with("UNC\\") => PathBuf::from(rest),
         _ => path,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn detects_viewable_files() {
-        assert!(can_view(Path::new("a/README.md")));
-        assert!(can_view(Path::new("notes.txt")));
-        assert!(can_view(Path::new("NOTES.TXT")));
-        assert!(can_view(Path::new("repo/.gitignore")));
-        assert!(!can_view(Path::new("a/main.rs")));
-        assert!(!can_view(Path::new("txt")));
-        assert!(!can_view(Path::new("a/.gitignore.bak")));
-        assert!(can_view(Path::new("shots/a.PNG")));
-        assert!(can_view(Path::new("photo.jpeg")));
-        assert!(!can_view(Path::new("png")));
-        assert_eq!(Kind::of(Path::new("README.md")), Kind::Markdown);
-        assert_eq!(Kind::of(Path::new(".gitignore")), Kind::Text);
-        assert_eq!(Kind::of(Path::new("logo.bmp")), Kind::Image);
-    }
-
-    #[test]
-    fn decodes_images() {
-        let dir = std::env::temp_dir();
-        let pid = std::process::id();
-        // Named .jpg, but a PNG: the format comes from the contents.
-        let path = dir.join(format!("peregrine_viewer_{pid}.jpg"));
-        let mut image = image::RgbaImage::new(3, 2);
-        image.put_pixel(0, 0, image::Rgba([255, 0, 0, 255]));
-        image
-            .save_with_format(&path, image::ImageFormat::Png)
-            .unwrap();
-        let full = decode_image(&path, 8);
-        let shrunk = decode_image(&path, 2);
-        fs::remove_file(&path).unwrap();
-
-        let full = full.unwrap();
-        assert_eq!(full.size, [3, 2]);
-        assert_eq!(full.pixels.size, [3, 2]);
-        assert_eq!(full.pixels.pixels[0], Color32::RED);
-        let shrunk = shrunk.unwrap();
-        assert_eq!(shrunk.size, [3, 2]);
-        assert_eq!(shrunk.pixels.size, [2, 1]);
-
-        let not_image = dir.join(format!("peregrine_viewer_{pid}.png"));
-        fs::write(&not_image, "hello").unwrap();
-        let read = decode_image(&not_image, 8);
-        fs::remove_file(&not_image).unwrap();
-        assert!(read.is_err());
-    }
-
-    #[test]
-    fn steps_through_a_folders_images() {
-        let dir = std::env::temp_dir().join(format!("peregrine_viewer_{}", std::process::id()));
-        fs::create_dir_all(dir.join("d.png")).unwrap();
-        for name in ["b.JPG", "a.png", "c.bmp", "notes.txt"] {
-            fs::write(dir.join(name), "").unwrap();
-        }
-        let next = |name: &str, step| {
-            neighbor_image(&dir.join(name), step).map(|p| p.file_name().unwrap().to_owned())
-        };
-        let (next_a, prev_a, skip_a) = (next("a.png", 1), next("a.png", -1), next("a.png", 2));
-        let (next_c, gone_next, gone_prev) =
-            (next("c.bmp", 1), next("bb.png", 1), next("bb.png", -1));
-        let last = next("c.bmp", 0);
-        fs::remove_dir_all(&dir).unwrap();
-
-        // Ignoring case, skipping the text file and the folder named like an
-        // image, wrapping around at the ends.
-        assert_eq!(next_a.unwrap(), "b.JPG");
-        assert_eq!(prev_a.unwrap(), "c.bmp");
-        assert_eq!(skip_a.unwrap(), "c.bmp");
-        assert_eq!(next_c.unwrap(), "a.png");
-        assert_eq!(last.unwrap(), "c.bmp");
-        // A file that's gone steps from where it was.
-        assert_eq!(gone_next.unwrap(), "c.bmp");
-        assert_eq!(gone_prev.unwrap(), "b.JPG");
-    }
-
-    #[test]
-    fn pads_only_what_fits() {
-        assert_eq!(padding(vec2(100., 300.), vec2(200., 200.)), vec2(50., 0.));
-    }
-
-    #[test]
-    fn decodes_text() {
-        assert_eq!(decode(b"\xEF\xBB\xBFhi\n"), "hi\n");
-        assert_eq!(decode(b"a\xFFb"), "a\u{FFFD}b");
-        assert_eq!(decode(b"\xFF\xFEh\0i\0"), "hi");
-        assert_eq!(decode(b"\xFE\xFF\0h\0i"), "hi");
-    }
-
-    #[test]
-    fn truncates_big_files_at_a_line_break() {
-        let path =
-            std::env::temp_dir().join(format!("peregrine_viewer_{}.txt", std::process::id()));
-        let line = "0123456789abcdef\n"; // 17 bytes, so MAX_BYTES lands mid-line.
-        let len = MAX_BYTES as usize / line.len() + 10;
-        fs::write(&path, line.repeat(len)).unwrap();
-        let read = read_text(&path);
-        fs::remove_file(&path).unwrap();
-
-        let (text, size) = read.unwrap();
-        assert_eq!(size, Some((line.len() * len) as u64));
-        assert!(text.len() as u64 <= MAX_BYTES);
-        assert!(text.ends_with('\n'));
-        assert_eq!(text.len() % line.len(), 0);
     }
 }

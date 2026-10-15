@@ -9,14 +9,18 @@ chrono = "0.4.45"
 egui = "0.36.2"
 eframe = "0.36.2"
 
-# Markdown viewer windows (see `src/markdown.rs`). egui_commonmark 0.23 is the
-# release built against egui 0.34. `better_syntax_highlighting` colours fenced
+# Markdown viewer windows (see `src/markdown.rs`). egui_commonmark 0.25 is the
+# release built against egui 0.36. `better_syntax_highlighting` colours fenced
 # code blocks via syntect (pure-Rust regex, no C deps); the default features
 # load local images the document references.
 egui_commonmark = { version = "0.25.0", features = ["better_syntax_highlighting"] }
-# Image loaders for those pictures. `http` fetches remote images (README
-# badges etc.) on a background thread via ehttp.
-#egui_extras = { version = "0.34.3", features = ["file", "http", "image", "gif", "webp", "svg"] }
+# Source viewer highlighting: the same engine/features already built for Markdown.
+# Keep defaults off so this doesn't add the Oniguruma C dependency.
+syntect = { version = "5.3", default-features = false, features = ["default-fancy"] }
+# Image loaders for those pictures (egui_commonmark installs them). `http`
+# fetches remote images (README badges etc.) on a background thread via
+# ehttp; `svg_text` renders the text in SVGs, which badges are mostly made of.
+egui_extras = { version = "0.36.2", features = ["file", "http", "image", "gif", "webp", "svg", "svg_text"] }
 
 # Same parser egui_commonmark uses: the viewer finds `<details>` blocks with it
 # so they can render as collapsible sections. Adds nothing new to the build.
@@ -35,6 +39,9 @@ grep-matcher = "0.1.9"
 grep-regex = "0.1.14"
 grep-searcher = "0.1.17"
 ignore = "0.4.33"
+
+# Files-panel Delete: use each OS's recoverable Recycle Bin / Trash.
+trash = "5.2.9"
 
 # Files panel (see `src/files.rs`): `ShellExecuteW` opens a file with its default
 # program, as an Explorer double-click does; `SHGetFileInfoW` gives Explorer's

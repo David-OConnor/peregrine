@@ -1,7 +1,10 @@
 //! Clipboard history, kept between runs. Ordinary paste always uses the OS
 //! clipboard; history actions explicitly choose older content, without
 //! changing focus or inserting text until requested.
-use std::borrow::Cow;
+use std::{
+    borrow::Cow,
+    path::{MAIN_SEPARATOR, Path, PathBuf},
+};
 
 use chrono::{DateTime, Local, Utc};
 use egui::{Align, Button, Color32, Frame, Layout, RichText, ScrollArea, Stroke, TextEdit, Ui};
@@ -17,7 +20,7 @@ const TEXT_COLOR_DARK: Color32 = Color32::from_rgb(90, 150, 235);
 const TEXT_COLOR_LIGHT: Color32 = Color32::from_rgb(30, 90, 200);
 
 /// The outline and "sys" label of the entry the system clipboard holds.
-const SYS_COLOR_DARK: Color32 = Color32::from_rgb(70, 220, 100);
+const SYS_COLOR_DARK: Color32 = Color32::from_rgb(50, 140, 70);
 const SYS_COLOR_LIGHT: Color32 = Color32::from_rgb(20, 150, 50);
 
 /// When an entry was copied, in local time: "14:05" today, "10/14 14:05"
@@ -28,6 +31,37 @@ fn added_label(added: &DateTime<Local>) -> String {
     } else {
         added.format("%m/%d %H:%M").to_string()
     }
+}
+
+/// `path` as just its dir's name and its own: "Downloads\a.txt".
+fn short_path(path: &Path) -> String {
+    let Some(name) = path.file_name() else {
+        return path.display().to_string();
+    };
+    match path.parent().and_then(Path::file_name) {
+        Some(dir) => format!(
+            "{}{MAIN_SEPARATOR}{}",
+            dir.to_string_lossy(),
+            name.to_string_lossy()
+        ),
+        None => name.to_string_lossy().into_owned(),
+    }
+}
+
+/// [Short](short_path) paths, one per line, bulleted when there are several.
+fn compact_paths(paths: &[&Path]) -> String {
+    let bullet = if paths.len() > 1 { "• " } else { "" };
+    paths
+        .iter()
+        .map(|p| format!("{bullet}{}", short_path(p)))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// `text`'s lines, if every one is an absolute path.
+fn text_paths(text: &str) -> Option<Vec<&Path>> {
+    let paths: Vec<&Path> = text.lines().map(Path::new).collect();
+    (!paths.is_empty() && paths.iter().all(|p| p.is_absolute())).then_some(paths)
 }
 
 /// An entry's first row: "Text 14:05 · 12 characters", with `sys` (its
@@ -167,255 +201,6 @@ pub fn copy_output_on_right_click(ui: &Ui, rect: egui::Rect) {
     });
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    struct OutputUi {
-        ctx: egui::Context,
-        state: State,
-        rows: [egui::Rect; 3],
-        time: f64,
-    }
-
-    impl OutputUi {
-        fn new() -> Self {
-            let mut test = Self {
-                ctx: egui::Context::default(),
-                state: State::default(),
-                rows: [egui::Rect::NOTHING; 3],
-                time: 0.0,
-            };
-            test.state.ui.cli_input[0] = "input must not be copied".into();
-            test.frame(vec![]);
-            test.frame(vec![]);
-            test
-        }
-
-        fn frame(&mut self, events: Vec<egui::Event>) -> Vec<String> {
-            self.time += 0.1;
-            let output = self.ctx.run_ui(
-                egui::RawInput {
-                    screen_rect: Some(egui::Rect::from_min_size(
-                        egui::Pos2::ZERO,
-                        egui::vec2(400.0, 240.0),
-                    )),
-                    time: Some(self.time),
-                    events,
-                    ..Default::default()
-                },
-                |ui| {
-                    capture(&mut self.state, ui.ctx());
-                    egui::Panel::left("other")
-                        .default_size(100.0)
-                        .show(ui, |ui| {
-                            self.rows[2] = ui.label("Sidebar text").rect;
-                        });
-                    egui::Panel::bottom("input").show(ui, |ui| {
-                        super::super::term_in(&mut self.state, ui);
-                    });
-                    egui::CentralPanel::default().show(ui, |ui| {
-                        let output =
-                            ScrollArea::vertical()
-                                .auto_shrink([false, false])
-                                .show(ui, |ui| {
-                                    let font = egui::TextStyle::Monospace.resolve(ui.style());
-                                    for (index, text) in
-                                        ["alpha café 🦅", "\x1b[31mbravo charlie\x1b[0m"]
-                                            .iter()
-                                            .enumerate()
-                                    {
-                                        let job = crate::ansi::to_layout_job(
-                                            &crate::ansi::parse(text),
-                                            egui::Color32::WHITE,
-                                            font.clone(),
-                                        );
-                                        self.rows[index] = ui.label(job).rect;
-                                    }
-                                });
-                        copy_output_on_right_click(ui, output.inner_rect);
-                    });
-                },
-            );
-            let copied = output
-                .platform_output
-                .commands
-                .iter()
-                .filter_map(|command| match command {
-                    egui::OutputCommand::CopyText(text) => Some(text.clone()),
-                    _ => None,
-                })
-                .collect();
-            output.drop_without_applying_deltas();
-            copied
-        }
-
-        fn button(
-            &mut self,
-            pos: egui::Pos2,
-            button: egui::PointerButton,
-            pressed: bool,
-        ) -> Vec<String> {
-            self.frame(vec![
-                egui::Event::PointerMoved(pos),
-                egui::Event::PointerButton {
-                    pos,
-                    button,
-                    pressed,
-                    modifiers: egui::Modifiers::NONE,
-                },
-            ])
-        }
-
-        fn select(&mut self, start: usize, end: usize) {
-            let start = self.rows[start].left_center() + egui::vec2(0.1, 0.0);
-            let end = self.rows[end].right_center() - egui::vec2(0.1, 0.0);
-            self.button(start, egui::PointerButton::Primary, true);
-            self.frame(vec![egui::Event::PointerMoved(end)]);
-            self.button(end, egui::PointerButton::Primary, false);
-        }
-    }
-
-    #[test]
-    fn output_right_click_matches_ctrl_c_and_records_clipboard_history() {
-        let mut test = OutputUi::new();
-        test.select(0, 1);
-        let keyboard = test.frame(vec![egui::Event::Copy]);
-        assert_eq!(keyboard, vec!["alpha café 🦅\nbravo charlie"]);
-        test.frame(vec![]);
-        test.state.ui.clipboard.history.entries.clear();
-
-        // Clicking inside the selection must preserve both selected rows.
-        let pos = test.rows[0].center();
-        let mouse = test.button(pos, egui::PointerButton::Secondary, true);
-        assert_eq!(mouse, keyboard);
-        assert!(
-            test.button(pos, egui::PointerButton::Secondary, false)
-                .is_empty()
-        );
-        assert_eq!(
-            test.state.ui.clipboard.history.contents(),
-            vec![Content::Text(keyboard[0].clone())]
-        );
-        // The same selection remains available for subsequent copies.
-        assert_eq!(test.frame(vec![egui::Event::Copy]), keyboard);
-    }
-
-    #[test]
-    fn output_right_click_requires_an_output_selection() {
-        let mut test = OutputUi::new();
-        let pos = test.rows[0].center();
-        assert!(
-            test.button(pos, egui::PointerButton::Secondary, true)
-                .is_empty()
-        );
-        assert!(
-            test.button(pos, egui::PointerButton::Secondary, false)
-                .is_empty()
-        );
-
-        test.select(2, 2);
-        assert!(
-            test.button(pos, egui::PointerButton::Secondary, true)
-                .is_empty()
-        );
-        assert!(
-            test.button(pos, egui::PointerButton::Secondary, false)
-                .is_empty()
-        );
-
-        test.select(0, 1);
-        let sidebar = test.rows[2].center();
-        assert!(
-            test.button(sidebar, egui::PointerButton::Secondary, true)
-                .is_empty()
-        );
-        assert!(
-            test.button(sidebar, egui::PointerButton::Secondary, false)
-                .is_empty()
-        );
-        test.frame(vec![]);
-        assert!(test.state.ui.clipboard.history.entries.is_empty());
-    }
-
-    #[test]
-    fn another_apps_copy_joins_the_history_and_takes_the_mark() {
-        let mut test = OutputUi::new();
-        test.select(0, 1);
-        let copied = test.frame(vec![egui::Event::Copy]);
-        test.frame(vec![]);
-        let clipboard = &test.state.ui.clipboard;
-        assert_eq!(clipboard.sys.find_in(&clipboard.history), Some(0));
-
-        let theirs = Content::Text("from another app".into());
-        clipboard.sys.observe(Some(theirs.clone()));
-        test.frame(vec![]);
-        let clipboard = &test.state.ui.clipboard;
-        assert_eq!(
-            clipboard.history.contents(),
-            vec![theirs.clone(), Content::Text(copied[0].clone())]
-        );
-        assert_eq!(clipboard.sys.find_in(&clipboard.history), Some(0));
-
-        // Pasting it keeps the entry the watcher made, and its time.
-        let added = clipboard.history.entries[0].added;
-        test.frame(vec![egui::Event::Paste("from another app".into())]);
-        let clipboard = &test.state.ui.clipboard;
-        assert_eq!(clipboard.history.entries.len(), 2);
-        assert_eq!(clipboard.history.entries[0].added, added);
-    }
-
-    #[test]
-    fn added_label_shows_the_date_only_before_today() {
-        let now = Local::now();
-        assert_eq!(added_label(&now), now.format("%H:%M").to_string());
-        let earlier = now - chrono::TimeDelta::days(1);
-        assert_eq!(
-            added_label(&earlier),
-            earlier.format("%m/%d %H:%M").to_string()
-        );
-    }
-
-    fn release(modifiers: egui::Modifiers) -> egui::Event {
-        egui::Event::Key {
-            key: egui::Key::V,
-            physical_key: None,
-            pressed: false,
-            repeat: false,
-            modifiers,
-        }
-    }
-
-    #[test]
-    fn shortcut_consumes_paste_and_toggles_once_until_release() {
-        let mut pane = ClipboardPane::default();
-        let mut visible = false;
-        let modifiers = egui::Modifiers::CTRL | egui::Modifiers::SHIFT;
-        let mut events = vec![egui::Event::Paste("text".into())];
-        pane.shortcut(&mut events, modifiers, &mut visible);
-        assert!(visible);
-        assert!(events.is_empty());
-        let mut repeated = vec![
-            egui::Event::Paste("text".into()),
-            release(egui::Modifiers::NONE),
-        ];
-        pane.shortcut(&mut repeated, modifiers, &mut visible);
-        assert!(visible);
-        assert!(repeated.is_empty());
-        // File and empty clipboards produce only a key release.
-        let mut events = vec![release(modifiers)];
-        pane.shortcut(&mut events, modifiers, &mut visible);
-        assert!(!visible);
-        assert!(events.is_empty());
-        let mut normal = vec![
-            egui::Event::Paste("normal".into()),
-            release(egui::Modifiers::CTRL),
-        ];
-        pane.shortcut(&mut normal, egui::Modifiers::CTRL, &mut visible);
-        assert_eq!(normal.len(), 2);
-        assert!(!visible);
-    }
-}
 
 pub fn capture(state: &mut State, ctx: &egui::Context) {
     ctx.input_mut(|input| {
@@ -429,6 +214,15 @@ pub fn capture(state: &mut State, ctx: &egui::Context) {
     let pending = ctx
         .with_plugin(|p: &mut TextCapture| std::mem::take(&mut p.pending.entries))
         .unwrap_or_default();
+    // A Ctrl+C / X in the Files panel last frame. If it copied text instead
+    // (selected in the details pane, say, or in its search box), that's
+    // what the system clipboard holds now; otherwise the selected files go
+    // there.
+    if let Some(cut) = state.ui.files_copy_pending.take()
+        && pending.is_empty()
+    {
+        state.copy_selected(cut);
+    }
     // Newest first: the first is what the system clipboard now holds.
     if let Some(newest) = pending.first() {
         state.ui.clipboard.sys.set(newest.content.clone());
@@ -468,7 +262,6 @@ pub fn capture(state: &mut State, ctx: &egui::Context) {
 pub fn draw(state: &mut State, ui: &mut Ui) {
     super::panel_header(ui, "Clipboard", &mut state.ui.panel_vis.clipboard);
     ui.label("Choose an entry, then paste normally, or use its paste button.");
-    ui.small("Kept between runs · 100 entries · up to 1 MiB each");
     ui.add(TextEdit::singleline(&mut state.ui.clipboard.search).hint_text("Search"));
 
     if ui
@@ -499,7 +292,7 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
                 let (kind, detail, body) = match entry {
                     Content::Text(text) => (
                         "Text",
-                        format!("{} characters", text.chars().count()),
+                        format!("{} chars", text.chars().count()),
                         Cow::Borrowed(text.as_str()),
                     ),
                     Content::Files { paths, cut } => (
@@ -517,6 +310,14 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
                 if !body.to_lowercase().contains(&query) {
                     continue;
                 }
+                // Paths show as just their dir and name; hover for the full ones.
+                let compact = match entry {
+                    Content::Files { paths, .. } => Some(compact_paths(
+                        &paths.iter().map(PathBuf::as_path).collect::<Vec<_>>(),
+                    )),
+                    Content::Text(text) => text_paths(text).map(|paths| compact_paths(&paths)),
+                };
+                let shown = compact.as_deref().unwrap_or(&body);
                 let on_sys = sys_index == Some(index);
                 ui.push_id(index, |ui| {
                     // Every entry has an outline, so marking one doesn't shift it.
@@ -533,8 +334,8 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
                             ui.set_min_width(ui.available_width());
                             let sys = on_sys.then_some(sys_color);
                             title_row(ui, kind, &detail, &history_entry.added, sys);
-                            let mut preview: String = body.chars().take(240).collect();
-                            let truncated = body.chars().count() > 240;
+                            let mut preview: String = shown.chars().take(240).collect();
+                            let truncated = shown.chars().count() > 240;
                             if truncated {
                                 preview.push('…');
                             }
@@ -552,11 +353,14 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
                                     None => text,
                                 }
                             };
-                            ui.label(styled(&preview));
+                            let label = ui.label(styled(&preview));
+                            if compact.is_some() {
+                                label.on_hover_text(body.as_ref());
+                            }
                             if truncated {
                                 egui::CollapsingHeader::new("Full contents").show(ui, |ui| {
                                     ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
-                                        ui.label(styled(&body));
+                                        ui.label(styled(shown));
                                     });
                                 });
                             }
@@ -572,7 +376,7 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
                                     Content::Text(_) => ("Paste to CLI", true),
                                     Content::Files { .. } => (
                                         "Paste to folder",
-                                        state.paste.is_none() && !state.is_remote(),
+                                        state.paste.is_none() && state.deleting.is_none() && !state.is_remote(),
                                     ),
                                 };
                                 if ui

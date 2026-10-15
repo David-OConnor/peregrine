@@ -30,13 +30,23 @@ pub(super) const BOOKMARK_COL_WIDTH: f32 = 170.;
 /// `"<i>: "` prefix and trailing `x`.
 pub(super) const RECENT_DIRS_COL_WIDTH: f32 = 170.;
 
-/// Background of a Recent dirs or Files row whose dir is also bookmarked:
-/// pale green.
-pub(super) const BOOKMARKED_FILL: Color32 = Color32::from_rgb(200, 240, 200);
-/// Uncoloured text (the index, separators) on a [BOOKMARKED_FILL] row. That
-/// fill is pale in both themes, so this is dark in both, and the row's dirs
-/// take the light-background palette (see [path_color::palette]).
+/// Background of a Recent dirs or Files row whose dir is also bookmarked,
+/// per panel theme: pale green in light mode, a muted dark green in dark mode
+/// so it doesn't stand out from the rest of the window.
+const BOOKMARKED_FILL_LIGHT: Color32 = Color32::from_rgb(200, 240, 200);
+const BOOKMARKED_FILL_DARK: Color32 = Color32::from_rgb(40, 90, 50);
+/// Uncoloured text (the index, separators) on a bookmarked row in light mode.
+/// In dark mode the row keeps the theme's own text colour.
 pub(super) const BOOKMARKED_TEXT: Color32 = Color32::from_gray(30);
+
+/// The background of a bookmarked row (see [BOOKMARKED_FILL_LIGHT]).
+pub(super) fn bookmarked_fill(dark: bool) -> Color32 {
+    if dark {
+        BOOKMARKED_FILL_DARK
+    } else {
+        BOOKMARKED_FILL_LIGHT
+    }
+}
 /// The filled ★ of a bookmarked dir (see [bookmark_star]).
 const STAR_COLOR: Color32 = Color32::from_rgb(225, 165, 0);
 const STAR_ON: char = '★';
@@ -100,7 +110,7 @@ fn dir_label(
 
 /// A Bookmarks / Recent dirs row's button, labelled as [dir_label]. With
 /// `highlight` (a Recent dirs row that's also bookmarked), it's drawn on
-/// [BOOKMARKED_FILL]. When the label doesn't show the whole path (it's just
+/// [bookmarked_fill]. When the label doesn't show the whole path (it's just
 /// the name, or truncated), the hover text does.
 fn dir_button(
     ui: &mut Ui,
@@ -109,16 +119,17 @@ fn dir_button(
     opts: DirLabelOpts,
     highlight: bool,
 ) -> egui::Response {
-    let (dark, text_color) = if highlight {
-        (false, BOOKMARKED_TEXT)
+    let dark = ui.visuals().dark_mode;
+    let text_color = if highlight && !dark {
+        BOOKMARKED_TEXT
     } else {
-        (ui.visuals().dark_mode, Color32::PLACEHOLDER)
+        Color32::PLACEHOLDER
     };
     let parts = dir_parts(path, opts, dark);
     let whole = !opts.names && parts_len(&parts) <= opts.max_len;
     let mut button = Button::new(dir_label(ui, prefix, parts, opts.max_len, text_color));
     if highlight {
-        button = button.fill(BOOKMARKED_FILL);
+        button = button.fill(bookmarked_fill(dark));
     }
     let resp = ui.add(button);
     if whole {
@@ -394,7 +405,7 @@ pub(super) fn dir_bookmarks(state: &mut State, ui: &mut Ui) {
 /// Display recent directories we've executed a command from or acted on in
 /// the Files panel (see [State::touch_recent_dir]), as a clickable list, in
 /// columns when the panel is wide enough. Newest first. Dirs that are
-/// also bookmarked have a pale green background (see [BOOKMARKED_FILL]). In
+/// also bookmarked have a green background (see [bookmarked_fill]). In
 /// "Names" mode each name takes its parent dir's colour, so siblings group
 /// visually. Clicking a row cd's there, and middle-clicking opens it in a new
 /// tab. The ★ adds the row's dir to Bookmarks or removes it (see

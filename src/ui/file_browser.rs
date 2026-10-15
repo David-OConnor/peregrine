@@ -1,22 +1,20 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use egui::{
-    Align, Button, Event, Frame, Key, Layout, Modifiers, Panel, RichText, ScrollArea, TextStyle, Ui,
-};
+use egui::{Align, Area, Button, Color32, DragAndDrop, Event, Frame, Key, Layout, Modal, Modifiers, Panel, Response, RichText, ScrollArea, Sense, Stroke, StrokeKind, TextStyle, Ui};
 
 use crate::{
-    OutType, files, path_color, render_with_tilde,
+    OutType, clipboard, files, path_color, render_with_tilde,
     state::State,
     ui,
     ui::{
         COLOR_EXECUTABLE, FILES_COL_MIN_CHARS, ListAction,
-        dirs::{BOOKMARKED_FILL, BOOKMARKED_TEXT},
+        dirs::{BOOKMARKED_TEXT, bookmarked_fill},
     },
     viewer,
 };
 
 /// Files in the active tab's cwd, as a selectable list. Folders are
-/// sorted first and prefixed with 📁, on pale green when bookmarked (as in
+/// sorted first and prefixed with 📁, on green when bookmarked (as in
 /// Recent dirs); executable files (Unix +x, or
 /// Windows `.exe`/`.msi`) are coloured green. The listing is refreshed
 /// by [State::refresh_browser_files] on every cwd change and after every
@@ -30,20 +28,30 @@ use crate::{
 ///
 /// Clicking a row selects it, and the pane at the bottom of the panel shows
 /// its details (see [ui::file_details]), with a picture of an image under
-/// them. The divider above that pane drags up and down (see [ui::Divider]).
+/// them. As in a file manager, Ctrl+click adds a row to the selection (or
+/// takes it out), Shift+click or Shift+arrow selects the rows from the one
+/// last clicked, Ctrl+A selects them all, and a click on the background,
+/// Escape or the Unselect button (shown while anything's selected) selects
+/// none; the pane then totals up what's selected. The divider above
+/// that pane drags up and down (see [ui::Divider]).
 /// Double-clicking a folder row navigates into
 /// it (same path as clicking a bookmark or recent dir), and middle-clicking
 /// opens it in a new tab; double-clicking a
-/// Markdown or plain-text (`.txt`, `.gitignore`) file opens it in a viewer
+/// Markdown or plain-text (`.txt`, `.gitignore`, `.gitattributes`, `LICENSE`)
+/// file opens it in a viewer
 /// window (see `crate::viewer`); any other file opens with the OS's default
 /// associated program (see
 /// [open_with_default_app]). Clicking the already-selected row again renames
 /// it in place (see [ui::rename_box]): Enter or clicking away applies the new
 /// name, Escape cancels.
 ///
-/// Cut / Copy (or Ctrl+X / C) put the selected row on the OS clipboard, and
+/// Cut / Copy (or Ctrl+X / C) put the selected rows on the OS clipboard, and
 /// Paste (Ctrl+V) copies or moves the files there into this dir, so files
 /// can go to and from the OS file manager too (see `crate::clipboard`).
+/// Delete (or the red trash button) confirms before moving the selected
+/// files and folders to the OS's Recycle Bin / Trash.
+/// Dragging rows onto a folder (or onto ⬆ or a shortcut button) moves them
+/// there, or copies them with Ctrl held (see [drop_target]).
 pub(crate) fn file_browser(state: &mut State, ui: &mut Ui) {
     // Measured before anything is laid out, so the details pane's share is
     // of the whole panel rather than of what's left under the header.
@@ -52,57 +60,96 @@ pub(crate) fn file_browser(state: &mut State, ui: &mut Ui) {
     // The whole pane, for the mouse Back/Forward buttons below.
     let pane_rect = ui.max_rect();
 
-    // A click in this pane gives it Enter, the arrow keys and Ctrl+C / X / V;
-    // a click anywhere else takes them away.
-    if ui.input(|i| i.pointer.any_pressed()) {
-        state.ui.files_active = ui.rect_contains_pointer(pane_rect);
+    // A click in this pane gives it Enter, the arrow keys and Ctrl+A / C /
+    // X / V; a click anywhere else takes them away.
+    let modal_open =
+        state.ui.delete_pending.is_some() || ui.memory(|m| m.top_modal_layer().is_some());
+    if !modal_open && ui.input(|i| i.pointer.any_pressed()) {
+        let active = ui.rect_contains_pointer(pane_rect);
+        state.ui.files_activating_press = active && !state.ui.files_active;
+        state.ui.files_active = active;
     }
 
     // Consume Enter before drawing the widgets, so the quick filter keeps
     // focus and a selected row's button doesn't turn it into a rename click.
     // Other text boxes (including Deep search and rename) keep their Enter.
     let search_id = ui.make_persistent_id(egui::IdSalt::new("files_search"));
-    let search_has_keys = state.ui.rename.is_none() && ui.memory(|m| m.has_focus(search_id));
-    let list_has_keys =
-        state.ui.rename.is_none() && state.ui.files_active && !ui.ctx().text_edit_focused();
+    let focused = ui.memory(|m| m.focused());
+    let search_has_keys = !modal_open && state.ui.rename.is_none() && focused == Some(search_id);
+    let list_has_keys = !modal_open
+        && state.ui.rename.is_none()
+        && state.ui.files_active
+        && !ui.ctx().text_edit_focused();
     let open_selected = (search_has_keys || list_has_keys)
         && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter));
     if open_selected {
         state.ui.rename_pending = None;
     }
 
-    // Likewise the arrow keys, which move the selection: Up / Down from the
-    // quick filter too, but Left / Right only from the listing, so they still
-    // move the filter's caret. Not while Deep search results stand in for
-    // the listing.
+    // Likewise the arrow keys, which move the selection, or with Shift,
+    // extend it: Up / Down from the quick filter too, but Left / Right only
+    // from the listing, so they still move the filter's caret. Not while
+    // Deep search results stand in for the listing.
     let mut arrows = Vec::new();
     if state.deep_search.is_none() {
         use Key::{ArrowDown, ArrowLeft, ArrowRight, ArrowUp};
         ui.input_mut(|i| {
-            for key in [ArrowUp, ArrowDown, ArrowLeft, ArrowRight] {
+            i.events.retain(|e| {
+                let Event::Key {
+                    key: key @ (ArrowUp | ArrowDown | ArrowLeft | ArrowRight),
+                    pressed: true,
+                    modifiers,
+                    ..
+                } = e
+                else {
+                    return true;
+                };
+                let shift = modifiers.matches_exact(Modifiers::SHIFT);
                 let vertical = matches!(key, ArrowUp | ArrowDown);
-                if list_has_keys || (search_has_keys && vertical) {
-                    let n = i.count_and_consume_key(Modifiers::NONE, key);
-                    arrows.extend(std::iter::repeat_n(key, n));
+                let ours = list_has_keys || (search_has_keys && vertical);
+                if ours && (shift || modifiers.is_none()) {
+                    arrows.push((*key, shift));
+                    return false;
                 }
-            }
+                true
+            });
         });
     }
+
     if !arrows.is_empty() {
         // egui would otherwise also move keyboard focus off the quick filter.
         ui.memory_mut(|m| m.move_focus(egui::FocusDirection::None));
     }
 
+    if list_has_keys && ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::A)) {
+        state.select_all_files();
+        state.ui.rename_pending = None;
+    }
+
+    // Escape selects nothing, as Unselect does. egui has already taken the
+    // keyboard from a text box for it, so from the quick filter one press does
+    // both; a rename box keeps it, to cancel the rename, and an open menu, to
+    // close.
+    if list_has_keys
+        && !state.selection.paths.is_empty()
+        && !egui::Popup::is_any_open(ui.ctx())
+        && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
+    {
+        state.clear_file_selection();
+        state.ui.rename_pending = None;
+    }
+
     ui::panel_header(ui, "Files", &mut state.ui.panel_vis.file_browser);
 
     // The directory being listed, colour-coded like the other panels' paths,
-    // and on pale green when it's bookmarked, as its rows are elsewhere.
+    // and on green when it's bookmarked, as its rows are elsewhere.
     // Wraps rather than widening the panel when it's long. The buttons to its
     // right bookmark it (or remove the bookmark), and do what the `open`
     // command does: show this dir in the OS's file manager.
     let bookmarked = state.dir_bookmarks.iter().any(|p| p == state.cwd());
     let home = state.home.clone();
-    let cwd_job = if bookmarked {
+    let dark = ui.visuals().dark_mode;
+    let cwd_job = if bookmarked && !dark {
         ui::path_job_on(ui, state.cwd(), home.as_deref(), false, BOOKMARKED_TEXT)
     } else {
         ui::path_job(ui, state.cwd(), home.as_deref())
@@ -124,7 +171,7 @@ pub(crate) fn file_browser(state: &mut State, ui: &mut Ui) {
                 let label = egui::Label::new(cwd_job).wrap();
                 if bookmarked {
                     Frame::new()
-                        .fill(BOOKMARKED_FILL)
+                        .fill(bookmarked_fill(dark))
                         .corner_radius(ui.visuals().widgets.inactive.corner_radius)
                         .inner_margin(egui::Margin::symmetric(4, 1))
                         .show(ui, |ui| ui.add(label));
@@ -156,31 +203,35 @@ pub(crate) fn file_browser(state: &mut State, ui: &mut Ui) {
     // walk the per-tab history maintained in `State::change_dir`. Buttons are
     // disabled when there's nowhere to go in that direction.
     let i = state.ui.active_tab;
-    let can_up = state.cwd().parent().is_some();
+    let parent = state.cwd().parent().map(Path::to_path_buf);
     let can_back = !state.ui.nav_back[i].is_empty();
     let can_forward = !state.ui.nav_forward[i].is_empty();
     // Common-destination shortcuts (see [files::shortcuts]): 🏠 Home,
     // ⚙ app data, 🖥 Desktop, 📥 Downloads, 📦 programs, 🖴 root, 🗑 trash.
     // Each is only enabled when the target actually exists, so we never `cd`
     // into a missing dir and push a diagnostic. On Windows, 🖴 is a menu of
-    // drives and 🗑 opens the Recycle Bin in Explorer.
+    // drives and 🗑 opens the Recycle Bin in Explorer. Rows dragged onto ⬆
+    // or a shortcut go to that dir.
 
     let shortcuts = files::shortcuts(home.as_deref());
     let mut go_up = false;
     let mut go_back = false;
     let mut go_forward = false;
     let mut go_to: Option<PathBuf> = None;
+    let mut dropped: Option<FileDrop> = None;
     #[cfg(windows)]
     let mut open_bin = false;
 
     // Wraps so the shortcuts drop to a second row in a narrow panel.
     ui.horizontal_wrapped(|ui| {
-        if ui
-            .add_enabled(can_up, Button::new("⬆"))
-            .on_hover_text("Parent directory")
-            .clicked()
+        let up = ui
+            .add_enabled(parent.is_some(), Button::new("⬆"))
+            .on_hover_text("Parent directory");
+        go_up = up.clicked();
+        if let Some(parent) = &parent
+            && let Some(d) = drop_target(ui, &up, parent)
         {
-            go_up = true;
+            dropped = Some(d);
         }
 
         if ui
@@ -200,13 +251,17 @@ pub(crate) fn file_browser(state: &mut State, ui: &mut Ui) {
         }
 
         for s in shortcuts {
-            let ok = s.dir.as_ref().is_some_and(|d| d.is_dir());
-            if ui
-                .add_enabled(ok, Button::new(s.glyph))
-                .on_hover_text(s.hover)
-                .clicked()
+            let dir = s.dir.filter(|d| d.is_dir());
+            let resp = ui
+                .add_enabled(dir.is_some(), Button::new(s.glyph))
+                .on_hover_text(s.hover);
+            if let Some(dir) = &dir
+                && let Some(d) = drop_target(ui, &resp, dir)
             {
-                go_to = s.dir;
+                dropped = Some(d);
+            }
+            if resp.clicked() {
+                go_to = dir;
             }
         }
 
@@ -251,6 +306,9 @@ pub(crate) fn file_browser(state: &mut State, ui: &mut Ui) {
         });
     }
 
+    if let Some(d) = dropped {
+        state.drop_files(&d.srcs, &d.dest, d.copy, ui.ctx());
+    }
     if go_up {
         state.nav_up();
     } else if go_back {
@@ -263,12 +321,21 @@ pub(crate) fn file_browser(state: &mut State, ui: &mut Ui) {
 
     // Listing filters. Each button is highlighted while the entries it
     // covers are shown. The Hidden attribute is Windows-only, so elsewhere
-    // only the dotfile filter appears. Then Cut / Copy / Paste. Wraps so the
-    // latter drop to a second row in a narrow panel.
-    let has_sel = state.selected_file.is_some();
+    // only the dotfile filter appears. Then Cut / Copy / Paste / Delete, and while
+    // anything's selected, Unselect. Wraps so the latter drop to a second row
+    // in a narrow panel.
+    let has_sel = !state.selection.paths.is_empty();
     let pasting = state.paste.is_some();
+    let busy = pasting || state.deleting.is_some();
     let mut filters_changed = false;
-    let (mut cut, mut copy, mut paste) = (false, false, false);
+
+    let (mut cut, mut copy, mut paste, mut unselect) = (false, false, false, false);
+    let mut delete = list_has_keys
+        && has_sel
+        && !busy
+        && !egui::Popup::is_any_open(ui.ctx())
+        && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Delete));
+
     ui.horizontal_wrapped(|ui| {
         let mut toggle = |ui: &mut Ui, on: &mut bool, label: &str, what: &str| {
             let hover = if *on {
@@ -276,6 +343,7 @@ pub(crate) fn file_browser(state: &mut State, ui: &mut Ui) {
             } else {
                 format!("Hiding {what}. Click to show them.")
             };
+
             if ui
                 .add(Button::selectable(*on, label))
                 .on_hover_text(hover)
@@ -285,6 +353,7 @@ pub(crate) fn file_browser(state: &mut State, ui: &mut Ui) {
                 filters_changed = true;
             }
         };
+
         #[cfg(windows)]
         toggle(
             ui,
@@ -292,6 +361,7 @@ pub(crate) fn file_browser(state: &mut State, ui: &mut Ui) {
             "👁 Hidden",
             "files and folders with the Hidden attribute",
         );
+
         toggle(
             ui,
             &mut state.ui.show_dotfiles,
@@ -300,21 +370,40 @@ pub(crate) fn file_browser(state: &mut State, ui: &mut Ui) {
         );
 
         ui.separator();
+
         cut = ui
-            .add_enabled(has_sel, Button::new("✂ Cut"))
-            .on_hover_text("Cut the selected item, to move it where it's pasted (Ctrl+X)")
+            .add_enabled(has_sel, Button::new("✂"))
+            .on_hover_text("Cut the selected items, to move them where they're pasted (Ctrl+X)")
             .clicked();
+
         copy = ui
-            .add_enabled(has_sel, Button::new("🗐 Copy"))
-            .on_hover_text("Copy the selected item to the clipboard (Ctrl+C)")
+            .add_enabled(has_sel, Button::new("🗐"))
+            .on_hover_text("Copy the selected items to the clipboard (Ctrl+C)")
             .clicked();
+
         paste = ui
-            .add_enabled(!pasting, Button::new("📋 Paste"))
+            .add_enabled(!busy, Button::new("📋"))
             .on_hover_text(
                 "Paste files from the clipboard into this folder (Ctrl+V).                  Works with files copied or cut in the system file manager too.",
             )
             .clicked();
-        if pasting {
+
+        let spacing = ui.spacing().item_spacing.x;
+        ui.spacing_mut().item_spacing.x = 12.0;
+        delete |= ui
+            .add_enabled(has_sel && !busy, delete_button("🗑"))
+            .on_hover_text("Move the selected items to the Recycle Bin / Trash (Delete)")
+            .clicked();
+        ui.spacing_mut().item_spacing.x = spacing;
+
+        // Its space is kept while it's hidden, so it never wraps the row
+        // anew and shifts the listing under the pointer as a click selects.
+        unselect = ui
+            .add_visible(has_sel, Button::new("Unselect"))
+            .on_hover_text("Unselect all items (Esc)")
+            .clicked();
+
+        if busy {
             ui.spinner();
         }
     });
@@ -322,20 +411,36 @@ pub(crate) fn file_browser(state: &mut State, ui: &mut Ui) {
         state.refresh_browser_files();
         let _ = state.save();
     }
+    if cut || copy {
+        state.copy_selected(cut);
+    }
+    if unselect {
+        state.clear_file_selection();
+        state.ui.rename_pending = None;
+    }
+    if delete {
+        state.request_delete_selected();
+    }
 
     // The same from the keyboard, while this pane has it: it was clicked
-    // last, and none of its text boxes (search, rename) has focus. Text
-    // selected in the details pane is left for egui to copy.
-    if state.ui.files_active && !ui.ctx().text_edit_focused() {
-        let text_selected = ui
-            .ctx()
-            .with_plugin(|s: &mut egui::text_selection::LabelSelectionState| s.has_selection())
-            .unwrap_or(false);
+    // last, and no text box elsewhere has taken the keyboard since. Its own
+    // search boxes leave the keys to the files, but text selected in them,
+    // or in the details pane, is copied as usual instead. Since egui only
+    // copies that at the end of the frame, the files wait for the next one
+    // to see whether it did (see `ui::clipboard::capture`).
+    let deep_search_id = ui::deep_search_id();
+    let own_box_focused = focused.is_some_and(|id| id == search_id || id == deep_search_id);
+    if !modal_open
+        && state.ui.files_active
+        && state.ui.rename.is_none()
+        && (own_box_focused || !ui.ctx().text_edit_focused())
+    {
+        let mut paste_key = false;
         ui.input(|i| {
             for e in &i.events {
                 match e {
-                    Event::Cut => cut |= !text_selected,
-                    Event::Copy => copy |= !text_selected,
+                    Event::Cut => state.ui.files_copy_pending = Some(true),
+                    Event::Copy => state.ui.files_copy_pending = Some(false),
                     // egui-winit swallows Ctrl+V's key press, and only sends
                     // a Paste event when there's text on the clipboard, which
                     // there isn't for copied files. So paste on its release.
@@ -344,14 +449,17 @@ pub(crate) fn file_browser(state: &mut State, ui: &mut Ui) {
                         pressed: false,
                         modifiers,
                         ..
-                    } if modifiers.command => paste = true,
+                    } if modifiers.command => paste_key = true,
                     _ => {}
                 }
             }
         });
-    }
-    if cut || copy {
-        state.copy_selected(cut);
+        if state.ui.files_copy_pending.is_some() {
+            ui.ctx().request_repaint();
+        }
+        // In a search box, text on the clipboard was pasted into it.
+        paste |= paste_key
+            && (!own_box_focused || clipboard::get_files().is_ok_and(|f| f.is_some()));
     }
     if paste {
         state.paste_files(ui.ctx());
@@ -367,32 +475,9 @@ pub(crate) fn file_browser(state: &mut State, ui: &mut Ui) {
 
     if search_changed {
         state.ui.rename_pending = None;
-        let first_match = match &state.deep_search {
-            Some(search) => {
-                let needle = state.ui.files_search.to_lowercase();
-                search
-                    .hits
-                    .iter()
-                    .find(|hit| {
-                        hit.path
-                            .strip_prefix(&search.root)
-                            .unwrap_or(&hit.path)
-                            .to_string_lossy()
-                            .to_lowercase()
-                            .contains(&needle)
-                    })
-                    .map(|hit| hit.path.clone())
-            }
-            None => state
-                .ui
-                .browser_files_filter
-                .first()
-                .map(|&i| state.browser_files[i].path.clone()),
-        };
-        if let Some(path) = first_match {
-            state.select_file(&path);
-        } else {
-            state.selected_file = None;
+        match state.shown_files().first().map(|p| p.to_path_buf()) {
+            Some(path) => state.select_file(&path),
+            None => state.clear_file_selection(),
         }
     }
 
@@ -411,10 +496,11 @@ pub(crate) fn file_browser(state: &mut State, ui: &mut Ui) {
 
     ui.separator();
 
+    // A picture only while a single image is selected.
     let image = state
         .selected_file
         .as_ref()
-        .filter(|d| !d.is_folder && viewer::is_image(&d.path))
+        .filter(|d| state.selection.summary.is_none() && !d.is_folder && viewer::is_image(&d.path))
         .map(|d| (d.path.as_path(), d.modified));
     state.file_preview.set(ui.ctx(), image);
 
@@ -427,22 +513,27 @@ pub(crate) fn file_browser(state: &mut State, ui: &mut Ui) {
         .frame(Frame::new().inner_margin(egui::Margin::symmetric(0, 4)))
         .show(ui, |ui| {
             let home = state.home.as_deref();
-            ui::file_details(state.selected_file.as_ref(), home, &state.file_preview, ui);
+            ui::file_details(
+                state.selected_file.as_ref(),
+                state.selection.summary.as_ref(),
+                home,
+                &state.file_preview,
+                ui,
+            );
         });
 
     // While a Deep search is set, its results stand in for the listing.
     if let Some(search) = &state.deep_search {
-        let selected = state.selected_file.as_ref().map(|d| d.path.as_path());
         let home = state.home.as_deref();
         let action = ui::deep_search_results(
             search,
             &state.ui.files_search,
-            selected,
+            &state.selection.paths,
             &state.dir_bookmarks,
             home,
             ui,
         );
-        ui::apply_action(state, action);
+        apply_row_action(state, ui, action);
     } else {
         file_list(state, ui, search_changed, arrow_moved);
     }
@@ -451,31 +542,96 @@ pub(crate) fn file_browser(state: &mut State, ui: &mut Ui) {
     if divider.end(ui, details.response.rect, &mut state.ui.files_details_split) {
         let _ = state.save();
     }
+
+    drag_preview(ui);
+}
+
+fn delete_button(label: &str) -> Button<'_> {
+    Button::new(RichText::new(label).color(Color32::WHITE)).fill(Color32::from_rgb(180, 45, 45))
+}
+
+/// Shown outside the pane so it remains available if the pane is hidden.
+pub(super) fn delete_popup(state: &mut State, ctx: &egui::Context) {
+    let Some(paths) = &state.ui.delete_pending else {
+        return;
+    };
+    let destination = if cfg!(windows) {
+        "Recycle Bin"
+    } else {
+        "Trash"
+    };
+    let mut confirm = false;
+    let mut cancel = false;
+    let modal = Modal::new(egui::Id::new("delete_files_popup")).show(ctx, |ui| {
+        ui::scale_panel_fonts(ui, state.gui_font_size);
+        ui.set_width(360.0_f32.min((ctx.content_rect().width() - 48.0).max(100.0)));
+        ui.heading("Delete selected items?");
+
+        let items = ui::plural(paths.len(), "item", "items");
+        ui.label(format!("Move {items} to the {destination}?"));
+        ui.add_space(4.0);
+
+        ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
+            for path in paths {
+                ui.label(render_with_tilde(path, state.home.as_deref()));
+            }
+        });
+
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            let delete = ui.add(delete_button("Delete"));
+            let keep = ui.button("Cancel");
+            // Keep keyboard focus in the modal, starting on Cancel.
+            if !delete.has_focus() && !keep.has_focus() {
+                keep.request_focus();
+            }
+            confirm = delete.clicked();
+            cancel = keep.clicked();
+        });
+    });
+
+    if confirm {
+        state.confirm_delete(ctx);
+    } else if cancel || modal.should_close() {
+        state.ui.delete_pending = None;
+    }
+
+    if state.ui.delete_pending.is_none() {
+        ctx.request_repaint();
+    }
 }
 
 /// Move the Files selection by `arrows`, each as [arrow_target] says, in the
-/// listing as last laid out. Returns whether it moved.
-fn move_selection(state: &mut State, arrows: &[Key]) -> bool {
-    if arrows.is_empty() {
-        return false;
+/// listing as last laid out; those with Shift (`true`) extend it instead,
+/// as Shift+click does. Returns whether it moved.
+fn move_selection(state: &mut State, arrows: &[(Key, bool)]) -> bool {
+    let mut moved = false;
+    for &(key, shift) in arrows {
+        let rows = &state.ui.browser_files_filter;
+        let path_at = |k: usize| &state.browser_files[rows[k]].path;
+        let from = state
+            .selected_file
+            .as_ref()
+            .and_then(|d| (0..rows.len()).find(|&k| *path_at(k) == d.path));
+
+        let to = arrow_target(key, from, rows.len(), state.ui.files_columns);
+        let Some(to) = to.filter(|&to| Some(to) != from) else {
+            continue;
+        };
+
+        let path = path_at(to).clone();
+        if shift {
+            state.select_range(&path, false);
+        } else {
+            state.select_file(&path);
+        }
+        moved = true;
     }
-    let rows = &state.ui.browser_files_filter;
-    let path_at = |k: usize| &state.browser_files[rows[k]].path;
-    let from = state
-        .selected_file
-        .as_ref()
-        .and_then(|d| (0..rows.len()).find(|&k| *path_at(k) == d.path));
-    let mut at = from;
-    for &key in arrows {
-        at = arrow_target(key, at, rows.len(), state.ui.files_columns).or(at);
+
+    if moved {
+        state.ui.rename_pending = None;
     }
-    let Some(to) = at.filter(|&to| Some(to) != from) else {
-        return false;
-    };
-    let path = path_at(to).clone();
-    state.select_file(&path);
-    state.ui.rename_pending = None;
-    true
+    moved
 }
 
 /// Where an arrow `key` moves the selection in a list of `len` items laid
@@ -530,11 +686,10 @@ fn file_list(state: &mut State, ui: &mut Ui, search_changed: bool, arrow_moved: 
         }
     }
 
-    let selected = state.selected_file.as_ref().map(|d| d.path.as_path());
+    let selected = &state.selection.paths;
+    let lead = state.selected_file.as_ref().map(|d| d.path.as_path());
     let dark = ui.visuals().dark_mode;
-    let mut action: Option<ListAction> = None;
-    // A click on the selected row, which may become a rename (see above).
-    let mut clicked_selected: Option<PathBuf> = None;
+    let mut action: Option<RowAction> = None;
     // Set when the rename box loses focus: `true` to apply the new name,
     // `false` if Escape cancelled it. Kept apart from `action` so a click on
     // another row in the same frame can't drop the rename.
@@ -544,6 +699,12 @@ fn file_list(state: &mut State, ui: &mut Ui, search_changed: bool, arrow_moved: 
         .id_salt("file_browser_scroll")
         .auto_shrink([false, false])
         .show(ui, |ui| {
+            // Under the rows, so it only gets clicks between and below them.
+            if let Some(a) = background_action(ui) {
+                action = Some(a);
+            }
+            drag_autoscroll(ui);
+
             // Rows butt up against each other, like a file manager's list.
             ui.spacing_mut().item_spacing.y = 0.0;
 
@@ -568,21 +729,20 @@ fn file_list(state: &mut State, ui: &mut Ui, search_changed: bool, arrow_moved: 
                     f.disp_name.clone()
                 };
 
-                let is_selected = selected == Some(f.path.as_path());
-                // A bookmarked folder is drawn on the same pale green as in
+                let is_selected = selected.contains(&f.path);
+                // A bookmarked folder is drawn on the same green as in
                 // Recent dirs, unless it's selected so the selection shows.
                 let bookmarked =
                     f.is_folder && !is_selected && state.dir_bookmarks.contains(&f.path);
 
                 let mut rich = RichText::new(text).monospace();
                 if f.is_folder {
-                    if bookmarked {
+                    if bookmarked && !dark {
                         rich = rich.color(BOOKMARKED_TEXT);
                     }
-                    // Same colour this folder has in any path shown elsewhere,
-                    // from the light-background palette on the green.
+                    // Same colour this folder has in any path shown elsewhere.
                     let path = render_with_tilde(&f.path, home.as_deref());
-                    if let Some(c) = path_color::last_color(&path, Some("~"), dark && !bookmarked) {
+                    if let Some(c) = path_color::last_color(&path, Some("~"), dark) {
                         rich = rich.color(c);
                     }
                 } else if f.is_executable {
@@ -594,35 +754,22 @@ fn file_list(state: &mut State, ui: &mut Ui, search_changed: bool, arrow_moved: 
                 // details pane shows the full name.
                 let mut row = Button::selectable(is_selected, rich)
                     .truncate()
+                    .sense(Sense::click_and_drag())
                     .min_size(egui::vec2(ui.available_width(), 0.0));
                 if bookmarked {
-                    row = row.fill(BOOKMARKED_FILL).frame_when_inactive(true);
+                    row = row.fill(bookmarked_fill(dark)).frame_when_inactive(true);
                 }
                 let resp = ui.add(row);
-                if is_selected && search_changed {
+                let is_lead = lead == Some(f.path.as_path());
+                if is_lead && search_changed {
                     resp.scroll_to_me(Some(Align::TOP));
-                } else if is_selected && arrow_moved {
+                } else if is_lead && arrow_moved {
                     resp.scroll_to_me(None);
                 }
 
-                // A double-click's first click has already selected the row.
-                // Then a folder navigates into it; a file opens with its
-                // associated program, just like a desktop file manager. A
-                // middle click opens a folder in a new tab.
-                if f.is_folder && resp.middle_clicked() {
-                    action = Some(ListAction::NewTabDir(f.path.clone()));
-                } else if resp.double_clicked() {
-                    action = Some(if f.is_folder {
-                        ListAction::ChangeDir(f.path.clone())
-                    } else {
-                        ListAction::OpenFile(f.path.clone())
-                    });
-                } else if resp.clicked() {
-                    if is_selected {
-                        clicked_selected = Some(f.path.clone());
-                    } else {
-                        action = Some(ListAction::SelectFile(f.path.clone()));
-                    }
+                let only_selected = is_selected && selected.len() == 1;
+                if let Some(a) = row_action(ui, &resp, &f.path, f.is_folder, only_selected) {
+                    action = Some(a);
                 }
             };
 
@@ -640,42 +787,269 @@ fn file_list(state: &mut State, ui: &mut Ui, search_changed: bool, arrow_moved: 
         Some(false) => state.ui.rename = None,
         None => {}
     }
-    if let Some(path) = clicked_selected {
-        state.ui.rename_pending = Some((path, now));
-        ui.ctx().request_repaint_after_secs(dbl_click_delay as f32);
-    }
-
-    ui::apply_action(state, action);
+    apply_row_action(state, ui, action);
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// What a click, drag or drop on a Files row asks for (in the listing, or
+/// Deep search results), besides what the other lists' rows can.
+pub(super) enum RowAction {
+    /// Open the row, go into it, or open it in a new tab.
+    List(ListAction),
+    /// A plain click: select just this row.
+    Select(PathBuf),
+    /// A plain click on the only row selected, which renames it once it's
+    /// clear the click isn't the first of a double-click.
+    ClickSelected(PathBuf),
+    /// Ctrl+click: add the row to the selection, or take it out.
+    Toggle(PathBuf),
+    /// Shift+click: select from the last row clicked to this one, adding to
+    /// what's selected if Ctrl is held too (`true`).
+    Range(PathBuf, bool),
+    /// A click on the background: select nothing.
+    Deselect,
+    /// A drag of this row began, taking the rest of the selection with it
+    /// if it's selected.
+    Drag(PathBuf),
+    Drop(FileDrop),
+}
 
-    #[test]
-    fn arrows_follow_the_layout() {
-        use Key::{ArrowDown as D, ArrowLeft as L, ArrowRight as R, ArrowUp as U};
-        // 8 items in 3 columns, filled down: 0 3 6 / 1 4 7 / 2 5.
-        let go = |key, from| arrow_target(key, Some(from), 8, 3);
-        assert_eq!(go(D, 1), Some(2));
-        assert_eq!(go(D, 2), Some(3), "on to the top of the next column");
-        assert_eq!(go(D, 7), Some(0), "wraps at the end");
-        assert_eq!(go(U, 0), Some(7), "and at the start");
-        assert_eq!(go(R, 1), Some(4));
-        assert_eq!(go(L, 4), Some(1));
-        assert_eq!(go(L, 1), None, "no column to the left");
-        assert_eq!(go(R, 7), None, "nor to the right");
-        assert_eq!(go(R, 5), Some(7), "the last item of a shorter column");
-
-        // One column: Left and Right go nowhere.
-        assert_eq!(arrow_target(R, Some(0), 8, 1), None);
-        assert_eq!(arrow_target(L, Some(5), 8, 1), None);
-        assert_eq!(arrow_target(D, Some(5), 8, 1), Some(6));
-
-        // Nothing selected yet; nothing to select.
-        assert_eq!(arrow_target(D, None, 8, 3), Some(0));
-        assert_eq!(arrow_target(R, None, 8, 3), Some(0));
-        assert_eq!(arrow_target(U, None, 8, 3), Some(7));
-        assert_eq!(arrow_target(D, None, 0, 3), None);
+/// What `resp`, the Files row for `path`, was clicked, dragged or dropped
+/// on for. `only_selected` says it's the one row selected. A folder takes
+/// rows dropped on it (see [drop_target]).
+pub(super) fn row_action(
+    ui: &Ui,
+    resp: &Response,
+    path: &Path,
+    is_folder: bool,
+    only_selected: bool,
+) -> Option<RowAction> {
+    if is_folder && let Some(drop) = drop_target(ui, resp, path) {
+        return Some(RowAction::Drop(drop));
     }
+    let path = path.to_path_buf();
+    if resp.drag_started_by(egui::PointerButton::Primary) {
+        return Some(RowAction::Drag(path));
+    }
+    // A double-click's first click has already selected the row. Then a
+    // folder navigates into it; a file opens with its associated program,
+    // just like a desktop file manager. A middle click opens a folder in a
+    // new tab.
+    let action = if is_folder && resp.middle_clicked() {
+        RowAction::List(ListAction::NewTabDir(path))
+    } else if resp.double_clicked() {
+        RowAction::List(if is_folder {
+            ListAction::ChangeDir(path)
+        } else {
+            ListAction::OpenFile(path)
+        })
+    } else if resp.clicked() {
+        let m = ui.input(|i| i.modifiers);
+        if m.shift {
+            RowAction::Range(path, m.command)
+        } else if m.command {
+            RowAction::Toggle(path)
+        } else if only_selected {
+            RowAction::ClickSelected(path)
+        } else {
+            RowAction::Select(path)
+        }
+    } else {
+        return None;
+    };
+    Some(action)
+}
+
+/// Register the visible part of a Files list's `ui` (a [ScrollArea]'s
+/// contents) for clicks before its rows, so it gets those that miss them:
+/// a plain one selects nothing, as in a file manager.
+pub(super) fn background_action(ui: &Ui) -> Option<RowAction> {
+    let resp = ui.interact(ui.clip_rect(), ui.id().with("files_background"), Sense::click());
+    let plain = ui.input(|i| !i.modifiers.command && !i.modifiers.shift);
+    (resp.clicked() && plain).then_some(RowAction::Deselect)
+}
+
+/// Do what a click, drag or drop on a Files row asked for.
+pub(super) fn apply_row_action(state: &mut State, ui: &Ui, action: Option<RowAction>) {
+    let Some(action) = action else {
+        return;
+    };
+    match action {
+        RowAction::List(a) => ui::apply_action(state, Some(a)),
+        RowAction::Select(p) => state.select_file(&p),
+        RowAction::ClickSelected(p) => {
+            // Not if the click only made the panel active, as in a file
+            // manager, nor in Deep search results, which can't be renamed in
+            // place.
+            if state.deep_search.is_none() && !state.ui.files_activating_press {
+                let now = ui.input(|i| i.time);
+                let delay = ui.ctx().options(|o| o.input_options.max_double_click_delay);
+                state.ui.rename_pending = Some((p, now));
+                ui.ctx().request_repaint_after_secs(delay as f32);
+            }
+        }
+        RowAction::Toggle(p) => state.toggle_file(&p),
+        RowAction::Range(p, add) => state.select_range(&p, add),
+        RowAction::Deselect => state.clear_file_selection(),
+        RowAction::Drag(p) => {
+            // An unselected row is selected first, as in a file manager: on
+            // its own, or with Ctrl, along with the rest.
+            if !state.selection.paths.contains(&p) {
+                if ui.input(|i| i.modifiers.command) {
+                    state.toggle_file(&p);
+                } else {
+                    state.select_file(&p);
+                }
+            }
+            state.ui.rename_pending = None;
+            let paths = state.selected_paths();
+            if !paths.is_empty() {
+                DragAndDrop::set_payload(ui.ctx(), FileDrag(paths));
+            }
+        }
+        RowAction::Drop(d) => state.drop_files(&d.srcs, &d.dest, d.copy, ui.ctx()),
+    }
+}
+
+/// The drag-and-drop payload while Files rows are dragged: their paths.
+struct FileDrag(Vec<PathBuf>);
+
+/// Files rows let go of over a folder (see [drop_target]).
+pub(super) struct FileDrop {
+    srcs: Vec<PathBuf>,
+    dest: PathBuf,
+    /// Copy them there, rather than move them.
+    copy: bool,
+}
+
+/// What dropping the rows being dragged would do where the pointer is, as
+/// [drop_target] found this frame, for [drag_preview].
+#[derive(Clone, Default)]
+struct DropHover {
+    /// The folder's name.
+    name: String,
+    copy: bool,
+    /// `false` when it's one of them, or inside one.
+    ok: bool,
+}
+
+fn drop_hover_id() -> egui::Id {
+    egui::Id::new("files_drop_hover")
+}
+
+/// Let `resp`, a folder row or a button that goes to `dest`, take Files rows
+/// dropped on it: while they're held over it, it's outlined if they can go
+/// there, and [drag_preview] says what letting go does. Returns the drop
+/// once they're let go of. As in a file manager, they're moved there, or
+/// copied when it's on another drive; Ctrl (Option on a Mac) copies anyway,
+/// and Shift (Cmd) moves anyway.
+pub(super) fn drop_target(ui: &Ui, resp: &Response, dest: &Path) -> Option<FileDrop> {
+    let drag = resp.dnd_hover_payload::<FileDrag>()?;
+    // Not into itself, or one of the folders being dragged.
+    let ok = !drag.0.iter().any(|src| dest.starts_with(src));
+    let m = ui.input(|i| i.modifiers);
+    let mac = ui.ctx().os() == egui::os::OperatingSystem::Mac;
+    let (copy_key, move_key) = if mac { (m.alt, m.mac_cmd) } else { (m.ctrl, m.shift) };
+    let copy = copy_key
+        || (!move_key && drag.0.first().is_some_and(|src| !files::same_volume(src, dest)));
+    let name = dest
+        .file_name()
+        .map_or_else(|| dest.display().to_string(), |n| n.to_string_lossy().into_owned());
+    ui.ctx().data_mut(|d| d.insert_temp(drop_hover_id(), DropHover { name, copy, ok }));
+    if !ok {
+        return None;
+    }
+    let visuals = ui.visuals();
+    let stroke = Stroke::new(2.0, visuals.widgets.active.fg_stroke.color);
+    let radius = visuals.widgets.hovered.corner_radius;
+    ui.painter().rect_stroke(resp.rect, radius, stroke, StrokeKind::Inside);
+
+    let drag = resp.dnd_release_payload::<FileDrag>()?;
+    Some(FileDrop {
+        srcs: drag.0.clone(),
+        dest: dest.to_path_buf(),
+        copy,
+    })
+}
+
+/// While Files rows are dragged: a note by the pointer of what letting go
+/// of them would do there, and a cursor to match.
+fn drag_preview(ui: &Ui) {
+    let ctx = ui.ctx();
+    // Taken every frame, so it's only ever this frame's.
+    let hover = ctx.data_mut(|d| d.remove_temp::<DropHover>(drop_hover_id()));
+    let Some(drag) = DragAndDrop::payload::<FileDrag>(ctx) else {
+        return;
+    };
+
+    let Some(pos) = ctx.pointer_latest_pos() else {
+        return;
+    };
+
+    let what = match drag.0.as_slice() {
+        [one] => one
+            .file_name()
+            .map_or_else(|| one.display().to_string(), |n| n.to_string_lossy().into_owned()),
+        many => format!("{} items", many.len()),
+    };
+
+    let text = match hover {
+        Some(h) if h.ok => {
+            let verb = if h.copy { "Copy" } else { "Move" };
+            let icon = if h.copy {
+                egui::CursorIcon::Copy
+            } else {
+                egui::CursorIcon::Grabbing
+            };
+            ctx.set_cursor_icon(icon);
+            format!("{verb} {what} to {}", h.name)
+        }
+        Some(h) => {
+            ctx.set_cursor_icon(egui::CursorIcon::NoDrop);
+            format!("Can't move {} into itself", h.name)
+        }
+        None => what,
+    };
+
+    Area::new(egui::Id::new("files_drag_preview"))
+        .order(egui::Order::Tooltip)
+        .interactable(false)
+        .fixed_pos(pos + egui::vec2(16.0, 16.0))
+        .show(ctx, |ui| {
+            Frame::popup(ui.style()).show(ui, |ui| {
+                ui.label(text);
+            });
+        });
+}
+
+/// Scroll a Files list's `ui` (a [ScrollArea]'s contents) while rows are
+/// dragged near its top or bottom edge, the faster the closer, so they can
+/// be dropped on folders out of view.
+pub(super) fn drag_autoscroll(ui: &Ui) {
+    if !DragAndDrop::has_payload_of_type::<FileDrag>(ui.ctx()) {
+        return;
+    }
+
+    let Some(pos) = ui.ctx().pointer_latest_pos() else {
+        return;
+    };
+
+    let view = ui.clip_rect();
+    let edge = 1.5 * ui.text_style_height(&TextStyle::Monospace);
+    if !view.x_range().contains(pos.x) {
+        return;
+    }
+
+    // How far into the band along an edge (or past it) the pointer is.
+    let depth = if (view.top() - edge..view.top() + edge).contains(&pos.y) {
+        view.top() + edge - pos.y
+    } else if (view.bottom() - edge..view.bottom() + edge).contains(&pos.y) {
+        view.bottom() - edge - pos.y
+    } else {
+        return;
+    };
+
+    let dt = ui.input(|i| i.stable_dt).min(0.1);
+
+    ui.scroll_with_delta(egui::vec2(0.0, 12.0 * depth * dt));
+    ui.ctx().request_repaint();
 }

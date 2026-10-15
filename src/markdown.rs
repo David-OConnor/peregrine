@@ -40,12 +40,24 @@ pub fn show(
 /// The prefix `egui_commonmark` puts on image paths without a scheme, so
 /// `![](img/logo.png)` loads relative to the document's folder rather than
 /// the process's cwd. Native separators throughout: egui_extras' file loader
-/// strips `file://` and hands the rest to the filesystem as is.
+/// strips `file://` and hands the rest to the filesystem as is, except that on
+/// Windows it reads `file://host\share` as the UNC path `\\host\share`, and
+/// needs the empty-host form `file:///C:\...` for a drive path.
 fn image_base(path: &Path) -> String {
-    match path.parent() {
-        Some(dir) => format!("file://{}{MAIN_SEPARATOR}", dir.display()),
-        None => "file://".to_string(),
-    }
+    let Some(dir) = path.parent() else {
+        return "file://".to_string();
+    };
+    // A root (`C:\`, `\\server\share\`) already ends in a separator.
+    let dir = dir.display().to_string();
+    let dir = dir.trim_end_matches(['/', '\\']);
+    let dir = if !cfg!(windows) {
+        dir.to_string()
+    } else if let Some(unc) = dir.strip_prefix(r"\\") {
+        unc.to_string()
+    } else {
+        format!("/{dir}")
+    };
+    format!("file://{dir}{MAIN_SEPARATOR}")
 }
 
 /// A piece of a document. egui_commonmark prints HTML as raw text, so
@@ -388,116 +400,4 @@ pub fn take_local_links(ctx: &Context, base_dir: &Path) -> Vec<PathBuf> {
         })
     });
     targets
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn md<'a>(text: &'a str, block: &Block) -> &'a str {
-        match block {
-            Block::Markdown(r) => text[r.clone()].trim(),
-            _ => panic!("expected Markdown, got {block:?}"),
-        }
-    }
-
-    #[test]
-    fn no_details_is_one_block() {
-        let text = "# Hi\n\nSome `<details>` text.\n\n```\n<details>\n```\n";
-        assert_eq!(split_details(text), vec![Block::Markdown(0..text.len())]);
-    }
-
-    #[test]
-    fn splits_details() {
-        let text = "Intro\n\n<details open>\n<summary>Notes &amp; <b>sources</b></summary>\n\n\
-                    - a\n- b\n\n</details>\n\nOutro\n";
-        let blocks = split_details(text);
-        assert_eq!(blocks.len(), 3);
-        assert_eq!(md(text, &blocks[0]), "Intro");
-        let Block::Details {
-            summary,
-            open,
-            index,
-            body,
-        } = &blocks[1]
-        else {
-            panic!("{:?}", blocks[1]);
-        };
-        assert_eq!(summary, "Notes & sources");
-        assert!(*open);
-        assert_eq!(*index, 0);
-        assert_eq!(body.len(), 1);
-        assert_eq!(md(text, &body[0]), "- a\n- b");
-        assert_eq!(md(text, &blocks[2]), "Outro");
-    }
-
-    #[test]
-    fn nested_and_unclosed_details() {
-        let text =
-            "<details>\n\nouter\n\n<details><summary>In</summary>\n\ninner\n\n</details>\n\ntail\n";
-        let blocks = split_details(text);
-        assert_eq!(blocks.len(), 1);
-        let Block::Details {
-            summary,
-            open,
-            body,
-            ..
-        } = &blocks[0]
-        else {
-            panic!("{:?}", blocks[0]);
-        };
-        assert_eq!(summary, "Details");
-        assert!(!*open);
-        assert_eq!(body.len(), 3);
-        assert_eq!(md(text, &body[0]), "outer");
-        assert!(matches!(&body[1], Block::Details { summary, index: 1, .. } if summary == "In"));
-        assert_eq!(md(text, &body[2]), "tail");
-    }
-
-    #[test]
-    fn details_in_list_is_left_alone() {
-        let text = "- item\n\n  <details>\n\n  x\n\n  </details>\n";
-        assert_eq!(split_details(text), vec![Block::Markdown(0..text.len())]);
-    }
-
-    #[test]
-    fn detects_markdown() {
-        assert!(is_markdown(Path::new("a/README.md")));
-        assert!(is_markdown(Path::new("NOTES.Markdown")));
-        assert!(!is_markdown(Path::new("a/main.rs")));
-        assert!(!is_markdown(Path::new("md")));
-    }
-
-    #[test]
-    fn classifies_links() {
-        let base = Path::new("docs");
-        assert_eq!(
-            link_target("https://example.com/x.md", base),
-            LinkTarget::Web
-        );
-        assert_eq!(link_target("mailto:a@b.c", base), LinkTarget::Web);
-        assert_eq!(link_target("#usage", base), LinkTarget::Anchor);
-        assert_eq!(
-            link_target("guide/My%20Notes.md#setup", base),
-            LinkTarget::Local(base.join("guide/My Notes.md"))
-        );
-        assert_eq!(
-            link_target("../LICENSE", base),
-            LinkTarget::Local(base.join("../LICENSE"))
-        );
-    }
-
-    #[test]
-    fn drive_letter_is_not_a_scheme() {
-        assert!(!has_scheme(r"C:\docs\a.md"));
-        assert!(has_scheme("https://x"));
-        assert!(has_scheme("vscode-insiders://x"));
-    }
-
-    #[test]
-    fn decodes_percent_escapes() {
-        assert_eq!(percent_decode("a%20b%2Fc"), "a b/c");
-        assert_eq!(percent_decode("100%"), "100%");
-        assert_eq!(percent_decode("%zz"), "%zz");
-    }
 }

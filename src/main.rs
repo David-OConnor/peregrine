@@ -33,6 +33,9 @@ use crate::{
     util::handle_cmd,
 };
 
+/// The application version, taken from Cargo.toml's `[package] version`.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 #[derive(Clone, Copy, PartialEq)]
 pub enum OutType {
     Prompt,
@@ -264,6 +267,10 @@ fn main() {
         options,
         Box::new(|cc| {
             ui::install_fonts(&cc.egui_ctx);
+            // Without a saved choice, egui follows the OS theme.
+            if let Some(dark) = state.dark_mode {
+                cc.egui_ctx.set_theme(state::theme(dark));
+            }
             Ok(Box::new(state))
         }),
     )

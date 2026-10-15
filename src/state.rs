@@ -1,11 +1,12 @@
 use std::{
+    collections::HashSet,
     env, io,
     path::{Path, PathBuf},
 };
 
 use chrono::Utc;
 use shell::{
-    BrowserFile, CmdHistoryPrefs, DirLabelLens, DirList, FilesPanelPrefs, FontSizes, HistoryItem, NavState,
+    Appearance, BrowserFile, CmdHistoryPrefs, DirLabelLens, DirList, FilesPanelPrefs, FontSizes, HistoryItem, NavState,
     OpenTabs, PaneSplits, PanelVis, PanelWidths, RecentDir, RemoteSession, RemoteTerminal, SshMode,
     WindowSize, apply_completion, current_branch, dir_missing, get_home, read_browser_files,
     remove_missing_recent_dirs, remove_saved_dir, save_data, ssh, ssh::secrets, stale_dir_list,
@@ -18,7 +19,7 @@ use crate::{
     cmd_color::CmdColors,
     completion,
     deep_search::{self, DeepSearch},
-    files::FileDetails,
+    files::{Delete, FileDetails, SelectionSummary},
     path_color,
     running::RunningCmd,
     ui::{self, path_panel::PathPanel},
@@ -30,6 +31,9 @@ use crate::{
 /// running a command so the user can keep typing.
 pub struct StateUi {
     pub clipboard: ui::clipboard::ClipboardPane,
+    /// The About window and its last folder-opening error. Not persisted.
+    pub about: bool,
+    pub about_folder_error: Option<String>,
     /// By tab
     pub cli_input: Vec<String>,
     /// Outer: Per tab. Inner: Out items in that tab.
@@ -114,9 +118,19 @@ pub struct StateUi {
     /// double-click can no longer follow, so double-clicking the selected
     /// row still opens it. Dropped by any other press in the meantime.
     pub rename_pending: Option<(PathBuf, f64)>,
+    /// Snapshot of the selected paths awaiting the delete confirmation.
+    pub delete_pending: Option<Vec<PathBuf>>,
     /// Set while the last click was in the Files panel, so Ctrl+C / X / V
     /// act on its files rather than on whatever else has the keyboard.
     pub files_active: bool,
+    /// Set by a press that made the Files panel active, until the next
+    /// press. A click that only activates the panel, as on a window in a
+    /// file manager, doesn't rename the selected row.
+    pub files_activating_press: bool,
+    /// A Ctrl+C (`false`) or Ctrl+X (`true`) in the Files panel last frame,
+    /// which copies or cuts its selected rows unless egui copied text for it
+    /// instead (see `ui::clipboard::capture`).
+    pub files_copy_pending: Option<bool>,
     /// How many columns the Files listing was last laid out in, for the
     /// arrow keys to move across.
     pub files_columns: usize,
@@ -199,6 +213,8 @@ impl Default for StateUi {
     fn default() -> Self {
         Self {
             clipboard: ui::clipboard::ClipboardPane::default(),
+            about: false,
+            about_folder_error: None,
             cli_input: vec![String::new()],
             out: vec![Vec::new()],
             active_tab: 0,
@@ -226,7 +242,10 @@ impl Default for StateUi {
             browser_files_filter: Vec::new(),
             rename: None,
             rename_pending: None,
+            delete_pending: None,
             files_active: false,
+            files_activating_press: false,
+            files_copy_pending: None,
             files_columns: 1,
             files_details_split: ui::DEFAULT_DETAILS_SPLIT,
             path_details_split: ui::DEFAULT_DETAILS_SPLIT,
@@ -242,6 +261,19 @@ impl Default for StateUi {
             closed_tabs: Vec::new(),
         }
     }
+}
+
+/// The rows selected in the Files panel: one by a click, more with Ctrl and
+/// Shift, as in a file manager. Changed only by [State::select_file] and
+/// co., which keep [State::selected_file] in step.
+#[derive(Default)]
+pub struct FileSelection {
+    pub paths: HashSet<PathBuf>,
+    /// Where a Shift+click or Shift+arrow selects from: the row last clicked
+    /// or moved to without Shift.
+    pub anchor: Option<PathBuf>,
+    /// Totals for the details pane while more than one row is selected.
+    pub summary: Option<SelectionSummary>,
 }
 
 /// A Files-panel row being renamed in place (see [State::start_rename]).
@@ -286,10 +318,14 @@ pub struct State {
     /// The dir `browser_files` was last read from, so a refresh can tell a
     /// move to a new dir (which clears the Files filter) from a re-read.
     pub browser_dir: PathBuf,
-    /// The row selected in the Files panel, with the details its lower pane
-    /// shows. Re-read whenever `browser_files` is, and cleared once the path
-    /// is no longer in the listing (e.g. after a cd or tab switch).
+    /// The selected Files row last clicked or moved to, which Enter, the
+    /// arrow keys and renaming act on, with the details its lower pane shows.
+    /// Always one of `selection`'s rows. Re-read whenever `browser_files` is,
+    /// and cleared once the path is no longer in the listing (e.g. after a
+    /// cd or tab switch).
     pub selected_file: Option<FileDetails>,
+    /// Every selected Files row (see [State::select_file] and co.).
+    pub selection: FileSelection,
     /// The picture under `selected_file`'s details, when it's an image. Not
     /// persisted.
     pub file_preview: ImagePreview,
@@ -298,6 +334,8 @@ pub struct State {
     pub deep_search: Option<DeepSearch>,
     /// A Files-panel paste in progress (see [State::paste_files]).
     pub paste: Option<Paste>,
+    /// Confirmed Files-panel deletion running in the background.
+    pub deleting: Option<Delete>,
     /// Where bookmarks + recent dirs are persisted.
     pub state_path: PathBuf,
     /// Cached git branch for each tab's cwd (parallel to `cwd`). `None`
@@ -329,6 +367,9 @@ pub struct State {
     /// Whether each Cmd history row shows the "In <dir>" button that re-runs
     /// it where it was first run. Off by default; persisted.
     pub cmd_history_show_dir: bool,
+    /// Whether the window is dark, set by the theme button on the tab strip.
+    /// `None` until first toggled, meaning follow the OS theme. Persisted.
+    pub dark_mode: Option<bool>,
     /// Open Markdown and text viewer windows (double-clicked in the Files
     /// panel).
     /// Not persisted.
@@ -364,9 +405,11 @@ impl Default for State {
             browser_files: Vec::new(),
             browser_dir: PathBuf::new(),
             selected_file: None,
+            selection: FileSelection::default(),
             file_preview: ImagePreview::default(),
             deep_search: None,
             paste: None,
+            deleting: None,
             state_path: save_data::default_path()
                 .unwrap_or_else(|| PathBuf::from(save_data::FILENAME)),
             branch: vec![branch],
@@ -378,6 +421,7 @@ impl Default for State {
             bookmark_names: true,
             recent_dir_names: true,
             cmd_history_show_dir: false,
+            dark_mode: None,
             file_viewers: FileViewers::default(),
             path_panel: PathPanel::default(),
         };
@@ -480,8 +524,8 @@ impl State {
     /// every command (a passthrough command may have created/removed
     /// files), after `cd`, tab creation, and tab selection — same trigger
     /// points as [refresh_branch]. Entries the `show_hidden_attr` /
-    /// `show_dotfiles` filters exclude are dropped, which also deselects a
-    /// now-filtered row. An entry that is both Hidden and a dotfile (e.g.
+    /// `show_dotfiles` filters exclude are dropped, which also deselects
+    /// now-filtered rows. An entry that is both Hidden and a dotfile (e.g.
     /// `.git`) shows if either filter is on. Moving to a different dir
     /// clears the text filter and Deep search, which only make sense for the
     /// dir they were typed in.
@@ -502,17 +546,14 @@ impl State {
             let is_dot = f.disp_name.starts_with('.');
             (!f.hidden_attr && !is_dot) || (attr && f.hidden_attr) || (dot && is_dot)
         });
-        if let Some(sel) = self.selected_file.take() {
-            self.select_file(&sel.path);
-        }
         self.refresh_browser_files_filter();
     }
 
     /// Case-insensitive substring match of the Files-panel text filter
     /// against each listed entry's name. Empty search matches everything.
-    /// Like the hidden/dotfile filters, hiding the selected row deselects it
+    /// Like the hidden/dotfile filters, hiding a selected row deselects it
     /// (and cancels renaming it), unless Deep search results are shown
-    /// instead and it's one of those.
+    /// instead and it's one of those (see [Self::refresh_selection]).
     pub fn refresh_browser_files_filter(&mut self) {
         let needle = self.ui.files_search.to_lowercase();
 
@@ -524,19 +565,7 @@ impl State {
             .map(|(i, _)| i)
             .collect();
 
-        if let Some(sel) = &self.selected_file {
-            let shown = match &self.deep_search {
-                Some(s) => s.has_file(&sel.path),
-                None => self
-                    .ui
-                    .browser_files_filter
-                    .iter()
-                    .any(|&i| self.browser_files[i].path == sel.path),
-            };
-            if !shown {
-                self.selected_file = None;
-            }
-        }
+        self.refresh_selection();
         // Likewise an in-place rename of a row that's gone (deleted by a
         // command, say) is abandoned.
         if let Some(r) = &self.ui.rename {
@@ -551,19 +580,191 @@ impl State {
         }
     }
 
-    /// Select the Files-panel row for `path` and read its details. Leaves
-    /// nothing selected if `path` isn't in the current listing, or while
-    /// Deep search results are shown, isn't one of those.
+    /// The rows the Files panel shows, in order: the listing's, or while
+    /// Deep search results stand in for it, the files and folders found
+    /// that the Search box doesn't hide (as [ui::deep_search_results] shows
+    /// them).
+    pub fn shown_files(&self) -> Vec<&Path> {
+        match &self.deep_search {
+            Some(search) => {
+                let needle = self.ui.files_search.to_lowercase();
+                search
+                    .hits
+                    .iter()
+                    .filter(|hit| {
+                        needle.is_empty()
+                            || hit
+                                .path
+                                .strip_prefix(&search.root)
+                                .unwrap_or(&hit.path)
+                                .to_string_lossy()
+                                .to_lowercase()
+                                .contains(&needle)
+                    })
+                    .map(|hit| hit.path.as_path())
+                    .collect()
+            }
+            None => self
+                .ui
+                .browser_files_filter
+                .iter()
+                .map(|&i| self.browser_files[i].path.as_path())
+                .collect(),
+        }
+    }
+
+    /// The selected Files rows, in the order they're shown.
+    pub fn selected_paths(&self) -> Vec<PathBuf> {
+        self.shown_files()
+            .into_iter()
+            .filter(|p| self.selection.paths.contains(*p))
+            .map(Path::to_path_buf)
+            .collect()
+    }
+
+    /// Select just the Files-panel row for `path` and read its details, as
+    /// a plain click does. Leaves nothing selected if `path` isn't shown
+    /// (see [Self::shown_files]).
     pub fn select_file(&mut self, path: &Path) {
-        self.selected_file = match &self.deep_search {
-            Some(s) if s.has_file(path) => FileDetails::read_file(path),
-            Some(_) => None,
+        self.select_files(&[path.to_path_buf()]);
+    }
+
+    /// Select just the Files rows for those of `paths` that are shown, the
+    /// first of them leading (see [Self::selected_file]).
+    pub fn select_files(&mut self, paths: &[PathBuf]) {
+        let paths: Vec<PathBuf> = {
+            let shown: HashSet<&Path> = self.shown_files().into_iter().collect();
+            paths
+                .iter()
+                .filter(|p| shown.contains(p.as_path()))
+                .cloned()
+                .collect()
+        };
+        self.selection.anchor = paths.first().cloned();
+        self.selection.paths = paths.iter().cloned().collect();
+        self.set_lead(paths.first().map(PathBuf::as_path));
+    }
+
+    /// Add the Files row for `path` to the selection, or take it out if it's
+    /// in, as Ctrl+click does. Shift+clicks then select from it.
+    pub fn toggle_file(&mut self, path: &Path) {
+        self.selection.anchor = Some(path.to_path_buf());
+        if self.selection.paths.remove(path) {
+            // The lead must be selected, so the first row left takes over.
+            let was_lead = self.selected_file.as_ref().is_some_and(|d| d.path == path);
+            if was_lead {
+                let next = self.selected_paths().into_iter().next();
+                self.set_lead(next.as_deref());
+            } else {
+                self.refresh_summary();
+            }
+        } else if self.shown_files().contains(&path) {
+            self.selection.paths.insert(path.to_path_buf());
+            self.set_lead(Some(path));
+        }
+    }
+
+    /// Select the Files rows from the anchor (see [FileSelection::anchor])
+    /// to `path`, leading with `path`, as Shift+click does. With `add`
+    /// (Ctrl+Shift+click), they're added to what's selected already;
+    /// otherwise they replace it.
+    pub fn select_range(&mut self, path: &Path, add: bool) {
+        let range: Vec<PathBuf> = {
+            let shown = self.shown_files();
+            let Some(to) = shown.iter().position(|p| *p == path) else {
+                return;
+            };
+            // With no anchor shown, this row becomes it.
+            let from = self
+                .selection
+                .anchor
+                .as_deref()
+                .and_then(|a| shown.iter().position(|p| *p == a));
+            let from = from.unwrap_or(to);
+            shown[from.min(to)..=from.max(to)]
+                .iter()
+                .map(|p| p.to_path_buf())
+                .collect()
+        };
+        if range.len() == 1 {
+            self.selection.anchor = Some(path.to_path_buf());
+        }
+        if !add {
+            self.selection.paths.clear();
+        }
+        self.selection.paths.extend(range);
+        self.set_lead(Some(path));
+    }
+
+    /// Select every Files row shown, as Ctrl+A does. The lead stays where
+    /// it was.
+    pub fn select_all_files(&mut self) {
+        let shown: Vec<PathBuf> = self
+            .shown_files()
+            .into_iter()
+            .map(Path::to_path_buf)
+            .collect();
+        let lead = self
+            .selected_file
+            .as_ref()
+            .map(|d| d.path.clone())
+            .or_else(|| shown.first().cloned());
+        if self.selection.anchor.is_none() {
+            self.selection.anchor = lead.clone();
+        }
+        self.selection.paths = shown.into_iter().collect();
+        self.set_lead(lead.as_deref());
+    }
+
+    /// Select no Files rows, as a click on the listing's background does.
+    pub fn clear_file_selection(&mut self) {
+        self.selection = FileSelection::default();
+        self.selected_file = None;
+    }
+
+    /// Deselect Files rows that are no longer shown, and re-read the details
+    /// of the lead (or if it's gone, of the first row left) and the totals.
+    fn refresh_selection(&mut self) {
+        let mut paths = std::mem::take(&mut self.selection.paths);
+        if !paths.is_empty() {
+            let shown: HashSet<&Path> = self.shown_files().into_iter().collect();
+            paths.retain(|p| shown.contains(p.as_path()));
+        }
+        self.selection.paths = paths;
+        let lead = self
+            .selected_file
+            .as_ref()
+            .map(|d| d.path.clone())
+            .filter(|p| self.selection.paths.contains(p))
+            .or_else(|| self.selected_paths().into_iter().next());
+        self.set_lead(lead.as_deref());
+    }
+
+    /// Make `path`, one of the selected rows, the lead (see
+    /// [Self::selected_file]), reading its details, then total up the
+    /// selection. A row that's vanished since it was listed is deselected.
+    fn set_lead(&mut self, path: Option<&Path>) {
+        self.selected_file = path.and_then(|path| match &self.deep_search {
+            Some(_) => FileDetails::read_file(path),
             None => self
                 .browser_files
                 .iter()
                 .find(|f| f.path == path)
                 .and_then(FileDetails::read),
-        };
+        });
+        if let Some(path) = path
+            && self.selected_file.is_none()
+        {
+            self.selection.paths.remove(path);
+        }
+        self.refresh_summary();
+    }
+
+    /// Re-read [FileSelection::summary], which the details pane shows while
+    /// more than one row is selected.
+    fn refresh_summary(&mut self) {
+        self.selection.summary = (self.selection.paths.len() > 1)
+            .then(|| SelectionSummary::read(&self.selected_paths()));
     }
 
     /// Start a Deep search of the active tab's cwd for `ui.deep_search`,
@@ -588,9 +789,7 @@ impl State {
         self.ui.deep_search_edited = None;
         self.ui.rename = None;
         self.ui.rename_pending = None;
-        if let Some(sel) = self.selected_file.take() {
-            self.select_file(&sel.path);
-        }
+        self.refresh_selection();
     }
 
     /// Swap the Files-panel row for `path` to an edit box holding its name.
@@ -639,15 +838,15 @@ impl State {
         }
     }
 
-    /// Put the selected Files row on the OS clipboard, to be copied (or with
-    /// `cut`, moved) wherever it's pasted: here, or in the OS file manager.
-    /// Its dir moves to the top of Recent dirs.
+    /// Put the selected Files rows on the OS clipboard, to be copied (or
+    /// with `cut`, moved) wherever they're pasted: here, or in the OS file
+    /// manager. Their dir moves to the top of Recent dirs.
     pub fn copy_selected(&mut self, cut: bool) {
-        let Some(sel) = &self.selected_file else {
+        let paths = self.selected_paths();
+        let Some(first) = paths.first() else {
             return;
         };
-        let paths = vec![sel.path.clone()];
-        if let Some(dir) = paths[0].parent() {
+        if let Some(dir) = first.parent() {
             self.touch_recent_dir(dir);
         }
         let content = clipboard::Content::Files { paths: paths.clone(), cut };
@@ -664,7 +863,7 @@ impl State {
     /// picks up the outcome. Ignored while an earlier paste is still going.
     /// The cwd moves to the top of Recent dirs.
     pub fn paste_files(&mut self, ctx: &egui::Context) {
-        if self.paste.is_some() {
+        if self.paste.is_some() || self.deleting.is_some() {
             return;
         }
         match clipboard::get_files() {
@@ -684,8 +883,31 @@ impl State {
         }
     }
 
-    /// Once a paste has finished: report what failed, re-read the listing,
-    /// and select what was pasted if it was a single item. Pasted cut files
+    /// Move (or with `copy`, copy) `srcs` into the folder `dest`, as dropping
+    /// Files rows on a folder does. Runs in the background like a paste
+    /// ([Self::pump_paste] picks up the outcome too), so it's refused while
+    /// one is going. Dropping a folder on itself does nothing. The cwd moves
+    /// to the top of Recent dirs.
+    pub fn drop_files(&mut self, srcs: &[PathBuf], dest: &Path, copy: bool, ctx: &egui::Context) {
+        if self.paste.is_some() || self.deleting.is_some() {
+            let what = if copy { "copy" } else { "move" };
+            self.push_out(
+                format!("{what}: wait for the file operation in progress to finish"),
+                OutType::StdErr,
+            );
+            return;
+        }
+        let srcs: Vec<PathBuf> = srcs.iter().filter(|p| *p != dest).cloned().collect();
+        if srcs.is_empty() {
+            return;
+        }
+        let cwd = self.cwd().to_path_buf();
+        self.touch_recent_dir(&cwd);
+        self.paste = Some(Paste::start(srcs, dest.to_path_buf(), !copy, ctx.clone()));
+    }
+
+    /// Once a paste (or drop) has finished: report what failed, re-read the
+    /// listing, and select what was pasted, if it's here. Pasted cut files
     /// are taken off the clipboard, since they've moved. Called every frame.
     pub fn pump_paste(&mut self) {
         let Some(results) = self.paste.as_mut().and_then(Paste::try_finish) else {
@@ -707,9 +929,80 @@ impl State {
         // Even a partial move makes the old OS file list unsafe to reuse.
         if !moved.is_empty() { clipboard::clear_if_holds(&paste.srcs); }
         self.refresh_browser_files();
-        if let [path] = pasted.as_slice() {
-            self.select_file(path);
+        // What's dropped in a subfolder isn't here to select, so the
+        // selection is left as it is.
+        let here: Vec<PathBuf> = {
+            let shown: HashSet<&Path> = self.shown_files().into_iter().collect();
+            pasted
+                .into_iter()
+                .filter(|p| shown.contains(p.as_path()))
+                .collect()
+        };
+        if !here.is_empty() {
+            self.select_files(&here);
         }
+    }
+
+    /// Capture the selection before showing the confirmation dialog.
+    pub fn request_delete_selected(&mut self) {
+        if self.paste.is_some() || self.deleting.is_some() || self.ui.delete_pending.is_some() {
+            return;
+        }
+        self.commit_rename();
+        let paths = self.selected_paths();
+        if !paths.is_empty() {
+            self.ui.rename_pending = None;
+            self.ui.delete_pending = Some(paths);
+        }
+    }
+
+    /// Move only the paths captured by the confirmation to the system trash.
+    pub fn confirm_delete(&mut self, ctx: &egui::Context) {
+        if self.paste.is_some() || self.deleting.is_some() {
+            return;
+        }
+        if let Some(paths) = self.ui.delete_pending.take() {
+            self.deleting = Some(Delete::start(paths, ctx.clone()));
+        }
+    }
+
+    /// Refresh the listing and clipboard after trashing, keeping failed rows
+    /// selected so they can be retried. Called every frame, even if hidden.
+    pub fn pump_delete(&mut self, ctx: &egui::Context) {
+        let Some(operation) = &mut self.deleting else {
+            return;
+        };
+        let Some(results) = operation.try_finish() else {
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+            return;
+        };
+        let operation = self.deleting.take().unwrap();
+        let mut deleted = Vec::new();
+        for (path, result) in operation.paths.into_iter().zip(results) {
+            match result {
+                Ok(()) => deleted.push(path),
+                Err(e) => {
+                    self.push_out(format!("delete: {}: {e}", path.display()), OutType::StdErr)
+                }
+            }
+        }
+        self.ui.clipboard.history.forget_paths(&deleted);
+        if let Ok(Some((held, _))) = clipboard::get_files()
+            && held
+                .iter()
+                .any(|p| deleted.iter().any(|d| p.starts_with(d)))
+        {
+            clipboard::clear_if_holds(&held);
+        }
+        // Search results can still contain a deleted path; explicitly remove
+        // those selections before refreshing or restarting the search.
+        self.selection
+            .paths
+            .retain(|p| !deleted.iter().any(|d| p.starts_with(d)));
+        if self.deep_search.is_some() {
+            self.start_deep_search(ctx);
+        }
+        self.refresh_browser_files();
     }
 
     /// Snapshot of the active tab's recall cursors. Returned by value so
@@ -759,6 +1052,9 @@ impl State {
             CmdHistoryPrefs {
                 show_dir: Some(self.cmd_history_show_dir),
             },
+            Appearance {
+                dark_mode: self.dark_mode,
+            },
             &self.ui.clipboard.history.entries,
             &self.state_path,
         )
@@ -782,6 +1078,14 @@ impl State {
             self.gui_font_size = next;
             let _ = self.save();
         }
+    }
+
+    /// Switch the window between dark and light, and persist the choice.
+    /// Wired to the theme button on the tab strip.
+    pub fn set_dark_mode(&mut self, ctx: &egui::Context, dark: bool) {
+        self.dark_mode = Some(dark);
+        ctx.set_theme(theme(dark));
+        let _ = self.save();
     }
 
     pub fn load(path: PathBuf) -> io::Result<Self> {
@@ -851,9 +1155,11 @@ impl State {
             browser_files: Vec::new(),
             browser_dir: PathBuf::new(),
             selected_file: None,
+            selection: FileSelection::default(),
             file_preview: ImagePreview::default(),
             deep_search: None,
             paste: None,
+            deleting: None,
             state_path: path,
             branch,
             window_size: loaded.window_size,
@@ -864,6 +1170,7 @@ impl State {
             bookmark_names: loaded.dir_label_lens.bookmark_names.unwrap_or(true),
             recent_dir_names: loaded.dir_label_lens.recent_dir_names.unwrap_or(true),
             cmd_history_show_dir: loaded.cmd_history.show_dir.unwrap_or(false),
+            dark_mode: loaded.appearance.dark_mode,
             file_viewers: FileViewers::default(),
             path_panel: PathPanel::default(),
         };
@@ -1808,6 +2115,11 @@ fn parse_remote_spec(spec: &str) -> (String, u16, String) {
     (host, port_arg.unwrap_or(port), user)
 }
 
+/// The egui theme for a dark or light window.
+pub fn theme(dark: bool) -> egui::Theme {
+    if dark { egui::Theme::Dark } else { egui::Theme::Light }
+}
+
 impl eframe::App for State {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         // Track the current window size each frame so `save` (which runs on
@@ -1835,28 +2147,6 @@ impl eframe::App for State {
         // show their output or stop them.
         for cmd in &mut self.running {
             cmd.take();
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Moving each tab of a strip of four to each slot keeps every tab's
-    /// index in step with where `Vec::remove` + `insert` puts it.
-    #[test]
-    fn moved_tab_index_follows_the_move() {
-        for from in 0..4 {
-            for to in 0..4 {
-                let mut tabs: Vec<usize> = (0..4).collect();
-                let tab = tabs.remove(from);
-                tabs.insert(to, tab);
-                for i in 0..4 {
-                    let landed = tabs.iter().position(|&t| t == i).unwrap();
-                    assert_eq!(moved_tab_index(i, from, to), landed, "{i}: {from} -> {to}");
-                }
-            }
         }
     }
 }

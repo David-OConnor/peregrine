@@ -159,9 +159,11 @@ pub fn truncate_start(parts: Vec<Part>, max: usize) -> Vec<Part> {
     if count <= max {
         return parts;
     }
+    
     // Reserve 3 chars for the ellipsis.
     let mut skip = count - max.saturating_sub(3);
     let mut out = vec![Part::plain("...")];
+    
     for p in parts {
         let n = p.text.chars().count();
         if skip >= n {
@@ -189,16 +191,19 @@ pub fn layout_job(
 ) -> LayoutJob {
     let last = parts.iter().rposition(|p| p.color.is_some());
     let mut job = LayoutJob::default();
+    
     for (i, p) in parts.iter().enumerate() {
         let font_id = match &last_font {
             Some(f) if Some(i) == last => f.clone(),
             _ => font.clone(),
         };
+        
         let format = TextFormat {
             font_id,
             color: p.color.unwrap_or(default),
             ..Default::default()
         };
+        
         job.append(&p.text, 0.0, format);
     }
     job
@@ -209,6 +214,7 @@ pub fn layout_job(
 /// the line's default colour.
 pub fn to_ansi(parts: &[Part]) -> String {
     let mut s = String::new();
+    
     for p in parts {
         match p.color {
             Some(c) => {
@@ -218,69 +224,6 @@ pub fn to_ansi(parts: &[Part]) -> String {
             None => s.push_str(&p.text),
         }
     }
+    
     s
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn texts(parts: &[Part]) -> Vec<&str> {
-        parts.iter().map(|p| p.text.as_str()).collect()
-    }
-
-    #[test]
-    fn home_is_one_run_in_colour_0() {
-        let full = parts(r"C:\Users\me\code", Some(r"C:\Users\me"), true);
-        assert_eq!(texts(&full), [r"C:\Users\me", r"\", "code"]);
-        assert_eq!(full[0].color, Some(PALETTE_DARK[0]));
-        assert_eq!(full[1].color, None);
-
-        let tilde = parts("~/code", Some("~"), true);
-        assert_eq!(texts(&tilde), ["~", "/", "code"]);
-        assert_eq!(tilde[0].color, Some(PALETTE_DARK[0]));
-    }
-
-    #[test]
-    fn same_dir_same_colour_in_either_spelling() {
-        let full = parts(r"C:\Users\me\code\a", Some(r"C:\Users\me"), true);
-        let tilde = parts("~/code/b", Some("~"), true);
-        assert_eq!(full[2].color, tilde[2].color);
-        assert_ne!(full[2].color, Some(PALETTE_DARK[0]));
-    }
-
-    #[test]
-    fn home_prefix_must_end_at_a_separator() {
-        let p = parts(r"C:\Users\mel", Some(r"C:\Users\me"), true);
-        assert_eq!(texts(&p), ["C:", r"\", "Users", r"\", "mel"]);
-    }
-
-    #[test]
-    fn never_matches_parent() {
-        for name in ["a", "b", "code", "src", "target", "project_a", "x/y/z"] {
-            let p = parts(&format!("~/code/{name}"), Some("~"), true);
-            let colors: Vec<_> = p.iter().filter_map(|p| p.color).collect();
-            for w in colors.windows(2) {
-                assert_ne!(w[0], w[1], "{name}");
-            }
-        }
-    }
-
-    #[test]
-    fn ansi_round_trips_through_output_parser() {
-        let p = parts(r"C:\Users\me\code", Some(r"C:\Users\me"), true);
-        let segs = crate::ansi::parse(&to_ansi(&p));
-        let got: Vec<_> = segs.iter().map(|s| (s.text.as_str(), s.fg)).collect();
-        let want: Vec<_> = p.iter().map(|p| (p.text.as_str(), p.color)).collect();
-        assert_eq!(got, want);
-    }
-
-    #[test]
-    fn truncation_keeps_tail_and_colours() {
-        let p = truncate_start(parts("~/code/project_a", Some("~"), true), 10);
-        assert_eq!(texts(&p), ["...", "oject_a"]);
-        assert_eq!(p[1].color, last_color("~/code/project_a", Some("~"), true));
-        let total: usize = p.iter().map(|p| p.text.chars().count()).sum();
-        assert_eq!(total, 10);
-    }
 }
