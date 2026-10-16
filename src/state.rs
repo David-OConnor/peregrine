@@ -1054,6 +1054,7 @@ impl State {
             },
             Appearance {
                 dark_mode: self.dark_mode,
+                dir_color_depth: Some(path_color::depth_levels()),
             },
             &self.ui.clipboard.history.entries,
             &self.state_path,
@@ -1080,6 +1081,22 @@ impl State {
         }
     }
 
+    /// Step how many directory levels the path colours take to go from
+    /// purple to yellow (see [path_color::depth_levels]) by `delta`, and
+    /// persist the change. Wired to the "Dir depth" +/- buttons on the tab
+    /// strip.
+    pub fn adjust_dir_color_depth(&mut self, delta: i32) {
+        let cur = path_color::depth_levels();
+        let next = (cur as i32 + delta).clamp(
+            path_color::MIN_DEPTH_LEVELS as i32,
+            path_color::MAX_DEPTH_LEVELS as i32,
+        ) as u8;
+        if next != cur {
+            path_color::set_depth_levels(next);
+            let _ = self.save();
+        }
+    }
+
     /// Switch the window between dark and light, and persist the choice.
     /// Wired to the theme button on the tab strip.
     pub fn set_dark_mode(&mut self, ctx: &egui::Context, dark: bool) {
@@ -1090,6 +1107,12 @@ impl State {
 
     pub fn load(path: PathBuf) -> io::Result<Self> {
         let loaded = save_data::load_state(&path)?;
+        path_color::set_depth_levels(
+            loaded
+                .appearance
+                .dir_color_depth
+                .unwrap_or(path_color::DEFAULT_DEPTH_LEVELS),
+        );
 
         // Restore the saved tabs. Drop any whose directory no longer exists
         // (it may have been deleted or renamed since the last run); if none

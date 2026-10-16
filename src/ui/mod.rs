@@ -241,8 +241,8 @@ fn path_job(ui: &Ui, path: &Path, home: Option<&Path>) -> LayoutJob {
     path_job_on(ui, path, home, ui.visuals().dark_mode, Color32::PLACEHOLDER)
 }
 
-/// [path_job] in the palette for a `dark` or light background (see
-/// [path_color::palette]), with uncoloured runs in `text_color`.
+/// [path_job] in the colours for a `dark` or light background (see
+/// [path_color::depth_color]), with uncoloured runs in `text_color`.
 fn path_job_on(
     ui: &Ui,
     path: &Path,
@@ -1577,24 +1577,30 @@ fn panel_vis_eq(a: &shell::PanelVis, b: &shell::PanelVis) -> bool {
 /// current size, then buttons to step it. Returns the step asked for (+1, -1,
 /// or 0); `what` names the text it scales, for the tooltips.
 fn font_size_control(ui: &mut Ui, label: &str, size: f32, what: &str) -> f32 {
-    ui.label(label);
-    ui.label(format!("{}", size.round() as i32));
-    let mut delta = 0.0;
+    step_control(
+        ui,
+        label,
+        size.round() as i32,
+        &format!("Decrease {what} font size"),
+        &format!("Increase {what} font size"),
+    ) as f32
+}
 
-    if ui
-        .small_button("-")
-        .on_hover_text(format!("Decrease {what} font size"))
-        .clicked()
-    {
-        delta = -1.0;
+/// A `<label> N + -` control for the tab strip, as [font_size_control] for
+/// any whole-number setting: the label, `value`, then buttons to step it,
+/// with `less` and `more` as their tooltips. Returns the step asked for (+1,
+/// -1, or 0).
+fn step_control(ui: &mut Ui, label: &str, value: i32, less: &str, more: &str) -> i32 {
+    ui.label(label);
+    ui.label(format!("{value}"));
+    let mut delta = 0;
+
+    if ui.small_button("-").on_hover_text(less).clicked() {
+        delta = -1;
     }
 
-    if ui
-        .small_button("+")
-        .on_hover_text(format!("Increase {what} font size"))
-        .clicked()
-    {
-        delta = 1.0;
+    if ui.small_button("+").on_hover_text(more).clicked() {
+        delta = 1;
     }
 
     delta
@@ -1707,6 +1713,7 @@ fn tabs_bar(state: &mut State, ui: &mut Ui) {
     let mut connect_remote: Option<usize> = None;
     let mut font_delta = 0.;
     let mut gui_font_delta = 0.;
+    let mut dir_depth_delta = 0;
     let mut set_dark = None;
 
     ui.horizontal(|ui| {
@@ -1729,10 +1736,21 @@ fn tabs_bar(state: &mut State, ui: &mut Ui) {
         }
         ui.separator();
         // Font-size controls sit to the left of the tab strip: one for the
-        // terminal panes, one for the side panels.
+        // terminal panes, one for the side panels; then the path colours'
+        // depth.
         font_delta = font_size_control(ui, "CLI text: ", font_size, "terminal");
         ui.separator();
         gui_font_delta = font_size_control(ui, "GUI text: ", gui_font_size, "panel");
+        ui.separator();
+        // How deep a directory is when its colour reaches yellow (see
+        // [path_color::depth_levels]).
+        dir_depth_delta = step_control(
+            ui,
+            "Dir color depth: ",
+            path_color::depth_levels() as i32,
+            "Fewer directory levels from purple (root or ~) to yellow",
+            "More directory levels from purple (root or ~) to yellow",
+        );
         ui.separator();
         // Breathing room either side of the tab section.
         ui.add_space(TAB_SECTION_PADDING);
@@ -1850,6 +1868,9 @@ fn tabs_bar(state: &mut State, ui: &mut Ui) {
     }
     if gui_font_delta != 0.0 {
         state.adjust_gui_font_size(gui_font_delta);
+    }
+    if dir_depth_delta != 0 {
+        state.adjust_dir_color_depth(dir_depth_delta);
     }
     if let Some(i) = to_select {
         state.select_tab(i);

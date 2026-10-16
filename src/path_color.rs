@@ -1,51 +1,89 @@
-//! Colour-coding for directory paths, so a given directory is easy to spot
-//! wherever it appears: the Bookmarks, Recent dirs and Files panels, the input
-//! row's prompt, and prompts echoed into the output pane.
+//! Colour-coding for directory paths, so how deep a directory sits reads at
+//! a glance wherever it appears: the Bookmarks, Recent dirs and Files panels,
+//! the input row's prompt, and prompts echoed into the output pane.
 //!
-//! The home directory (`~`, or its full form like `C:\Users\me`) is always
-//! [Palette] colour 0. Every other directory gets one of the remaining colours,
-//! picked by hashing its path up to and including itself (`~/code`), so it's
-//! the same colour in every path that runs through it. A directory never takes
-//! its parent's colour, so neighbouring names stay visually separate.
-//! Separators (`/`, `\`) keep the surrounding text's colour.
+//! Each directory is coloured by its depth, along the Viridis scale: a root
+//! (`/`, `C:`, a UNC path's `\\`) is purple, and each level below it steps
+//! through blue and green towards yellow, which every directory
+//! [depth_levels] or more levels down gets. The home directory (`~`, or its
+//! full form like `C:\Users\me`) counts as a root, so `~/code` is one level
+//! down. Separators (`/`, `\`) between directories keep the surrounding
+//! text's colour.
 
 use std::fmt::Write;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use egui::{Color32, FontId, TextFormat, text::LayoutJob};
 
-/// Hues spread around the colour wheel so any two read as different at a
-/// glance. Kept short on purpose: more entries means near-identical pairs.
-pub(crate) type Palette = [Color32; PALETTE_LEN];
-pub(crate) const PALETTE_LEN: usize = 8;
+/// Default for [depth_levels].
+pub const DEFAULT_DEPTH_LEVELS: u8 = 5;
+/// Range for [depth_levels].
+pub const MIN_DEPTH_LEVELS: u8 = 1;
+pub const MAX_DEPTH_LEVELS: u8 = 32;
 
-/// For dark backgrounds: the terminal panes, and the panels in dark mode.
-const PALETTE_DARK: Palette = [
-    Color32::from_rgb(255, 165, 50),  // home: amber
-    Color32::from_rgb(80, 160, 255),  // blue
-    Color32::from_rgb(90, 210, 110),  // green
-    Color32::from_rgb(245, 120, 190), // pink
-    Color32::from_rgb(175, 135, 255), // violet
-    Color32::from_rgb(70, 210, 220),  // cyan
-    Color32::from_rgb(195, 225, 70),  // lime
-    Color32::from_rgb(250, 95, 85),   // red
+/// See [depth_levels]. A global rather than a parameter, like the theme, as
+/// it applies to every path drawn, from all over the UI.
+static DEPTH_LEVELS: AtomicU8 = AtomicU8::new(DEFAULT_DEPTH_LEVELS);
+
+/// How many levels below a root (or `~`) a directory is when its colour
+/// reaches the yellow end of the scale. Set by the tab strip's "Dir depth"
+/// control (see `State::adjust_dir_color_depth`) and persisted with the theme.
+pub fn depth_levels() -> u8 {
+    DEPTH_LEVELS.load(Ordering::Relaxed)
+}
+
+/// Set [depth_levels], clamped to [MIN_DEPTH_LEVELS]..=[MAX_DEPTH_LEVELS].
+pub fn set_depth_levels(n: u8) {
+    DEPTH_LEVELS.store(n.clamp(MIN_DEPTH_LEVELS, MAX_DEPTH_LEVELS), Ordering::Relaxed);
+}
+
+/// Viridis at 11 even stops (matplotlib's `#440154` to `#FDE725`), with its
+/// OKLab lightness remapped linearly so both ends read on the background, and
+/// hue and chroma kept. For dark backgrounds (the terminal panes, and the
+/// panels in dark mode), lightness runs 0.60 to 0.93: at least 4:1 contrast
+/// on the panels.
+const VIRIDIS_DARK: [Color32; 11] = [
+    Color32::from_rgb(0xA2, 0x63, 0xAF), // root: purple
+    Color32::from_rgb(0x98, 0x77, 0xC8),
+    Color32::from_rgb(0x86, 0x8E, 0xD1),
+    Color32::from_rgb(0x76, 0xA2, 0xCF),
+    Color32::from_rgb(0x69, 0xB4, 0xC8),
+    Color32::from_rgb(0x60, 0xC5, 0xBE),
+    Color32::from_rgb(0x5C, 0xD5, 0xB0),
+    Color32::from_rgb(0x6B, 0xE3, 0x98),
+    Color32::from_rgb(0x93, 0xEB, 0x7C),
+    Color32::from_rgb(0xCB, 0xEE, 0x62),
+    Color32::from_rgb(0xFF, 0xEB, 0x5D), // deepest: yellow
 ];
 
-/// The same hues, darkened to read on the light-mode panels.
-const PALETTE_LIGHT: Palette = [
-    Color32::from_rgb(200, 110, 0),
-    Color32::from_rgb(20, 100, 210),
-    Color32::from_rgb(20, 140, 50),
-    Color32::from_rgb(200, 40, 130),
-    Color32::from_rgb(120, 70, 210),
-    Color32::from_rgb(0, 135, 150),
-    Color32::from_rgb(110, 140, 0),
-    Color32::from_rgb(205, 35, 35),
+/// [VIRIDIS_DARK] for the light-mode panels: lightness 0.30 to 0.56, so the
+/// yellow end darkens to ochre (at least 4:1 contrast).
+const VIRIDIS_LIGHT: [Color32; 11] = [
+    Color32::from_rgb(0x48, 0x06, 0x54),
+    Color32::from_rgb(0x41, 0x1C, 0x68),
+    Color32::from_rgb(0x31, 0x32, 0x6E),
+    Color32::from_rgb(0x19, 0x43, 0x6B),
+    Color32::from_rgb(0x00, 0x52, 0x64),
+    Color32::from_rgb(0x00, 0x5F, 0x5A),
+    Color32::from_rgb(0x00, 0x6A, 0x4C),
+    Color32::from_rgb(0x00, 0x74, 0x32),
+    Color32::from_rgb(0x21, 0x79, 0x00),
+    Color32::from_rgb(0x5F, 0x79, 0x00),
+    Color32::from_rgb(0x8C, 0x74, 0x00),
 ];
 
-/// The palette for a dark or light background. Also used by
-/// [crate::cmd_color], so commands and directories share one set of hues.
-pub(crate) fn palette(dark: bool) -> &'static Palette {
-    if dark { &PALETTE_DARK } else { &PALETTE_LIGHT }
+/// The colour of a directory `depth` levels below a root (or `~`), for a
+/// `dark` or light background: interpolated along the Viridis stops, and
+/// yellow from [depth_levels] down.
+pub fn depth_color(depth: usize, dark: bool) -> Color32 {
+    let stops = if dark { &VIRIDIS_DARK } else { &VIRIDIS_LIGHT };
+    let levels = depth_levels() as usize;
+    let pos = depth.min(levels) as f32 / levels as f32 * (stops.len() - 1) as f32;
+    let i = (pos as usize).min(stops.len() - 2);
+    let t = pos - i as f32;
+    let (a, b) = (stops[i], stops[i + 1]);
+    let mix = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
+    Color32::from_rgb(mix(a.r(), b.r()), mix(a.g(), b.g()), mix(a.b(), b.b()))
 }
 
 /// One run of a displayed path. `color` is `None` for text that keeps the
@@ -68,26 +106,15 @@ fn is_sep(c: char) -> bool {
     c == '/' || c == '\\'
 }
 
-/// 64-bit FNV-1a. Hand-rolled rather than `DefaultHasher` so a directory keeps
-/// its colour across Rust versions.
-pub(crate) fn fnv1a(s: &str) -> u64 {
-    s.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| {
-        (h ^ b as u64).wrapping_mul(0x0100_0000_01b3)
-    })
-}
-
 /// Split `display` (a path as shown to the user) into coloured runs.
 /// `home` is how the home directory is spelled in `display` — `"~"` for a
 /// [crate::render_with_tilde] string, or the full home path for an absolute
-/// one — and is coloured as a single run. `dark` picks the palette for the
-/// background it will be drawn on.
+/// one — and is coloured as a single run, as a root. `dark` picks the
+/// colours for the background it will be drawn on.
 pub fn parts(display: &str, home: Option<&str>, dark: bool) -> Vec<Part> {
-    let palette = palette(dark);
     let mut out = Vec::new();
-    // The path so far, normalised (`~` for home, `/` separators, and
-    // lowercased on Windows), so `~/code` and `C:\Users\me\Code` match.
-    let mut key = String::new();
-    let mut prev_idx = None;
+    // Depth of the next directory.
+    let mut depth = 0;
     let mut rest = display;
 
     if let Some(h) = home.filter(|h| !h.is_empty())
@@ -96,37 +123,32 @@ pub fn parts(display: &str, home: Option<&str>, dark: bool) -> Vec<Part> {
     {
         out.push(Part {
             text: h.to_string(),
-            color: Some(palette[0]),
+            color: Some(depth_color(0, dark)),
         });
-        key.push('~');
-        prev_idx = Some(0);
+        depth = 1;
         rest = after;
+    } else {
+        // A leading separator is the root: `/`, or a UNC path's `\\`.
+        let root = rest.len() - rest.trim_start_matches(is_sep).len();
+        if root > 0 {
+            out.push(Part {
+                text: rest[..root].to_string(),
+                color: Some(depth_color(0, dark)),
+            });
+            depth = 1;
+            rest = &rest[root..];
+        }
     }
 
     let mut component = |name: &str, out: &mut Vec<Part>| {
         if name.is_empty() {
             return;
         }
-        if !key.is_empty() {
-            key.push('/');
-        }
-        if cfg!(windows) {
-            key.push_str(&name.to_lowercase());
-        } else {
-            key.push_str(name);
-        }
-        // Colour 0 is home's; hash into the rest, stepping on to the next
-        // colour if we landed on the parent's.
-        let n = palette.len() as u64 - 1;
-        let mut idx = 1 + (fnv1a(&key) % n) as usize;
-        if prev_idx == Some(idx) {
-            idx = idx % n as usize + 1;
-        }
-        prev_idx = Some(idx);
         out.push(Part {
             text: name.to_string(),
-            color: Some(palette[idx]),
+            color: Some(depth_color(depth, dark)),
         });
+        depth += 1;
     };
 
     let mut start = 0;
@@ -159,11 +181,11 @@ pub fn truncate_start(parts: Vec<Part>, max: usize) -> Vec<Part> {
     if count <= max {
         return parts;
     }
-    
+
     // Reserve 3 chars for the ellipsis.
     let mut skip = count - max.saturating_sub(3);
     let mut out = vec![Part::plain("...")];
-    
+
     for p in parts {
         let n = p.text.chars().count();
         if skip >= n {
@@ -191,19 +213,19 @@ pub fn layout_job(
 ) -> LayoutJob {
     let last = parts.iter().rposition(|p| p.color.is_some());
     let mut job = LayoutJob::default();
-    
+
     for (i, p) in parts.iter().enumerate() {
         let font_id = match &last_font {
             Some(f) if Some(i) == last => f.clone(),
             _ => font.clone(),
         };
-        
+
         let format = TextFormat {
             font_id,
             color: p.color.unwrap_or(default),
             ..Default::default()
         };
-        
+
         job.append(&p.text, 0.0, format);
     }
     job
@@ -214,7 +236,7 @@ pub fn layout_job(
 /// the line's default colour.
 pub fn to_ansi(parts: &[Part]) -> String {
     let mut s = String::new();
-    
+
     for p in parts {
         match p.color {
             Some(c) => {
@@ -224,6 +246,65 @@ pub fn to_ansi(parts: &[Part]) -> String {
             None => s.push_str(&p.text),
         }
     }
-    
+
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn colors(display: &str, home: Option<&str>) -> Vec<(String, Option<Color32>)> {
+        parts(display, home, true)
+            .into_iter()
+            .map(|p| (p.text, p.color))
+            .collect()
+    }
+
+    fn c(depth: usize) -> Option<Color32> {
+        Some(depth_color(depth, true))
+    }
+
+    #[test]
+    fn root_and_home_are_purple() {
+        assert_eq!(depth_color(0, true), VIRIDIS_DARK[0]);
+        assert_eq!(colors("/", None), [("/".into(), c(0))]);
+        assert_eq!(colors("~", Some("~")), [("~".into(), c(0))]);
+        assert_eq!(
+            colors(r"C:\Users\me", Some(r"C:\Users\me")),
+            [(r"C:\Users\me".into(), c(0))]
+        );
+    }
+
+    #[test]
+    fn depth_counts_from_root_or_home() {
+        assert_eq!(
+            colors("/usr/lib", None),
+            [
+                ("/".into(), c(0)),
+                ("usr".into(), c(1)),
+                ("/".into(), None),
+                ("lib".into(), c(2)),
+            ]
+        );
+        assert_eq!(
+            colors(r"C:\Users", None),
+            [("C:".into(), c(0)), (r"\".into(), None), ("Users".into(), c(1))]
+        );
+        assert_eq!(
+            colors(r"C:\Users\me\strike", Some(r"C:\Users\me")),
+            [
+                (r"C:\Users\me".into(), c(0)),
+                (r"\".into(), None),
+                ("strike".into(), c(1)),
+            ]
+        );
+    }
+
+    #[test]
+    fn saturates_at_depth_levels() {
+        let levels = depth_levels() as usize;
+        assert_eq!(depth_color(levels, true), VIRIDIS_DARK[10]);
+        assert_eq!(depth_color(levels + 5, false), VIRIDIS_LIGHT[10]);
+    }
 }

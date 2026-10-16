@@ -3,8 +3,7 @@
 //!
 //! Only the base command (the first word, split the way `run_command` does)
 //! is coloured; its arguments keep the default colour. Every `cd` on screen is
-//! one colour, every `cargo` another, and so on, from the same palette as
-//! [crate::path_color].
+//! one colour, every `cargo` another, and so on.
 //!
 //! Hashing alone can't keep the commands on screen apart: with 8 colours, 6
 //! commands all differ only ~8% of the time. So [CmdColors] hands colours out
@@ -13,14 +12,58 @@
 
 use std::collections::HashMap;
 
-use crate::path_color::{PALETTE_LEN, Part, fnv1a, palette};
+use egui::Color32;
+
+use crate::path_color::Part;
+
+/// Hues spread around the colour wheel so any two read as different at a
+/// glance. Kept short on purpose: more entries means near-identical pairs.
+type Palette = [Color32; PALETTE_LEN];
+const PALETTE_LEN: usize = 8;
+
+/// For dark backgrounds: the terminal panes, and the panels in dark mode.
+const PALETTE_DARK: Palette = [
+    Color32::from_rgb(255, 165, 50),  // amber
+    Color32::from_rgb(80, 160, 255),  // blue
+    Color32::from_rgb(90, 210, 110),  // green
+    Color32::from_rgb(245, 120, 190), // pink
+    Color32::from_rgb(175, 135, 255), // violet
+    Color32::from_rgb(70, 210, 220),  // cyan
+    Color32::from_rgb(195, 225, 70),  // lime
+    Color32::from_rgb(250, 95, 85),   // red
+];
+
+/// The same hues, darkened to read on the light-mode panels.
+const PALETTE_LIGHT: Palette = [
+    Color32::from_rgb(200, 110, 0),
+    Color32::from_rgb(20, 100, 210),
+    Color32::from_rgb(20, 140, 50),
+    Color32::from_rgb(200, 40, 130),
+    Color32::from_rgb(120, 70, 210),
+    Color32::from_rgb(0, 135, 150),
+    Color32::from_rgb(110, 140, 0),
+    Color32::from_rgb(205, 35, 35),
+];
+
+/// The palette for a dark or light background.
+fn palette(dark: bool) -> &'static Palette {
+    if dark { &PALETTE_DARK } else { &PALETTE_LIGHT }
+}
+
+/// 64-bit FNV-1a. Hand-rolled rather than `DefaultHasher` so a command keeps
+/// its colour across Rust versions.
+fn fnv1a(s: &str) -> u64 {
+    s.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| {
+        (h ^ b as u64).wrapping_mul(0x0100_0000_01b3)
+    })
+}
 
 /// Palette index a base command prefers. FNV-1a's low bits are weak: bit `k`
 /// of the hash depends only on bits `0..=k` of each input byte, so taking it
 /// mod 8 (the palette size) would go by just the low 3 bits of each letter,
 /// and e.g. `cd`, `cl`, `sd` and `kt` would always match. Mixing first
 /// (MurmurHash3's 64-bit finaliser) spreads every input bit into the low
-/// ones. `path_color` gets away without this as it reduces mod 7.
+/// ones.
 fn preferred(key: &str) -> usize {
     let mut h = fnv1a(key);
     h ^= h >> 33;
@@ -40,8 +83,7 @@ fn split(text: &str) -> (&str, &str, &str) {
 }
 
 /// The key a base command's colour is looked up by. Program names are
-/// case-insensitive on Windows, so `Cargo` and `cargo` match there, as
-/// directory names do in `path_color`.
+/// case-insensitive on Windows, so `Cargo` and `cargo` match there.
 fn key(cmd: &str) -> String {
     if cfg!(windows) {
         cmd.to_lowercase()

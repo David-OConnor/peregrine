@@ -69,7 +69,7 @@ struct DirLabelOpts<'a> {
 /// colour-coded by directory (see [path_color]), or with `opts.names`, just
 /// its final directory, e.g. `molchanica` for `~/code/Bio/molchanica`, in
 /// its own colour or its parent's (see [DirLabelOpts::parent_color]). `dark`
-/// picks the palette for the background it will be drawn on.
+/// picks the colours for the background it will be drawn on.
 fn dir_parts(path: &Path, opts: DirLabelOpts, dark: bool) -> Vec<Part> {
     let mut parts = path_color::parts(&render_with_tilde(path, opts.home), Some("~"), dark);
     if opts.names
