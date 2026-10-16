@@ -1189,6 +1189,15 @@ impl State {
         self.push_out_to(self.ui.active_tab, text, type_);
     }
 
+    /// Empty the active tab's output pane, as `clear` does in a terminal.
+    pub fn clear_out(&mut self) {
+        let i = self.ui.active_tab;
+        self.ui.out[i].clear();
+        if let Some(cmd) = self.running[i].as_mut() {
+            cmd.out_cleared();
+        }
+    }
+
     /// [Self::push_out] to tab `i`, which needn't be the active one.
     pub fn push_out_to(&mut self, i: usize, text: impl Into<String>, type_: OutType) {
         self.ui.out[i].push(OutItem {

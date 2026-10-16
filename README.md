@@ -15,7 +15,7 @@ Use is intuitive, leveraging what you already know about file browsers and termi
 ![Demo of the Peregrine UI](/screenshots/demo_0.png)
 
 ## Install
-- [Download the latest release](https://github.com/David-OConnor/peregrine/releases)
+- [Download and unzip](https://github.com/David-OConnor/peregrine/releases)
 - Launch the application, or run the *setup* script to add a shortcut to your OS's launcher.
 
 

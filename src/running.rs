@@ -220,6 +220,14 @@ impl RunningCmd {
         self.out_len = out.len();
     }
 
+    /// The tab's output was emptied, taking what this command wrote so far
+    /// with it, so the indices into it no longer point anywhere.
+    pub fn out_cleared(&mut self) {
+        self.out_start = 0;
+        self.out_len = 0;
+        self.open_items = [None, None];
+    }
+
     /// Send a line typed while the command runs to its stdin. Ignored once
     /// it has closed its stdin, as a terminal would.
     pub fn send_line(&mut self, line: &str) {

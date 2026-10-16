@@ -46,6 +46,9 @@ pub fn handle_cmd(state: &mut State, cmd: &str, input: &str, args: &str, ctx: &e
             // Our own help, not the remote's — answer locally.
             "shelp" => state.push_out(commands::shelp_text(Frontend::Gui), OutType::StdOut),
             "--version" | "-v" => state.push_out(commands::version_line(), OutType::StdOut),
+            // The pane is ours: the remote's `clear` would only send it
+            // escape codes (or complain that TERM isn't set).
+            "clear" | "cls" | "Clear-Host" => state.clear_out(),
             // The shell's Rust built-ins, translated to the equivalent remote
             // command: the remote shell has never heard of them.
             "sync" | "logs" => {
@@ -88,6 +91,9 @@ pub fn handle_cmd(state: &mut State, cmd: &str, input: &str, args: &str, ctx: &e
         "shelp" => state.push_out(commands::shelp_text(Frontend::Gui), OutType::StdOut),
 
         "--version" | "-v" => state.push_out(commands::version_line(), OutType::StdOut),
+
+        // pwsh's `Clear-Host` needs a console, and its stdio here are pipes.
+        "clear" | "cls" | "Clear-Host" => state.clear_out(),
 
         "remote" => state.cmd_remote(args),
 
