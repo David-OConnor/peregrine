@@ -1,14 +1,14 @@
-//! Colour-coding for commands in the Cmd history and In this dir panels,
+//! Color-coding for commands in the Cmd history and In this dir panels,
 //! so runs of the same program are easy to spot down the list.
 //!
 //! Only the base command (the first word, split the way `run_command` does)
-//! is coloured; its arguments keep the default colour. Every `cd` on screen is
-//! one colour, every `cargo` another, and so on.
+//! is colored; its arguments keep the default color. Every `cd` on screen is
+//! one color, every `cargo` another, and so on.
 //!
-//! Hashing alone can't keep the commands on screen apart: with 8 colours, 6
-//! commands all differ only ~8% of the time. So [CmdColors] hands colours out
+//! Hashing alone can't keep the commands on screen apart: with 8 colors, 6
+//! commands all differ only ~8% of the time. So [CmdColors] hands colors out
 //! to the [PALETTE_LEN] most recently used commands, which never share one,
-//! and only commands older than those fall back to their hashed colour.
+//! and only commands older than those fall back to their hashed color.
 
 use std::collections::HashMap;
 
@@ -109,27 +109,27 @@ impl CmdColors {
     pub fn new<'a>(newest_first: impl IntoIterator<Item = &'a str>) -> Self {
         let mut taken = [false; PALETTE_LEN];
         let mut recent = HashMap::new();
-        
+
         for text in newest_first {
             if recent.len() == PALETTE_LEN {
                 break;
             }
-            
+
             let (_, cmd, _) = split(text);
             let k = key(cmd);
             if cmd.is_empty() || recent.contains_key(&k) {
                 continue;
             }
-            
+
             let mut i = preferred(&k);
             while taken[i] {
                 i = (i + 1) % PALETTE_LEN;
             }
-            
+
             taken[i] = true;
             recent.insert(k, i);
         }
-        
+
         Self { recent }
     }
 
@@ -140,11 +140,11 @@ impl CmdColors {
     pub fn parts(&self, text: &str, dark: bool) -> Vec<Part> {
         let (lead, cmd, rest) = split(text);
         let mut out = Vec::new();
-        
+
         if !lead.is_empty() {
             out.push(Part::plain(lead));
         }
-        
+
         if !cmd.is_empty() {
             let k = key(cmd);
             let i = self
@@ -157,11 +157,11 @@ impl CmdColors {
                 color: Some(palette(dark)[i]),
             });
         }
-        
+
         if !rest.is_empty() {
             out.push(Part::plain(rest));
         }
-        
+
         out
     }
 }

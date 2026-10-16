@@ -1,15 +1,15 @@
 //! This module contains code related to the "Bookmarks" and "Recent dirs" panels. It includes
 //! code used by one or the other, and shared between them.
 
-use crate::path_color::Part;
-use crate::state::State;
-use crate::ui::ListAction;
-use crate::{OutType, path_color, render_with_tilde, ui};
-use eframe::epaint::text::LayoutJob;
-use eframe::epaint::{Color32, FontId};
+use std::path::{Path, PathBuf};
+
+use eframe::epaint::{Color32, FontId, text::LayoutJob};
 use egui::{Button, DragValue, Modal, RichText, ScrollArea, TextFormat, TextStyle, Ui};
 use shell::DirList;
-use std::path::{Path, PathBuf};
+
+use crate::{
+    OutType, path_color, path_color::Part, render_with_tilde, state::State, ui, ui::ListAction,
+};
 
 /// Default max displayed length (in characters) of a Bookmarks / Recent dirs
 /// path, used when the state file has no saved `DIR_LABEL_LEN`. Longer paths
@@ -33,7 +33,7 @@ pub(super) const RECENT_DIRS_COL_WIDTH: f32 = 170.;
 /// Background of a Recent dirs or Files row whose dir is also bookmarked,
 /// per panel theme: pale green in light mode, a muted dark green in dark mode
 /// so it doesn't stand out from the rest of the window.
-const BOOKMARKED_FILL_LIGHT: Color32 = Color32::from_rgb(200, 240, 200);
+const BOOKMARKED_FILL_LIGHT: Color32 = Color32::from_rgb(220, 240, 220);
 const BOOKMARKED_FILL_DARK: Color32 = Color32::from_rgb(40, 90, 50);
 /// Uncoloured text (the index, separators) on a bookmarked row in light mode.
 /// In dark mode the row keeps the theme's own text colour.
@@ -177,9 +177,10 @@ fn cwd_bookmark_button(ui: &mut Ui, state: &State) -> egui::Response {
     let cwd = state.cwd();
     let bookmarked = state.dir_bookmarks.iter().any(|p| p == cwd);
     // A root (e.g. `C:\`) has no final name; show it whole.
-    let name = cwd
-        .file_name()
-        .map_or_else(|| cwd.display().to_string(), |n| n.to_string_lossy().into_owned());
+    let name = cwd.file_name().map_or_else(
+        || cwd.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    );
     let (text, hover) = if bookmarked {
         (format!("x Rem {name}"), "Remove this dir from bookmarks")
     } else {
@@ -262,25 +263,31 @@ fn dir_label_len_control(ui: &mut Ui, label: &str, len: &mut usize, what: &str) 
 fn dir_label_mode_control(ui: &mut Ui, names: &mut bool, what: &str) -> bool {
     let before = *names;
     ui.selectable_value(names, false, "Paths")
-        .on_hover_text(format!("Show each {what}'s path, e.g. ~/code/Bio/molchanica"));
+        .on_hover_text(format!(
+            "Show each {what}'s path, e.g. ~/code/Bio/molchanica"
+        ));
     ui.selectable_value(names, true, "Names")
-        .on_hover_text(format!("Show just each {what}'s final name, e.g. molchanica"));
+        .on_hover_text(format!(
+            "Show just each {what}'s final name, e.g. molchanica"
+        ));
     *names != before
 }
 
 /// Width of a (non-small) button labelled `text`, padding included.
 fn button_width(ui: &Ui, text: &str) -> f32 {
     let font = TextStyle::Button.resolve(ui.style());
-    let text_width = ui
-        .ctx()
-        .fonts_mut(|f| f.layout_no_wrap(text.to_owned(), font, Color32::PLACEHOLDER).size().x);
+    let text_width = ui.ctx().fonts_mut(|f| {
+        f.layout_no_wrap(text.to_owned(), font, Color32::PLACEHOLDER)
+            .size()
+            .x
+    });
     text_width + 2.0 * ui.spacing().button_padding.x
 }
 
-/// The Bookmarks / Recent dirs "Cleanup missing" button, for `list`. Returns
+/// The Bookmarks / Recent dirs "Cleanup" button, for `list`. Returns
 /// true when clicked.
 fn cleanup_missing_button(ui: &mut Ui, list: DirList) -> bool {
-    ui.button("Cleanup missing")
+    ui.button("Cleanup")
         .on_hover_text(format!(
             "Remove {} that no longer exist on disk. Only the list changes; \
              nothing on disk is touched.",

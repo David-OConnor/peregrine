@@ -142,7 +142,7 @@ impl Source {
             pixels_per_point: ui.ctx().pixels_per_point(),
             wrap_width,
         };
-        
+
         if self.style.as_ref() != Some(&style) {
             self.clear();
             self.style = Some(style.clone());
@@ -156,7 +156,7 @@ impl Source {
             && self.task.is_none()
         {
             self.started = true;
-            
+
             let (tx, rx) = mpsc::channel();
             let cancelled = Arc::new(AtomicBool::new(false));
             let cancel = Arc::clone(&cancelled);
@@ -164,7 +164,7 @@ impl Source {
             let style = style.clone();
             let ctx = ui.ctx().clone();
             let viewport = ctx.viewport_id();
-            
+
             // At most one task per window, including after rapid reloads.
             // An obsolete task must finish before the newest one starts.
             if thread::Builder::new()
@@ -203,7 +203,7 @@ impl Source {
             Err(TryRecvError::Empty) => return None,
             Err(TryRecvError::Disconnected) => None,
         };
-        
+
         let current = !task.cancelled.load(Ordering::Relaxed);
         self.task = None;
         result.filter(|_| current)
@@ -214,14 +214,14 @@ fn highlight(text: &str, language: &str, style: &Style, cancel: &AtomicBool) -> 
     if cancel.load(Ordering::Relaxed) || text.lines().any(|line| line.len() > MAX_LINE_BYTES) {
         return None;
     }
-    
+
     let syntax = SYNTAXES.find_syntax_by_extension(language)?;
     let theme = &THEMES.themes[if style.dark {
         "base16-ocean.dark"
     } else {
         "InspiredGitHub"
     }];
-    
+
     let mut highlighter = HighlightLines::new(syntax, theme);
     let start = Instant::now();
     let mut job = LayoutJob {
@@ -230,17 +230,17 @@ fn highlight(text: &str, language: &str, style: &Style, cancel: &AtomicBool) -> 
     };
     job.wrap.max_width = style.wrap_width;
     let mut offset = 0;
-    
+
     for line in LinesWithEndings::from(text) {
         if cancel.load(Ordering::Relaxed) || start.elapsed() > BUDGET {
             return None;
         }
-        
+
         for (token, part) in highlighter.highlight_line(line, &SYNTAXES).ok()? {
             if job.sections.len() >= MAX_SECTIONS {
                 return None;
             }
-            
+
             let fg = token.foreground;
             let color = Color32::from_rgb(fg.r, fg.g, fg.b);
             job.sections.push(LayoutSection {
@@ -261,6 +261,6 @@ fn highlight(text: &str, language: &str, style: &Style, cancel: &AtomicBool) -> 
             offset += part.len();
         }
     }
-    
+
     Some(job)
 }

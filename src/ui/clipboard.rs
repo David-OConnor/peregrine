@@ -201,7 +201,6 @@ pub fn copy_output_on_right_click(ui: &Ui, rect: egui::Rect) {
     });
 }
 
-
 pub fn capture(state: &mut State, ctx: &egui::Context) {
     ctx.input_mut(|input| {
         state.ui.clipboard.shortcut(
@@ -376,7 +375,9 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
                                     Content::Text(_) => ("Paste to CLI", true),
                                     Content::Files { .. } => (
                                         "Paste to folder",
-                                        state.paste.is_none() && state.deleting.is_none() && !state.is_remote(),
+                                        state.paste.is_none()
+                                            && state.deleting.is_none()
+                                            && !state.is_remote(),
                                     ),
                                 };
                                 if ui

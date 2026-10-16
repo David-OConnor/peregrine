@@ -1,9 +1,14 @@
 use std::path::{Path, PathBuf};
 
-use egui::{Align, Area, Button, Color32, DragAndDrop, Event, Frame, Key, Layout, Modal, Modifiers, Panel, Response, RichText, ScrollArea, Sense, Stroke, StrokeKind, TextStyle, Ui};
+use egui::{
+    Align, Area, Button, Color32, DragAndDrop, Event, Frame, Key, Layout, Modal, Modifiers, Panel,
+    Response, RichText, ScrollArea, Sense, Stroke, StrokeKind, TextStyle, Ui,
+};
 
 use crate::{
-    OutType, clipboard, files, path_color, render_with_tilde,
+    OutType, clipboard,
+    files::{self, FileSort, SortKey},
+    path_color, render_with_tilde,
     state::State,
     ui,
     ui::{
@@ -14,7 +19,8 @@ use crate::{
 };
 
 /// Files in the active tab's cwd, as a selectable list. Folders are
-/// sorted first and prefixed with 📁, on green when bookmarked (as in
+/// sorted first (then by the Name / Modified / Type / Size buttons) and
+/// prefixed with 📁, on green when bookmarked (as in
 /// Recent dirs); executable files (Unix +x, or
 /// Windows `.exe`/`.msi`) are coloured green. The listing is refreshed
 /// by [State::refresh_browser_files] on every cwd change and after every
@@ -321,13 +327,15 @@ pub(crate) fn file_browser(state: &mut State, ui: &mut Ui) {
 
     // Listing filters. Each button is highlighted while the entries it
     // covers are shown. The Hidden attribute is Windows-only, so elsewhere
-    // only the dotfile filter appears. Then Cut / Copy / Paste / Delete, and while
-    // anything's selected, Unselect. Wraps so the latter drop to a second row
+    // only the dotfile filter appears. Then Cut / Copy / Paste / Delete, the
+    // sort order (see [files::sort_browser_files]), and while anything's
+    // selected, Unselect. Wraps so the latter drop to a second row
     // in a narrow panel.
     let has_sel = !state.selection.paths.is_empty();
     let pasting = state.paste.is_some();
     let busy = pasting || state.deleting.is_some();
     let mut filters_changed = false;
+    let mut new_sort: Option<FileSort> = None;
 
     let (mut cut, mut copy, mut paste, mut unselect) = (false, false, false, false);
     let mut delete = list_has_keys
@@ -396,6 +404,32 @@ pub(crate) fn file_browser(state: &mut State, ui: &mut Ui) {
             .clicked();
         ui.spacing_mut().item_spacing.x = spacing;
 
+        ui.separator();
+
+        // The listing's order. Clicking the current one reverses it.
+        let current = state.ui.files_sort;
+        for key in SortKey::ALL {
+            let on = current.key == key;
+            let label = match (on, current.descending) {
+                (true, false) => format!("{} ⬆", key.label()),
+                (true, true) => format!("{} ⬇", key.label()),
+                (false, _) => key.label().to_owned(),
+            };
+            let hover = if on {
+                format!("{}. Click to reverse the order.", key.hover())
+            } else {
+                key.hover().to_owned()
+            };
+            if ui.add(Button::selectable(on, label)).on_hover_text(hover).clicked() {
+                let descending = if on {
+                    !current.descending
+                } else {
+                    key.default_descending()
+                };
+                new_sort = Some(FileSort { key, descending });
+            }
+        }
+
         // Its space is kept while it's hidden, so it never wraps the row
         // anew and shifts the listing under the pointer as a click selects.
         unselect = ui
@@ -410,6 +444,9 @@ pub(crate) fn file_browser(state: &mut State, ui: &mut Ui) {
     if filters_changed {
         state.refresh_browser_files();
         let _ = state.save();
+    }
+    if let Some(sort) = new_sort {
+        state.set_files_sort(sort);
     }
     if cut || copy {
         state.copy_selected(cut);
@@ -458,8 +495,8 @@ pub(crate) fn file_browser(state: &mut State, ui: &mut Ui) {
             ui.ctx().request_repaint();
         }
         // In a search box, text on the clipboard was pasted into it.
-        paste |= paste_key
-            && (!own_box_focused || clipboard::get_files().is_ok_and(|f| f.is_some()));
+        paste |=
+            paste_key && (!own_box_focused || clipboard::get_files().is_ok_and(|f| f.is_some()));
     }
     if paste {
         state.paste_files(ui.ctx());
@@ -863,7 +900,11 @@ pub(super) fn row_action(
 /// contents) for clicks before its rows, so it gets those that miss them:
 /// a plain one selects nothing, as in a file manager.
 pub(super) fn background_action(ui: &Ui) -> Option<RowAction> {
-    let resp = ui.interact(ui.clip_rect(), ui.id().with("files_background"), Sense::click());
+    let resp = ui.interact(
+        ui.clip_rect(),
+        ui.id().with("files_background"),
+        Sense::click(),
+    );
     let plain = ui.input(|i| !i.modifiers.command && !i.modifiers.shift);
     (resp.clicked() && plain).then_some(RowAction::Deselect)
 }
@@ -948,20 +989,31 @@ pub(super) fn drop_target(ui: &Ui, resp: &Response, dest: &Path) -> Option<FileD
     let ok = !drag.0.iter().any(|src| dest.starts_with(src));
     let m = ui.input(|i| i.modifiers);
     let mac = ui.ctx().os() == egui::os::OperatingSystem::Mac;
-    let (copy_key, move_key) = if mac { (m.alt, m.mac_cmd) } else { (m.ctrl, m.shift) };
+    let (copy_key, move_key) = if mac {
+        (m.alt, m.mac_cmd)
+    } else {
+        (m.ctrl, m.shift)
+    };
     let copy = copy_key
-        || (!move_key && drag.0.first().is_some_and(|src| !files::same_volume(src, dest)));
-    let name = dest
-        .file_name()
-        .map_or_else(|| dest.display().to_string(), |n| n.to_string_lossy().into_owned());
-    ui.ctx().data_mut(|d| d.insert_temp(drop_hover_id(), DropHover { name, copy, ok }));
+        || (!move_key
+            && drag
+                .0
+                .first()
+                .is_some_and(|src| !files::same_volume(src, dest)));
+    let name = dest.file_name().map_or_else(
+        || dest.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    );
+    ui.ctx()
+        .data_mut(|d| d.insert_temp(drop_hover_id(), DropHover { name, copy, ok }));
     if !ok {
         return None;
     }
     let visuals = ui.visuals();
     let stroke = Stroke::new(2.0, visuals.widgets.active.fg_stroke.color);
     let radius = visuals.widgets.hovered.corner_radius;
-    ui.painter().rect_stroke(resp.rect, radius, stroke, StrokeKind::Inside);
+    ui.painter()
+        .rect_stroke(resp.rect, radius, stroke, StrokeKind::Inside);
 
     let drag = resp.dnd_release_payload::<FileDrag>()?;
     Some(FileDrop {
@@ -986,9 +1038,10 @@ fn drag_preview(ui: &Ui) {
     };
 
     let what = match drag.0.as_slice() {
-        [one] => one
-            .file_name()
-            .map_or_else(|| one.display().to_string(), |n| n.to_string_lossy().into_owned()),
+        [one] => one.file_name().map_or_else(
+            || one.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        ),
         many => format!("{} items", many.len()),
     };
 

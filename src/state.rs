@@ -6,11 +6,11 @@ use std::{
 
 use chrono::Utc;
 use shell::{
-    Appearance, BrowserFile, CmdHistoryPrefs, DirLabelLens, DirList, FilesPanelPrefs, FontSizes, HistoryItem, NavState,
-    OpenTabs, PaneSplits, PanelVis, PanelWidths, RecentDir, RemoteSession, RemoteTerminal, SshMode,
-    WindowSize, apply_completion, current_branch, dir_missing, get_home, read_browser_files,
-    remove_missing_recent_dirs, remove_saved_dir, save_data, ssh, ssh::secrets, stale_dir_list,
-    truncate_branch,
+    Appearance, BrowserFile, CmdHistoryPrefs, DirLabelLens, DirList, FilesPanelPrefs, FontSizes,
+    HistoryItem, NavState, OpenTabs, PaneSplits, PanelVis, PanelWidths, RecentDir, RemoteSession,
+    RemoteTerminal, SshMode, WindowSize, apply_completion, current_branch, dir_missing, get_home,
+    read_browser_files, remove_missing_recent_dirs, remove_saved_dir, save_data, ssh, ssh::secrets,
+    stale_dir_list, truncate_branch,
 };
 
 use crate::{
@@ -19,7 +19,7 @@ use crate::{
     cmd_color::CmdColors,
     completion,
     deep_search::{self, DeepSearch},
-    files::{Delete, FileDetails, SelectionSummary},
+    files::{Delete, FileDetails, FileSort, SelectionSummary, sort_browser_files},
     path_color,
     running::RunningCmd,
     ui::{self, path_panel::PathPanel},
@@ -104,6 +104,9 @@ pub struct StateUi {
     /// `show_dotfiles` covers names starting with `.`.
     pub show_hidden_attr: bool,
     pub show_dotfiles: bool,
+    /// The Files-panel listing's order, picked with the Name / Modified /
+    /// Type / Size buttons. Not persisted.
+    pub files_sort: FileSort,
     /// Files-panel text filter: case-insensitive substring match against
     /// entry names. Empty = show everything. Cleared when the listing moves
     /// to a different directory (see [State::refresh_browser_files]).
@@ -238,6 +241,7 @@ impl Default for StateUi {
             stale_dir: None,
             show_hidden_attr: true,
             show_dotfiles: true,
+            files_sort: FileSort::default(),
             files_search: String::new(),
             browser_files_filter: Vec::new(),
             rename: None,
@@ -546,6 +550,14 @@ impl State {
             let is_dot = f.disp_name.starts_with('.');
             (!f.hidden_attr && !is_dot) || (attr && f.hidden_attr) || (dot && is_dot)
         });
+        sort_browser_files(&mut self.browser_files, self.ui.files_sort);
+        self.refresh_browser_files_filter();
+    }
+
+    /// Reorder the Files-panel listing by `sort`, as its sort buttons do.
+    pub fn set_files_sort(&mut self, sort: FileSort) {
+        self.ui.files_sort = sort;
+        sort_browser_files(&mut self.browser_files, sort);
         self.refresh_browser_files_filter();
     }
 
@@ -849,7 +861,10 @@ impl State {
         if let Some(dir) = first.parent() {
             self.touch_recent_dir(dir);
         }
-        let content = clipboard::Content::Files { paths: paths.clone(), cut };
+        let content = clipboard::Content::Files {
+            paths: paths.clone(),
+            cut,
+        };
         self.ui.clipboard.sys.set(content.clone());
         self.ui.clipboard.history.record(content);
         if let Err(e) = clipboard::set_files(&paths, cut) {
@@ -869,7 +884,10 @@ impl State {
         match clipboard::get_files() {
             Ok(Some((srcs, cut))) => {
                 // Files the watcher already knows keep their entry's time.
-                let content = clipboard::Content::Files { paths: srcs.clone(), cut };
+                let content = clipboard::Content::Files {
+                    paths: srcs.clone(),
+                    cut,
+                };
                 if !self.ui.clipboard.sys.holds(&content) {
                     self.ui.clipboard.sys.set(content.clone());
                     self.ui.clipboard.history.record(content);
@@ -878,7 +896,10 @@ impl State {
                 self.touch_recent_dir(&dest);
                 self.paste = Some(Paste::start(srcs, dest, cut, ctx.clone()));
             }
-            Ok(None) => self.push_out("paste: there are no files on the clipboard", OutType::StdErr),
+            Ok(None) => self.push_out(
+                "paste: there are no files on the clipboard",
+                OutType::StdErr,
+            ),
             Err(e) => self.push_out(format!("paste: {e}"), OutType::StdErr),
         }
     }
@@ -919,7 +940,9 @@ impl State {
         for (src, r) in paste.srcs.iter().zip(results) {
             match r {
                 Ok(path) => {
-                    if paste.moving && *src != path { moved.push(src.clone()); }
+                    if paste.moving && *src != path {
+                        moved.push(src.clone());
+                    }
                     pasted.push(path);
                 }
                 Err(e) => self.push_out(format!("paste: {e}"), OutType::StdErr),
@@ -927,7 +950,9 @@ impl State {
         }
         self.ui.clipboard.history.forget_paths(&moved);
         // Even a partial move makes the old OS file list unsafe to reuse.
-        if !moved.is_empty() { clipboard::clear_if_holds(&paste.srcs); }
+        if !moved.is_empty() {
+            clipboard::clear_if_holds(&paste.srcs);
+        }
         self.refresh_browser_files();
         // What's dropped in a subfolder isn't here to select, so the
         // selection is left as it is.
@@ -1662,7 +1687,7 @@ impl State {
         self.save_or_warn();
     }
 
-    /// The Bookmarks / Recent dirs "Cleanup missing" button: drop every dir in
+    /// The Bookmarks / Recent dirs "Cleanup" button: drop every dir in
     /// `list` that's gone from disk (see [dir_missing]), listing them in the
     /// output pane.
     pub fn cleanup_missing_dirs(&mut self, list: DirList) {
@@ -2149,7 +2174,11 @@ fn parse_remote_spec(spec: &str) -> (String, u16, String) {
 
 /// The egui theme for a dark or light window.
 pub fn theme(dark: bool) -> egui::Theme {
-    if dark { egui::Theme::Dark } else { egui::Theme::Light }
+    if dark {
+        egui::Theme::Dark
+    } else {
+        egui::Theme::Light
+    }
 }
 
 impl eframe::App for State {

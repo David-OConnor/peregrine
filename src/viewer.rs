@@ -20,9 +20,9 @@ use std::{
 
 use egui::{
     CentralPanel, Color32, ColorImage, Context, Frame, Id, Key, Label, Margin, Modifiers, Panel,
-    Rect, RichText, ScrollArea, Sense, TextureFilter, TextureHandle, TextureOptions, Ui,
-    UiBuilder, Vec2, ViewportBuilder, ViewportCommand, ViewportId, emath::GuiRounding, pos2,
-    scroll_area, vec2,
+    Rect, RichText, ScrollArea, Sense, TextureFilter, TextureHandle, TextureOptions, Ui, UiBuilder,
+    Vec2, ViewportBuilder, ViewportCommand, ViewportId, emath::GuiRounding, pos2, scroll_area,
+    vec2,
 };
 use egui_commonmark::CommonMarkCache;
 use image::{
@@ -262,9 +262,9 @@ impl Doc {
         let read = read_text(&self.path);
         self.layout.clear();
         self.truncated = read.as_ref().ok().and_then(|(_, size)| *size);
-        self.lines = read
-            .as_ref()
-            .map_or(0, |(text, _)| text.bytes().filter(|&b| b == b'\n').count() + 1);
+        self.lines = read.as_ref().map_or(0, |(text, _)| {
+            text.bytes().filter(|&b| b == b'\n').count() + 1
+        });
         self.blocks = match (&read, self.kind) {
             (Ok((text, _)), Kind::Markdown) => markdown::split_details(text),
             _ => Vec::new(),
@@ -875,10 +875,12 @@ fn show_image(ui: &mut Ui, picture: &Picture, zoom: &mut Zoom, window: ViewportI
         .id_salt(scroll_salt)
         .auto_shrink([false, false]);
     let factor = ui.input(|i| i.zoom_delta());
+
     let pointer = ui
         .ctx()
         .pointer_hover_pos()
         .filter(|p| viewport.contains(*p));
+
     if let Some(pointer) = pointer
         && factor != 1.
     {
@@ -886,13 +888,16 @@ fn show_image(ui: &mut Ui, picture: &Picture, zoom: &mut Zoom, window: ViewportI
         // Scroll so the image point under the pointer stays there.
         let offset = scroll_area::State::load(ui.ctx(), ui.make_persistent_id(scroll_salt))
             .map_or(Vec2::ZERO, |s| s.offset);
+
         let at = pointer - viewport.min;
         let point = (offset + at - padding(actual * scale, viewport.size())) / scale;
         let offset = point * new_scale + padding(actual * new_scale, viewport.size()) - at;
+
         scroll = scroll.scroll_offset(offset.max(Vec2::ZERO));
         scale = new_scale;
         zoom.set = Some(new_scale);
     }
+
     if zoom.shown != scale {
         zoom.shown = scale;
         // For the toolbar, already drawn this pass.
@@ -906,6 +911,7 @@ fn show_image(ui: &mut Ui, picture: &Picture, zoom: &mut Zoom, window: ViewportI
         Some(_) => size.max(viewport.size()),
         None => viewport.size(),
     };
+
     scroll.show(ui, |ui| {
         let (rect, _) = ui.allocate_exact_size(content, Sense::hover());
         let image_rect = Rect::from_center_size(rect.center(), size).round_to_pixels(ppp);

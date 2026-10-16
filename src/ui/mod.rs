@@ -14,10 +14,10 @@ use egui::{
 use shell::{DirList, SshMode};
 
 mod about;
-mod file_browser;
-pub mod path_panel;
 pub mod clipboard;
 pub mod dirs;
+mod file_browser;
+pub mod path_panel;
 mod tab_keys;
 
 /// Renders a single-line "Search" box that fills the available width and
@@ -760,7 +760,9 @@ fn term_in(state: &mut State, ui: &mut Ui) {
     let caret_at_end = TextEdit::load_state(ui.ctx(), input_id)
         .and_then(|s| s.cursor.char_range())
         .is_none_or(|r| {
-            r.is_empty() && r.primary.index == egui::text::CharIndex(state.ui.cli_input[active].chars().count())
+            r.is_empty()
+                && r.primary.index
+                    == egui::text::CharIndex(state.ui.cli_input[active].chars().count())
         });
     let hint = if focused && caret_at_end && running.is_none() {
         state.input_hint()
@@ -805,7 +807,8 @@ fn term_in(state: &mut State, ui: &mut Ui) {
     // for path autocompletion.
     if let Some(text) = state.ui.clipboard.pending_text.take() {
         ui.ctx().memory_mut(|m| m.request_focus(input_id));
-        ui.ctx().input_mut(|i| i.events.push(egui::Event::Paste(text)));
+        ui.ctx()
+            .input_mut(|i| i.events.push(egui::Event::Paste(text)));
     }
     let output = TextEdit::multiline(&mut state.ui.cli_input[active])
         .id(input_id)
@@ -1224,7 +1227,9 @@ fn deep_search_results(
                         .sense(egui::Sense::click_and_drag())
                         .min_size(egui::vec2(ui.available_width(), row_height));
                     if bookmarked {
-                        button = button.fill(dirs::bookmarked_fill(dark)).frame_when_inactive(true);
+                        button = button
+                            .fill(dirs::bookmarked_fill(dark))
+                            .frame_when_inactive(true);
                     }
                     let resp = ui.add(button);
                     // A matching line's row stands for its file. These can't
@@ -1719,7 +1724,11 @@ fn tabs_bar(state: &mut State, ui: &mut Ui) {
     ui.horizontal(|ui| {
         // The theme toggle comes first, showing the theme a click switches to.
         let dark = ui.visuals().dark_mode;
-        let (icon, other) = if dark { ("☀", "light") } else { ("🌙", "dark") };
+        let (icon, other) = if dark {
+            ("☀", "light")
+        } else {
+            ("🌙", "dark")
+        };
         if ui
             .button(icon)
             .on_hover_text(format!("Switch to {other} mode"))
@@ -1962,13 +1971,11 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
         ui.ctx().request_repaint();
     }
 
-    Panel::top("tabs_panel")
-        .resizable(false)
-        .show(ui, |ui| {
-            shrink_panel_fonts(ui);
-            tabs_bar(state, ui);
-            panel_toggles(state, ui);
-        });
+    Panel::top("tabs_panel").resizable(false).show(ui, |ui| {
+        shrink_panel_fonts(ui);
+        tabs_bar(state, ui);
+        panel_toggles(state, ui);
+    });
 
     // The side panels' text follows the "GUI font size" control.
     let gui_font_size = state.gui_font_size;
@@ -2093,11 +2100,9 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
             term_in(state, ui);
         });
 
-    CentralPanel::default()
-        .frame(term_frame)
-        .show(ui, |ui| {
-            term_out(state, ui);
-        });
+    CentralPanel::default().frame(term_frame).show(ui, |ui| {
+        term_out(state, ui);
+    });
 
     // File viewer windows are child viewports: they only stay open while
     // the main window's pass keeps showing them.

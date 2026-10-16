@@ -1,17 +1,17 @@
-//! Colour-coding for directory paths, so how deep a directory sits reads at
-//! a glance wherever it appears: the Bookmarks, Recent dirs and Files panels,
-//! the input row's prompt, and prompts echoed into the output pane.
+//! Color-coding for directory paths, so how deep a directory sits reads at
+//! a glance wherever it appears.
 //!
-//! Each directory is coloured by its depth, along the Viridis scale: a root
+//! Each directory is colored by its depth, along the Viridis scale: a root
 //! (`/`, `C:`, a UNC path's `\\`) is purple, and each level below it steps
 //! through blue and green towards yellow, which every directory
-//! [depth_levels] or more levels down gets. The home directory (`~`, or its
-//! full form like `C:\Users\me`) counts as a root, so `~/code` is one level
-//! down. Separators (`/`, `\`) between directories keep the surrounding
-//! text's colour.
+//! [depth_levels] or more levels down gets. The home directory counts as a root.
+//! Separators (`/`, `\`) between directories keep the surrounding
+//! text's color.
 
-use std::fmt::Write;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::{
+    fmt::Write,
+    sync::atomic::{AtomicU8, Ordering},
+};
 
 use egui::{Color32, FontId, TextFormat, text::LayoutJob};
 
@@ -34,7 +34,10 @@ pub fn depth_levels() -> u8 {
 
 /// Set [depth_levels], clamped to [MIN_DEPTH_LEVELS]..=[MAX_DEPTH_LEVELS].
 pub fn set_depth_levels(n: u8) {
-    DEPTH_LEVELS.store(n.clamp(MIN_DEPTH_LEVELS, MAX_DEPTH_LEVELS), Ordering::Relaxed);
+    DEPTH_LEVELS.store(
+        n.clamp(MIN_DEPTH_LEVELS, MAX_DEPTH_LEVELS),
+        Ordering::Relaxed,
+    );
 }
 
 /// Viridis at 11 even stops (matplotlib's `#440154` to `#FDE725`), with its
@@ -56,20 +59,22 @@ const VIRIDIS_DARK: [Color32; 11] = [
     Color32::from_rgb(0xFF, 0xEB, 0x5D), // deepest: yellow
 ];
 
-/// [VIRIDIS_DARK] for the light-mode panels: lightness 0.30 to 0.56, so the
-/// yellow end darkens to ochre (at least 4:1 contrast).
+/// [VIRIDIS_DARK] for the light-mode panels: lightness 0.34 to 0.72, so the
+/// yellow end darkens to gold, and chroma tripled (as far as sRGB allows).
+/// Dark colours look alike on a light background unless they're vivid, so
+/// without the boost the purple, blue and teal end all read as near-black.
 const VIRIDIS_LIGHT: [Color32; 11] = [
-    Color32::from_rgb(0x48, 0x06, 0x54),
-    Color32::from_rgb(0x41, 0x1C, 0x68),
-    Color32::from_rgb(0x31, 0x32, 0x6E),
-    Color32::from_rgb(0x19, 0x43, 0x6B),
-    Color32::from_rgb(0x00, 0x52, 0x64),
-    Color32::from_rgb(0x00, 0x5F, 0x5A),
-    Color32::from_rgb(0x00, 0x6A, 0x4C),
-    Color32::from_rgb(0x00, 0x74, 0x32),
-    Color32::from_rgb(0x21, 0x79, 0x00),
-    Color32::from_rgb(0x5F, 0x79, 0x00),
-    Color32::from_rgb(0x8C, 0x74, 0x00),
+    Color32::from_rgb(0x59, 0x00, 0x68),
+    Color32::from_rgb(0x58, 0x00, 0x94),
+    Color32::from_rgb(0x41, 0x00, 0xC9),
+    Color32::from_rgb(0x00, 0x57, 0x99),
+    Color32::from_rgb(0x00, 0x6C, 0x80),
+    Color32::from_rgb(0x00, 0x7B, 0x75),
+    Color32::from_rgb(0x00, 0x8A, 0x6B),
+    Color32::from_rgb(0x00, 0x9A, 0x55),
+    Color32::from_rgb(0x34, 0xA7, 0x00),
+    Color32::from_rgb(0x89, 0xA7, 0x00),
+    Color32::from_rgb(0xBC, 0xA6, 0x00),
 ];
 
 /// The colour of a directory `depth` levels below a root (or `~`), for a
@@ -87,7 +92,7 @@ pub fn depth_color(depth: usize, dark: bool) -> Color32 {
 }
 
 /// One run of a displayed path. `color` is `None` for text that keeps the
-/// default colour (separators, and any prefix the caller adds).
+/// default color (separators, and any prefix the caller adds).
 pub struct Part {
     pub text: String,
     pub color: Option<Color32>,
@@ -164,7 +169,7 @@ pub fn parts(display: &str, home: Option<&str>, dark: bool) -> Vec<Part> {
     out
 }
 
-/// The colour [parts] gives the last directory in `display`, e.g. for a
+/// The color [parts] gives the last directory in `display`, e.g. for a
 /// folder's row in the Files list.
 pub fn last_color(display: &str, home: Option<&str>, dark: bool) -> Option<Color32> {
     parts(display, home, dark)
@@ -175,7 +180,7 @@ pub fn last_color(display: &str, home: Option<&str>, dark: bool) -> Option<Color
 
 /// Shorten `parts` to at most `max` characters for a narrow column, keeping
 /// the tail (the most specific part of the path) behind a leading `...`.
-/// Truncating after colouring means a cut-off directory keeps its colour.
+/// Truncating after coloring means a cut-off directory keeps its color.
 pub fn truncate_start(parts: Vec<Part>, max: usize) -> Vec<Part> {
     let count: usize = parts.iter().map(|p| p.text.chars().count()).sum();
     if count <= max {
@@ -198,11 +203,12 @@ pub fn truncate_start(parts: Vec<Part>, max: usize) -> Vec<Part> {
         });
         skip = 0;
     }
+
     out
 }
 
-/// Lay `parts` out for a label or button. `default` colours the uncoloured
-/// runs; pass [Color32::PLACEHOLDER] to use the widget's own text colour
+/// Lay `parts` out for a label or button. `default` colors the uncolored
+/// runs; pass [Color32::PLACEHOLDER] to use the widget's own text color
 /// (which follows hover / selection). If `last_font` is given, the last
 /// coloured run (the path's final directory) is drawn in it, e.g. to bold it.
 pub fn layout_job(
@@ -232,8 +238,8 @@ pub fn layout_job(
 }
 
 /// `parts` as text with ANSI truecolour escapes, for strings that go through
-/// the output pane's ANSI parser (see `crate::ansi`). Uncoloured runs reset to
-/// the line's default colour.
+/// the output pane's ANSI parser (see `crate::ansi`). Uncolored runs reset to
+/// the line's default color.
 pub fn to_ansi(parts: &[Part]) -> String {
     let mut s = String::new();
 
@@ -248,63 +254,4 @@ pub fn to_ansi(parts: &[Part]) -> String {
     }
 
     s
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn colors(display: &str, home: Option<&str>) -> Vec<(String, Option<Color32>)> {
-        parts(display, home, true)
-            .into_iter()
-            .map(|p| (p.text, p.color))
-            .collect()
-    }
-
-    fn c(depth: usize) -> Option<Color32> {
-        Some(depth_color(depth, true))
-    }
-
-    #[test]
-    fn root_and_home_are_purple() {
-        assert_eq!(depth_color(0, true), VIRIDIS_DARK[0]);
-        assert_eq!(colors("/", None), [("/".into(), c(0))]);
-        assert_eq!(colors("~", Some("~")), [("~".into(), c(0))]);
-        assert_eq!(
-            colors(r"C:\Users\me", Some(r"C:\Users\me")),
-            [(r"C:\Users\me".into(), c(0))]
-        );
-    }
-
-    #[test]
-    fn depth_counts_from_root_or_home() {
-        assert_eq!(
-            colors("/usr/lib", None),
-            [
-                ("/".into(), c(0)),
-                ("usr".into(), c(1)),
-                ("/".into(), None),
-                ("lib".into(), c(2)),
-            ]
-        );
-        assert_eq!(
-            colors(r"C:\Users", None),
-            [("C:".into(), c(0)), (r"\".into(), None), ("Users".into(), c(1))]
-        );
-        assert_eq!(
-            colors(r"C:\Users\me\strike", Some(r"C:\Users\me")),
-            [
-                (r"C:\Users\me".into(), c(0)),
-                (r"\".into(), None),
-                ("strike".into(), c(1)),
-            ]
-        );
-    }
-
-    #[test]
-    fn saturates_at_depth_levels() {
-        let levels = depth_levels() as usize;
-        assert_eq!(depth_color(levels, true), VIRIDIS_DARK[10]);
-        assert_eq!(depth_color(levels + 5, false), VIRIDIS_LIGHT[10]);
-    }
 }

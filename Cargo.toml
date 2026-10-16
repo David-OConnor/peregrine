@@ -9,14 +9,16 @@ chrono = "0.4.45"
 egui = "0.36.2"
 eframe = "0.36.2"
 
-# Markdown viewer windows (see `src/markdown.rs`). egui_commonmark 0.25 is the
-# release built against egui 0.36. `better_syntax_highlighting` colours fenced
-# code blocks via syntect (pure-Rust regex, no C deps); the default features
-# load local images the document references.
+# Markdown viewer windows. `better_syntax_highlighting` colors fenced
+# code blocks via syntect.
 egui_commonmark = { version = "0.25.0", features = ["better_syntax_highlighting"] }
-# Source viewer highlighting: the same engine/features already built for Markdown.
+
+# Syntax highlighting: the same engine/features already built for Markdown.
 # Keep defaults off so this doesn't add the Oniguruma C dependency.
 syntect = { version = "5.3", default-features = false, features = ["default-fancy"] }
+
+# Note: RustRover is marking `egui_extras` as unused, but it's not. Code will
+# compile without it, but MD features will be missing.
 # Image loaders for those pictures (egui_commonmark installs them). `http`
 # fetches remote images (README badges etc.) on a background thread via
 # ehttp; `svg_text` renders the text in SVGs, which badges are mostly made of.
@@ -64,9 +66,10 @@ windows-sys = { version = "0.61", features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
 # Files panel Cut / Copy / Paste (see `src/clipboard.rs`): file lists on the
 # clipboard, plus Explorer's "Preferred DropEffect" marking a cut. Already
-# built for egui's own clipboard (via arboard), so nothing new.
+# built for egui's own clipboard (via arboard).
 clipboard-win = { version = "5.4", features = ["std"] }
 
 # The same, elsewhere: arboard reads and writes the clipboard's file list.

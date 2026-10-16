@@ -24,7 +24,6 @@ use std::{
 };
 
 use chrono::Utc;
-
 /// One copy operation, and a history entry: it, and when it was last put on
 /// the clipboard. Copying it again moves the entry to the top with a new
 /// time. They live in `shell` so the state file can hold the history.

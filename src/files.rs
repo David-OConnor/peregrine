@@ -59,6 +59,103 @@ impl Delete {
     }
 }
 
+/// What the Files panel's listing is ordered by, picked with the buttons
+/// above it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SortKey {
+    Name,
+    Modified,
+    /// By extension.
+    Type,
+    Size,
+}
+
+impl SortKey {
+    pub const ALL: [Self; 4] = [Self::Name, Self::Modified, Self::Type, Self::Size];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Name => "Name",
+            Self::Modified => "Modified",
+            Self::Type => "Type",
+            Self::Size => "Size",
+        }
+    }
+
+    pub fn hover(self) -> &'static str {
+        match self {
+            Self::Name => "Sort by name",
+            Self::Modified => "Sort by date modified",
+            Self::Type => "Sort by type (file extension)",
+            Self::Size => "Sort by size",
+        }
+    }
+
+    /// Picking a key starts newest or largest first; names and types A to Z.
+    pub fn default_descending(self) -> bool {
+        matches!(self, Self::Modified | Self::Size)
+    }
+}
+
+/// The Files panel's listing order: by `key`, reversed if `descending`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FileSort {
+    pub key: SortKey,
+    pub descending: bool,
+}
+
+impl Default for FileSort {
+    fn default() -> Self {
+        Self {
+            key: SortKey::Name,
+            descending: false,
+        }
+    }
+}
+
+/// Order `files` as `sort` says. Folders always come first; they have no
+/// size or type, so by those they're in name order. Ties go by name, A to Z.
+/// Only Modified and Size stat the entries.
+pub fn sort_browser_files(files: &mut Vec<BrowserFile>, sort: FileSort) {
+    let stat = matches!(sort.key, SortKey::Modified | SortKey::Size);
+    let mut keyed: Vec<_> = files
+        .drain(..)
+        .map(|f| {
+            let md = if stat {
+                fs::metadata(&f.path).ok()
+            } else {
+                None
+            };
+            let modified = md.as_ref().and_then(|m| m.modified().ok());
+            let size = md.map(|m| m.len());
+            let ext = f
+                .path
+                .extension()
+                .map(|e| e.to_string_lossy().to_lowercase())
+                .unwrap_or_default();
+            (f.disp_name.to_lowercase(), ext, modified, size, f)
+        })
+        .collect();
+
+    keyed.sort_by(|a, b| {
+        let (name_a, ext_a, mod_a, size_a, fa) = a;
+        let (name_b, ext_b, mod_b, size_b, fb) = b;
+        let folders = fb.is_folder.cmp(&fa.is_folder);
+        let both_files = !fa.is_folder && !fb.is_folder;
+        let by = match sort.key {
+            SortKey::Name => name_a.cmp(name_b),
+            SortKey::Modified => mod_a.cmp(mod_b),
+            SortKey::Type if both_files => ext_a.cmp(ext_b),
+            SortKey::Size if both_files => size_a.cmp(size_b),
+            SortKey::Type | SortKey::Size => std::cmp::Ordering::Equal,
+        };
+        let by = if sort.descending { by.reverse() } else { by };
+        folders.then(by).then_with(|| name_a.cmp(name_b))
+    });
+
+    files.extend(keyed.into_iter().map(|k| k.4));
+}
+
 /// What the Files panel's details pane shows for the selected row. Read once
 /// on selection (and again when the listing refreshes) by [FileDetails::read],
 /// so rendering never touches the filesystem.
@@ -158,7 +255,10 @@ impl SelectionSummary {
             folders: 0,
             size: 0,
             modified: None,
-            dir: paths.first().and_then(|p| p.parent()).map(Path::to_path_buf),
+            dir: paths
+                .first()
+                .and_then(|p| p.parent())
+                .map(Path::to_path_buf),
         };
         for path in paths {
             let md = fs::metadata(path).ok();
@@ -176,7 +276,8 @@ impl SelectionSummary {
                 s.dir = None;
             }
             let name = path.file_name().unwrap_or(path.as_os_str());
-            s.items.push((name.to_string_lossy().into_owned(), is_folder));
+            s.items
+                .push((name.to_string_lossy().into_owned(), is_folder));
         }
         s
     }
