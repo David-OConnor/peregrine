@@ -185,10 +185,6 @@ const TAB_SECTION_ROUNDING: u8 = 4;
 /// Width of the line marking where a dragged tab will land. See [tabs_bar].
 const TAB_DROP_MARKER_WIDTH: f32 = 2.;
 
-/// Max characters of a running command shown beside the input row; the rest
-/// is in its hover text.
-const RUNNING_LABEL_LEN: usize = 40;
-
 const COLOR_PROMPT: Color32 = Color32::from_rgb(220, 220, 90);
 const COLOR_STDOUT: Color32 = Color32::from_rgb(210, 210, 210);
 const COLOR_STDERR: Color32 = Color32::from_rgb(240, 110, 110);
@@ -692,7 +688,9 @@ fn term_in(state: &mut State, ui: &mut Ui) {
     let show_branch = !state.is_remote();
     let running = state.running_here().map(|cmd| cmd.line.clone());
     let mut stop = false;
-    ui.horizontal(|ui| {
+    // Wrapped, so a long cwd or running command flows onto extra rows (and
+    // the Stop button drops below) instead of running off the right edge.
+    ui.horizontal_wrapped(|ui| {
         let mono = TextStyle::Monospace.resolve(ui.style());
         ui.label(path_color::layout_job(&cwd_parts, mono, None, COLOR_PROMPT));
         if let Some(b) = branch {
@@ -721,16 +719,11 @@ fn term_in(state: &mut State, ui: &mut Ui) {
         // While a command runs, the input goes to its stdin instead.
         match &running {
             Some(line) => {
-                let short = match line.char_indices().nth(RUNNING_LABEL_LEN) {
-                    Some((i, _)) => format!("{}...", &line[..i]),
-                    None => line.clone(),
-                };
                 ui.label(
-                    RichText::new(format!("running: {short}"))
+                    RichText::new(format!("running: {line}"))
                         .color(COLOR_STDERR_OK)
                         .monospace(),
-                )
-                .on_hover_text(line);
+                );
                 stop = ui
                     .button("Stop")
                     .on_hover_text("End the command and everything it started (Ctrl+C)")
