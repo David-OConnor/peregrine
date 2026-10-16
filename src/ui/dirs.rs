@@ -234,26 +234,6 @@ fn dir_label_len_control(ui: &mut Ui, label: &str, len: &mut usize, what: &str) 
 
     let mut done = (resp.changed() && !resp.dragged()) || resp.drag_stopped();
 
-    if ui
-        .small_button("-")
-        .on_hover_text(format!("Show less of {what} paths"))
-        .clicked()
-        && *len > MIN_DIR_LABEL_LEN
-    {
-        *len -= 1;
-        done = true;
-    }
-
-    if ui
-        .small_button("+")
-        .on_hover_text(format!("Show more of {what} paths"))
-        .clicked()
-        && *len < MAX_DIR_LABEL_LEN
-    {
-        *len += 1;
-        done = true;
-    }
-
     done
 }
 
@@ -262,14 +242,17 @@ fn dir_label_len_control(ui: &mut Ui, label: &str, len: &mut usize, what: &str) 
 /// the tooltips. Returns true if it changed.
 fn dir_label_mode_control(ui: &mut Ui, names: &mut bool, what: &str) -> bool {
     let before = *names;
+
     ui.selectable_value(names, false, "Paths")
         .on_hover_text(format!(
             "Show each {what}'s path, e.g. ~/code/Bio/molchanica"
         ));
+
     ui.selectable_value(names, true, "Names")
         .on_hover_text(format!(
             "Show just each {what}'s final name, e.g. molchanica"
         ));
+
     *names != before
 }
 
@@ -286,13 +269,12 @@ fn button_width(ui: &Ui, text: &str) -> f32 {
 
 /// The Bookmarks / Recent dirs "Cleanup" button, for `list`. Returns
 /// true when clicked.
-fn cleanup_missing_button(ui: &mut Ui, list: DirList) -> bool {
+pub(super) fn cleanup_missing_button(ui: &mut Ui) -> bool {
     ui.button("Cleanup")
-        .on_hover_text(format!(
-            "Remove {} that no longer exist on disk. Only the list changes; \
+        .on_hover_text(
+            "Remove bookmarks and recent directory history that no longer exist on disk. Only the list changes; \
              nothing on disk is touched.",
-            list.name()
-        ))
+        )
         .clicked()
 }
 
@@ -310,9 +292,11 @@ fn dir_label_settings(ui: &mut Ui, len: &mut usize, names: &mut bool, what: &str
 
     let mut done = false;
     let mut wrap = false;
+
     ui.horizontal(|ui| {
         done = dir_label_len_control(ui, "Chars: ", len, what);
         wrap = ui.available_width() < mode_width;
+
         if !wrap {
             ui.add_space(gap);
             done |= dir_label_mode_control(ui, names, what);
@@ -362,9 +346,6 @@ pub(super) fn dir_bookmarks(state: &mut State, ui: &mut Ui) {
         if cwd_bookmark_button(ui, state).clicked() {
             let msg = state.toggle_bookmark_cwd();
             state.push_out(msg, OutType::StdOut);
-        }
-        if cleanup_missing_button(ui, DirList::Bookmarks) {
-            state.cleanup_missing_dirs(DirList::Bookmarks);
         }
     });
 
@@ -430,10 +411,6 @@ pub(super) fn dir_history(state: &mut State, ui: &mut Ui) {
         "recent dir",
     ) {
         let _ = state.save();
-    }
-
-    if cleanup_missing_button(ui, DirList::RecentDirs) {
-        state.cleanup_missing_dirs(DirList::RecentDirs);
     }
 
     if ui::search_box(ui, &mut state.ui.recent_dirs_search, "recent_dirs_search") {

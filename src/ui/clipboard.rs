@@ -133,12 +133,14 @@ impl ClipboardPane {
 }
 
 /// Translate output right-clicks before egui treats them as selection drags.
-/// Copy events use the same label selection and TextCapture path as Ctrl+C.
+/// Selected scrollback is copied from its model, including offscreen rows.
 #[derive(Default)]
 struct OutputCopy {
     target: Option<(egui::ViewportId, egui::LayerId, egui::Rect)>,
     selection_in_output: bool,
     copying: bool,
+    has_selection: bool,
+    copy_requested: bool,
 }
 
 impl egui::plugin::Plugin for OutputCopy {
@@ -164,26 +166,27 @@ impl egui::plugin::Plugin for OutputCopy {
                     let in_output = rect.contains(*pos) && ctx.layer_id_at(*pos) == Some(layer);
                     if *button == egui::PointerButton::Primary && *pressed {
                         self.selection_in_output = in_output;
+                        if !in_output {
+                            self.has_selection = false;
+                        }
                     }
                     if *button == egui::PointerButton::Secondary {
                         if *pressed {
-                            self.copying = in_output
-                                && self.selection_in_output
-                                && ctx
-                                    .with_plugin(
-                                        |s: &mut egui::text_selection::LabelSelectionState| {
-                                            s.has_selection()
-                                        },
-                                    )
-                                    .unwrap_or(false);
+                            self.copying =
+                                in_output && self.selection_in_output && self.has_selection;
                             if self.copying {
-                                *event = egui::Event::Copy;
+                                self.copy_requested = true;
+                                return false;
                             }
                         } else if self.copying {
                             self.copying = false;
                             return false;
                         }
                     }
+                }
+                egui::Event::Copy if self.has_selection && self.selection_in_output => {
+                    self.copy_requested = true;
+                    return false;
                 }
                 egui::Event::WindowFocused(false) => self.copying = false,
                 _ => {}
@@ -194,11 +197,17 @@ impl egui::plugin::Plugin for OutputCopy {
 }
 
 /// Remember the visible output area, excluding its scrollbar and other panes.
-pub fn copy_output_on_right_click(ui: &Ui, rect: egui::Rect) {
+pub fn copy_output_on_right_click(ui: &Ui, rect: egui::Rect, has_selection: bool) {
     ui.ctx().add_plugin(OutputCopy::default());
     ui.ctx().with_plugin(|p: &mut OutputCopy| {
         p.target = Some((ui.ctx().viewport_id(), ui.layer_id(), rect));
+        p.has_selection = has_selection;
     });
+}
+
+pub(super) fn take_output_copy(ctx: &egui::Context) -> bool {
+    ctx.with_plugin(|p: &mut OutputCopy| std::mem::take(&mut p.copy_requested))
+        .unwrap_or(false)
 }
 
 pub fn capture(state: &mut State, ctx: &egui::Context) {

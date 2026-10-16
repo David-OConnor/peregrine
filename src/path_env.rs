@@ -5,11 +5,13 @@
 //!   own "Edit environment variable" dialog edits. A new process gets
 //!   System's entries followed by User's. Writing System's needs admin, so
 //!   this app relaunches itself elevated to do it (see [run_elevated_helper]).
+//! 
 //! - Linux / macOS: User is a block this panel keeps in a shell startup file
 //!   (`~/.bashrc` by default), which adds its entries to the front of PATH.
 //!   System is the PATH line in `/etc/environment` on Linux, and `/etc/paths`
 //!   on macOS; writing either needs root, asked for with the OS's password
 //!   prompt.
+//! 
 //! - Everywhere: Session is this process's own PATH, which the commands run
 //!   from it inherit. Changing it lasts until the app exits, like
 //!   `export PATH=...` in a terminal.

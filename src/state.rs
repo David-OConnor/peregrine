@@ -14,7 +14,7 @@ use shell::{
 };
 
 use crate::{
-    OutItem, OutType,
+    OutType,
     clipboard::{self, Paste},
     cmd_color::CmdColors,
     completion,
@@ -22,6 +22,7 @@ use crate::{
     files::{Delete, FileDetails, FileSort, SelectionSummary, sort_browser_files},
     path_color,
     running::RunningCmd,
+    terminal::{self, Output},
     ui::{self, path_panel::PathPanel},
     viewer::{FileViewers, ImagePreview},
 };
@@ -36,8 +37,8 @@ pub struct StateUi {
     pub about_folder_error: Option<String>,
     /// By tab
     pub cli_input: Vec<String>,
-    /// Outer: Per tab. Inner: Out items in that tab.
-    pub out: Vec<Vec<OutItem>>,
+    /// Bounded terminal scrollback per tab.
+    pub out: Vec<Output>,
     /// Which tab in `State::cwd` / `cli_input` / `out` is currently shown.
     /// Always a valid index into those parallel vectors; we maintain the
     /// invariant that there is at least one tab.
@@ -180,7 +181,7 @@ pub struct DetachedTab {
     index: usize,
     cwd: PathBuf,
     cli_input: String,
-    out: Vec<OutItem>,
+    out: Output,
     nav_back: Vec<PathBuf>,
     nav_forward: Vec<PathBuf>,
 }
@@ -192,10 +193,22 @@ impl DetachedTab {
             index,
             cwd,
             cli_input: String::new(),
-            out: Vec::new(),
+            out: Output::default(),
             nav_back: Vec::new(),
             nav_forward: Vec::new(),
         }
+    }
+}
+
+fn trim_closed_output(tabs: &mut [DetachedTab]) {
+    let mut held: usize = tabs.iter().map(|t| t.out.retained_bytes()).sum();
+    for tab in tabs {
+        if held <= terminal::CLOSED_BYTES {
+            break;
+        }
+        let before = tab.out.retained_bytes();
+        tab.out.clear();
+        held -= before - tab.out.retained_bytes();
     }
 }
 
@@ -219,7 +232,7 @@ impl Default for StateUi {
             about: false,
             about_folder_error: None,
             cli_input: vec![String::new()],
-            out: vec![Vec::new()],
+            out: vec![Output::default()],
             active_tab: 0,
             focus_input: true,
             pending_cmd: None,
@@ -1087,8 +1100,8 @@ impl State {
     }
 
     /// Adjust the terminal-pane font size by `delta` points, clamped to a
-    /// sane range, and persist the change. Wired to the "CLI font size" +/-
-    /// buttons on the tab strip.
+    /// sane range, and persist the change. Wired to the "CLI font size"
+    /// drag control on the tab strip.
     pub fn adjust_font_size(&mut self, delta: f32) {
         let next = (self.font_size + delta).clamp(ui::MIN_FONT_SIZE, ui::MAX_FONT_SIZE);
         if next != self.font_size {
@@ -1176,7 +1189,7 @@ impl State {
         ui.path_details_split = splits.path.unwrap_or(ui.path_details_split);
         ui.active_tab = active_tab;
         ui.cli_input = vec![String::new(); n];
-        ui.out = (0..n).map(|_| Vec::new()).collect();
+        ui.out = (0..n).map(|_| Output::default()).collect();
         ui.history_nav = (0..n).map(|_| NavState::new()).collect();
         ui.nav_back = (0..n).map(|_| Vec::new()).collect();
         ui.nav_forward = (0..n).map(|_| Vec::new()).collect();
@@ -1248,11 +1261,7 @@ impl State {
 
     /// [Self::push_out] to tab `i`, which needn't be the active one.
     pub fn push_out_to(&mut self, i: usize, text: impl Into<String>, type_: OutType) {
-        self.ui.out[i].push(OutItem {
-            text: text.into(),
-            type_,
-            dt: Utc::now(),
-        });
+        self.ui.out[i].push(&text.into(), type_);
     }
 
     /// Open a new tab inheriting the active tab's cwd. Switches focus to it.
@@ -1358,6 +1367,9 @@ impl State {
         if closed_tabs.len() > CLOSED_TABS_MAX {
             closed_tabs.remove(0);
         }
+        // Preserve reopen/navigation history, but release older snapshots'
+        // scrollback once their combined allocation exceeds the byte budget.
+        trim_closed_output(closed_tabs);
 
         if self.ui.active_tab >= self.cwd.len() {
             self.ui.active_tab = self.cwd.len() - 1;
@@ -1792,7 +1804,7 @@ impl State {
             );
             return;
         }
-        match RunningCmd::start(line, dir, self.ui.out[i].len(), ctx) {
+        match RunningCmd::start(line, dir, &self.ui.out[i], ctx) {
             Ok(mut cmd) => {
                 cmd.clone_root = clone_root;
                 self.running[i] = Some(cmd);
@@ -2209,5 +2221,26 @@ impl eframe::App for State {
         for cmd in &mut self.running {
             cmd.take();
         }
+    }
+}
+
+#[cfg(test)]
+mod memory_tests {
+    use super::*;
+
+    #[test]
+    fn closed_tabs_keep_navigation_while_old_output_obeys_a_shared_budget() {
+        let mut tabs: Vec<_> = (0..4).map(|i| DetachedTab::new(i, PathBuf::from("."))).collect();
+        let text = "x".repeat(terminal::MAX_LINE_BYTES);
+        for tab in &mut tabs {
+            tab.nav_back.push(PathBuf::from("previous"));
+            for _ in 0..260 { tab.out.push(&text, OutType::StdOut); }
+        }
+        assert!(tabs.iter().map(|t| t.out.retained_bytes()).sum::<usize>() > terminal::CLOSED_BYTES);
+        trim_closed_output(&mut tabs);
+        assert!(tabs.iter().map(|t| t.out.retained_bytes()).sum::<usize>() <= terminal::CLOSED_BYTES);
+        assert!(tabs[0].out.lines.is_empty());
+        assert!(!tabs.last().unwrap().out.lines.is_empty());
+        assert!(tabs.iter().all(|t| t.nav_back == [PathBuf::from("previous")]));
     }
 }

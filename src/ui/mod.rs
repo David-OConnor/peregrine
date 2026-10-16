@@ -5,12 +5,7 @@ use std::{
     time::SystemTime,
 };
 
-use egui::{
-    Align, Button, CentralPanel, Color32, FontData, FontDefinitions, FontFamily, FontId,
-    FontSelection, Frame, Key, Layout, Panel, Rect, RichText, ScrollArea, TextEdit, TextFormat,
-    TextStyle, TextWrapMode, Ui, WidgetText,
-    text::{CCursor, CCursorRange, LayoutJob, TextWrapping},
-};
+use egui::{text::{CCursor, CCursorRange, LayoutJob, TextWrapping}, Align, Button, CentralPanel, Color32, DragValue, FontData, FontDefinitions, FontFamily, FontId, FontSelection, Frame, Key, Layout, Panel, Rect, RichText, ScrollArea, TextEdit, TextFormat, TextStyle, TextWrapMode, Ui, WidgetText};
 use shell::{DirList, SshMode};
 
 mod about;
@@ -19,6 +14,19 @@ pub mod dirs;
 mod file_browser;
 pub mod path_panel;
 mod tab_keys;
+mod terminal;
+
+use crate::{
+    OutType,
+    cmd_color::CmdColors,
+    deep_search::{DeepSearch, MAX_MATCHES, Row},
+    files::{FileDetails, SelectionSummary, format_size, open_with_default_app},
+    path_color::{self, Part},
+    render_with_tilde, run_command,
+    state::{FileRename, State},
+    submit_command, viewer,
+};
+use crate::ui::dirs::{cleanup_missing_button, MIN_DIR_LABEL_LEN, MAX_DIR_LABEL_LEN};
 
 /// Renders a single-line "Search" box that fills the available width and
 /// triggers `on_changed` when the buffer is edited. Pulled out so all three
@@ -48,16 +56,7 @@ fn panel_header(ui: &mut Ui, title: &str, visible: &mut bool) {
     });
 }
 
-use crate::{
-    OutType, ansi,
-    cmd_color::CmdColors,
-    deep_search::{DeepSearch, MAX_MATCHES, Row},
-    files::{FileDetails, SelectionSummary, format_size, open_with_default_app},
-    path_color::{self, Part},
-    render_with_tilde, run_command,
-    state::{FileRename, State},
-    submit_command, viewer,
-};
+
 
 pub const WINDOW_WIDTH: f32 = 1400.;
 pub const WINDOW_HEIGHT: f32 = 900.;
@@ -72,8 +71,8 @@ pub const DEFAULT_FONT_SIZE: f32 = 13.;
 pub const DEFAULT_GUI_FONT_SIZE: f32 = 11.;
 /// Bounds the +/- font-size buttons (CLI and GUI) clamp to, so text can't be
 /// shrunk to an unreadable size or blown up past the window.
-pub const MIN_FONT_SIZE: f32 = 6.;
-pub const MAX_FONT_SIZE: f32 = 48.;
+pub const MIN_FONT_SIZE: f32 = 8.;
+pub const MAX_FONT_SIZE: f32 = 28.;
 
 /// Name of the bold font family registered by [install_fonts]; see
 /// [bold_family].
@@ -636,31 +635,8 @@ fn set_mono_size(ui: &mut Ui, size: f32) {
 /// The "terminal" output pane: scrolls, sticks to the bottom so the latest
 /// line stays in view, and colours rows by stream kind.
 fn term_out(state: &mut State, ui: &mut Ui) {
-    let output = ScrollArea::vertical()
-        .id_salt("term_out_scroll")
-        .auto_shrink([false, false])
-        .stick_to_bottom(true)
-        .show(ui, |ui| {
-            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
-            set_mono_size(ui, state.font_size);
-            let mono_font = egui::TextStyle::Monospace.resolve(ui.style());
-            let active = state.ui.active_tab;
-            for item in &state.ui.out[active] {
-                let default_color = match item.type_ {
-                    OutType::Prompt => COLOR_PROMPT,
-                    OutType::StdOut => COLOR_STDOUT,
-                    OutType::StdErr => COLOR_STDERR,
-                    OutType::StdErrOk => COLOR_STDERR_OK,
-                };
-                // Trim a trailing newline so blank rows don't accumulate
-                // (Command output usually ends with one).
-                let text = item.text.trim_end_matches('\n');
-                let segments = ansi::parse(text);
-                let job = ansi::to_layout_job(&segments, default_color, mono_font.clone());
-                ui.label(job);
-            }
-        });
-    clipboard::copy_output_on_right_click(ui, output.inner_rect);
+    set_mono_size(ui, state.font_size);
+    terminal::show(&mut state.ui.out[state.ui.active_tab], ui);
 }
 
 /// The input row: prompt line on top, with an edit beneath it that wraps long
@@ -688,11 +664,13 @@ fn term_in(state: &mut State, ui: &mut Ui) {
     let show_branch = !state.is_remote();
     let running = state.running_here().map(|cmd| cmd.line.clone());
     let mut stop = false;
+
     // Wrapped, so a long cwd or running command flows onto extra rows (and
     // the Stop button drops below) instead of running off the right edge.
     ui.horizontal_wrapped(|ui| {
         let mono = TextStyle::Monospace.resolve(ui.style());
         ui.label(path_color::layout_job(&cwd_parts, mono, None, COLOR_PROMPT));
+
         if let Some(b) = branch {
             if show_branch {
                 ui.label(
@@ -702,6 +680,7 @@ fn term_in(state: &mut State, ui: &mut Ui) {
                 );
             }
         }
+
         if let Some(i) = his_cursor {
             ui.label(
                 RichText::new(format!("his {i}"))
@@ -709,6 +688,7 @@ fn term_in(state: &mut State, ui: &mut Ui) {
                     .monospace(),
             );
         }
+
         if let Some(i) = cd_cursor {
             ui.label(
                 RichText::new(format!("cd {i}"))
@@ -716,6 +696,7 @@ fn term_in(state: &mut State, ui: &mut Ui) {
                     .monospace(),
             );
         }
+
         // While a command runs, the input goes to its stdin instead.
         match &running {
             Some(line) => {
@@ -857,10 +838,10 @@ fn term_in(state: &mut State, ui: &mut Ui) {
         // updated when we replace the buffer behind its back. Move the
         // caret to the end so it follows the completed text.
         if let Some(mut edit_state) = TextEdit::load_state(ui.ctx(), response.id) {
-            let end = egui::text::CCursor::new(state.ui.cli_input[active].chars().count());
+            let end = CCursor::new(state.ui.cli_input[active].chars().count());
             edit_state
                 .cursor
-                .set_char_range(Some(egui::text::CCursorRange::one(end)));
+                .set_char_range(Some(CCursorRange::one(end)));
             edit_state.store(ui.ctx(), response.id);
         }
     } else if up {
@@ -976,11 +957,13 @@ fn deep_search_bar(state: &mut State, ui: &mut Ui) {
                 );
             mode_changed = opts.file_names != before;
             run_now |= mode_changed;
+
             let what = if opts.file_names {
                 "names of every file and folder"
             } else {
                 "contents of every file"
             };
+
             let resp = ui
                 .add(
                     TextEdit::singleline(&mut state.ui.deep_search)
@@ -993,6 +976,7 @@ fn deep_search_bar(state: &mut State, ui: &mut Ui) {
                      as ripgrep does: hidden and .gitignored files are skipped. \
                      Case-insensitive unless the search has a capital letter."
                 ));
+
             if resp.changed() {
                 if state.ui.deep_search.is_empty() {
                     run_now = true;
@@ -1000,6 +984,7 @@ fn deep_search_bar(state: &mut State, ui: &mut Ui) {
                     state.ui.deep_search_edited = Some(now);
                 }
             }
+
             if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                 run_now = true;
             }
@@ -1122,6 +1107,16 @@ fn deep_search_results(
         };
         ui.label(RichText::new(status).italics().weak());
     });
+    let incomplete = search.incomplete_files();
+    if incomplete != 0 {
+        ui.label(
+            RichText::new(format!(
+                "{} couldn't be fully searched: unreadable, or a line exceeded the 8 MiB limit.",
+                plural(incomplete, "file", "files")
+            ))
+            .color(ui.visuals().warn_fg_color),
+        );
+    }
     if rows.is_empty() && !search.hits.is_empty() {
         ui.label(
             RichText::new("None of them match the Search box.")
@@ -1578,23 +1573,28 @@ fn panel_vis_eq(a: &shell::PanelVis, b: &shell::PanelVis) -> bool {
         && a.clipboard == b.clipboard
 }
 
-/// A `<label> N + -` font-size control for the tab strip: the label, the
-/// current size, then buttons to step it. Returns the step asked for (+1, -1,
-/// or 0); `what` names the text it scales, for the tooltips.
-fn font_size_control(ui: &mut Ui, label: &str, size: f32, what: &str) -> f32 {
-    step_control(
-        ui,
-        label,
-        size.round() as i32,
-        &format!("Decrease {what} font size"),
-        &format!("Increase {what} font size"),
-    ) as f32
+/// Returns the requested change in font size, or zero when unchanged.
+fn font_size_control(ui: &mut Ui, size: f32) -> f32 {
+    let mut val = size.round() as i32;
+
+    let response = ui
+        .add(
+            DragValue::new(&mut val)
+                .range(MIN_FONT_SIZE..=MAX_FONT_SIZE)
+                .speed(0.25)
+                .update_while_editing(false),
+        )
+        .on_hover_text(
+            "Increase or decrease font size. Drag, or click to type."
+        );
+
+    if response.changed() {
+        val as f32 - size
+    } else {
+        0.
+    }
 }
 
-/// A `<label> N + -` control for the tab strip, as [font_size_control] for
-/// any whole-number setting: the label, `value`, then buttons to step it,
-/// with `less` and `more` as their tooltips. Returns the step asked for (+1,
-/// -1, or 0).
 fn step_control(ui: &mut Ui, label: &str, value: i32, less: &str, more: &str) -> i32 {
     ui.label(label);
     ui.label(format!("{value}"));
@@ -1743,13 +1743,21 @@ fn tabs_bar(state: &mut State, ui: &mut Ui) {
         {
             state.ui.about = !state.ui.about;
         }
+
+        if cleanup_missing_button(ui) {
+            state.cleanup_missing_dirs(DirList::Bookmarks);
+            state.cleanup_missing_dirs(DirList::RecentDirs);
+        }
+
         ui.separator();
         // Font-size controls sit to the left of the tab strip: one for the
         // terminal panes, one for the side panels; then the path colours'
         // depth.
-        font_delta = font_size_control(ui, "CLI text: ", font_size, "terminal");
+
+        font_delta = font_size_control(ui, font_size);
         ui.separator();
-        gui_font_delta = font_size_control(ui, "GUI text: ", gui_font_size, "panel");
+        gui_font_delta = font_size_control(ui, gui_font_size);
+
         ui.separator();
         // How deep a directory is when its colour reaches yellow (see
         // [path_color::depth_levels]).
@@ -1872,29 +1880,37 @@ fn tabs_bar(state: &mut State, ui: &mut Ui) {
     if let Some(dark) = set_dark {
         state.set_dark_mode(ui.ctx(), dark);
     }
+
     if font_delta != 0.0 {
         state.adjust_font_size(font_delta);
     }
+
     if gui_font_delta != 0.0 {
         state.adjust_gui_font_size(gui_font_delta);
     }
+
     if dir_depth_delta != 0 {
         state.adjust_dir_color_depth(dir_depth_delta);
     }
+
     if let Some(i) = to_select {
         state.select_tab(i);
     }
+
     if let Some(i) = to_close {
         state.close_tab(i);
     }
+
     // A dragged tab becomes the active one, as in a browser.
     if let Some((from, to)) = to_move {
         state.move_tab(from, to);
         state.select_tab(to);
     }
+
     if add_new {
         state.add_tab();
     }
+
     if let Some(i) = connect_remote {
         state.connect_remote(i);
     }

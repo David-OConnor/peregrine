@@ -61,6 +61,8 @@ Autocomplate works from a mixture of bookmarks, recent commands, and files in th
 
 Type `shelp` in the CLI input to list every command and key shortcut.
 
+Terminal scrollback keeps up to 20,000 lines per tab with a 4 MiB budget for line content and styles. Very long individual lines keep their newest 16 KiB. Older output is discarded when a limit is reached; `clear` releases the retained scrollback. Recently closed tabs share an 8 MiB output budget, while their directory and navigation history remain available for reopening.
+
 ## Command history
 
 ## System path editor
@@ -102,6 +104,7 @@ Shortcuts to reduce typing:
 - Middle click a tab to close it
 - Drag a tab left or right to reorder it
 - Select CLI output text and right-click to copy it to the system clipboard and clipboard history (Supplements *Ctrl + C*)
+- Numerical settings can be changed by clicking and dragging the mouse (or by typing)
 
 
 ## Keyboard shortcuts

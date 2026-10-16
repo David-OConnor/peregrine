@@ -31,6 +31,9 @@ pub const MAX_MATCHES: usize = 2_000;
 const MAX_LINE_CHARS: usize = 160;
 /// How many chars of such a window come before its first match.
 const LEAD_CHARS: usize = 24;
+/// Bound complete-line buffers across the parallel search workers.
+const SEARCH_HEAP_BYTES: usize = 8 * 1024 * 1024;
+const SEARCH_THREADS: usize = 4;
 
 /// How a search matches, set by the toggles beside the Deep search box.
 #[derive(Clone, Copy, Default)]
@@ -92,6 +95,7 @@ pub struct DeepSearch {
     /// `None` once the search threads have finished and everything they
     /// sent has been taken.
     rx: Option<Receiver<FileHit>>,
+    incomplete_files: Arc<AtomicUsize>,
 }
 
 impl DeepSearch {
@@ -109,6 +113,7 @@ impl DeepSearch {
             error: None,
             cancel: Arc::new(AtomicBool::new(false)),
             rx: None,
+            incomplete_files: Arc::new(AtomicUsize::new(0)),
         };
         let matcher = RegexMatcherBuilder::new()
             .case_smart(true)
@@ -126,8 +131,17 @@ impl DeepSearch {
         let (tx, rx) = mpsc::channel();
         s.rx = Some(rx);
         let cancel = s.cancel.clone();
+        let incomplete = Arc::clone(&s.incomplete_files);
         thread::spawn(move || {
-            search(&root, &matcher, opts.file_names, &tx, &cancel, &ctx);
+            search(
+                &root,
+                &matcher,
+                opts.file_names,
+                &tx,
+                &cancel,
+                &incomplete,
+                &ctx,
+            );
             // Dropping the last sender is what tells `poll` it's over.
             drop(tx);
             ctx.request_repaint();
@@ -138,6 +152,10 @@ impl DeepSearch {
     /// Whether the search has finished (or never started, on an error).
     pub fn done(&self) -> bool {
         self.rx.is_none()
+    }
+
+    pub fn incomplete_files(&self) -> usize {
+        self.incomplete_files.load(Ordering::Relaxed)
     }
 
     /// Take in whatever the search threads have found since the last call.
@@ -196,11 +214,13 @@ fn search(
     file_names: bool,
     tx: &Sender<FileHit>,
     cancel: &AtomicBool,
+    incomplete: &AtomicUsize,
     ctx: &egui::Context,
 ) {
     let found = AtomicUsize::new(0);
     let mut walk = WalkBuilder::new(root);
     walk.add_custom_ignore_filename(".rgignore");
+    walk.threads(SEARCH_THREADS);
 
     walk.build_parallel().run(|| {
         // One of each per walker thread.
@@ -208,6 +228,7 @@ fn search(
         let mut searcher = SearcherBuilder::new()
             .binary_detection(BinaryDetection::quit(b'\0'))
             .line_number(true)
+            .heap_limit(Some(SEARCH_HEAP_BYTES))
             .build();
 
         Box::new(move |entry| {
@@ -227,7 +248,7 @@ fn search(
             let hit = if file_names && (is_file || (is_folder && entry.depth() > 0)) {
                 name_hit(&matcher, entry, is_folder)
             } else if is_file && !file_names {
-                contents_hit(&mut searcher, &matcher, entry, cancel)
+                contents_hit(&mut searcher, &matcher, entry, cancel, incomplete)
             } else {
                 None
             };
@@ -289,9 +310,10 @@ fn contents_hit(
     matcher: &RegexMatcher,
     entry: DirEntry,
     cancel: &AtomicBool,
+    incomplete: &AtomicUsize,
 ) -> Option<FileHit> {
     let mut lines = Vec::new();
-    let _ = searcher.search_path(
+    let searched = searcher.search_path(
         matcher,
         entry.path(),
         Lossy(|line_num, line| {
@@ -299,6 +321,9 @@ fn contents_hit(
             Ok(lines.len() < MAX_MATCHES && !cancel.load(Ordering::Relaxed))
         }),
     );
+    if searched.is_err() {
+        incomplete.fetch_add(1, Ordering::Relaxed);
+    }
     (!lines.is_empty()).then(|| FileHit {
         path: entry.into_path(),
         is_folder: false,
@@ -311,19 +336,22 @@ fn contents_hit(
 /// it located for highlighting.
 fn match_line(matcher: &RegexMatcher, line_num: u64, line: &str) -> MatchLine {
     let line = line.trim_end_matches(['\n', '\r']);
-    let mut found = Vec::new();
-    let _ = matcher.find_iter(line.as_bytes(), |m| {
-        found.push(m.start()..m.end());
-        true
-    });
+    let first_match = matcher.find(line.as_bytes()).ok().flatten();
 
     // The part shown: no indentation or trailing space, and for a long line,
     // a window starting a little before its first match.
     let mut start = line.len() - line.trim_start().len();
     let mut end = line.trim_end().len().max(start);
+    if start == end {
+        return MatchLine {
+            line_num,
+            text: String::new(),
+            ranges: Vec::new(),
+        };
+    }
     let trimmed = start..end;
-    if line[start..end].chars().count() > MAX_LINE_CHARS {
-        let first = found.first().map_or(start, |r| r.start.clamp(start, end));
+    if line[start..end].chars().nth(MAX_LINE_CHARS).is_some() {
+        let first = first_match.map_or(start, |m| m.start().clamp(start, end));
         let first = line.floor_char_boundary(first);
         start = line[start..first]
             .char_indices()
@@ -341,18 +369,92 @@ fn match_line(matcher: &RegexMatcher, line_num: u64, line: &str) -> MatchLine {
     let suffix = if end < trimmed.end { "…" } else { "" };
     let text = format!("{prefix}{}{suffix}", &line[start..end]);
     // Each match's part within the window, shifted to `text`.
-    let ranges = found
-        .into_iter()
-        .filter_map(|r| {
-            let s = line.floor_char_boundary(r.start.clamp(start, end));
-            let e = line.ceil_char_boundary(r.end.clamp(start, end));
-            (s < e).then(|| s - start + prefix.len()..e - start + prefix.len())
-        })
-        .collect();
+    // Match against the original line so anchors and word boundaries retain
+    // their context. Keep only the displayed ranges; collecting all matches
+    // first can retain millions of entries behind a 160-character excerpt.
+    let mut ranges = Vec::new();
+    let _ = matcher.find_iter(line.as_bytes(), |m| {
+        if m.start() >= end {
+            return false;
+        }
+        let s = line.floor_char_boundary(m.start().clamp(start, end));
+        let e = line.ceil_char_boundary(m.end().clamp(start, end));
+        if s < e {
+            ranges.push(s - start + prefix.len()..e - start + prefix.len());
+        }
+        true
+    });
 
     MatchLine {
         line_num,
         text,
         ranges,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dense_matches_retain_only_excerpt_ranges() {
+        let hit = match_line(
+            &RegexMatcher::new("a").unwrap(),
+            1,
+            &"a".repeat(4 * 1024 * 1024),
+        );
+        assert_eq!(hit.text, format!("{}…", "a".repeat(MAX_LINE_CHARS)));
+        assert_eq!(hit.ranges.len(), MAX_LINE_CHARS);
+        assert!(hit.ranges.capacity() <= MAX_LINE_CHARS * 2);
+    }
+
+    #[test]
+    fn excerpts_preserve_regex_context_and_unicode_boundaries() {
+        let tail = match_line(&RegexMatcher::new("a$").unwrap(), 8, &"a".repeat(400));
+        assert_eq!(tail.text, format!("…{}", "a".repeat(LEAD_CHARS + 1)));
+        assert_eq!(tail.ranges, [27..28]);
+        assert_eq!(tail.line_num, 8);
+        let anchored = match_line(&RegexMatcher::new("^a").unwrap(), 1, &"a".repeat(400));
+        assert_eq!(anchored.ranges, [0..1]);
+        let unicode = match_line(&RegexMatcher::new("é").unwrap(), 1, &"é".repeat(400));
+        assert_eq!(unicode.ranges.len(), MAX_LINE_CHARS);
+        assert_eq!(unicode.ranges.last().unwrap(), &(318..320));
+        for range in &unicode.ranges {
+            assert_eq!(&unicode.text[range.clone()], "é");
+        }
+        let empty = match_line(&RegexMatcher::new("").unwrap(), 1, " \t\r\n");
+        assert!(empty.text.is_empty());
+        assert!(empty.ranges.is_empty());
+    }
+
+    #[test]
+    fn oversized_lines_are_reported_without_hiding_other_results() {
+        let dir = std::env::temp_dir().join(format!(
+            "peregrine-search-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let big = dir.join("oversized.txt");
+        let small = dir.join("small.txt");
+        std::fs::write(&big, "a".repeat(SEARCH_HEAP_BYTES + 1024)).unwrap();
+        std::fs::write(&small, "a normal result\n").unwrap();
+        let mut search = DeepSearch::start(
+            dir.clone(),
+            "a",
+            Options::default(),
+            egui::Context::default(),
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !search.done() && std::time::Instant::now() < deadline {
+            search.poll();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        std::fs::remove_file(&big).unwrap();
+        std::fs::remove_file(&small).unwrap();
+        std::fs::remove_dir(&dir).unwrap();
+        assert!(search.done());
+        assert_eq!(search.incomplete_files(), 1);
+        assert!(search.has_file(&small));
     }
 }

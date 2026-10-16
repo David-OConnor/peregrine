@@ -15,6 +15,7 @@ mod path_color;
 mod path_env;
 mod running;
 mod state;
+mod terminal;
 mod ui;
 mod util;
 mod viewer;
@@ -24,7 +25,7 @@ use std::{
     sync::{Arc, LazyLock},
 };
 
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use shell::{HistoryItem, NavState, commands::OutKind, save_data};
 use state::State;
 
@@ -67,14 +68,6 @@ fn app_icon() -> Arc<egui::IconData> {
         Arc::new(eframe::icon_data::from_png_bytes(png).expect("resources/icon.png is a valid PNG"))
     });
     Arc::clone(&ICON)
-}
-
-/// One line / chunk of terminal output. Lines from the same command are kept
-/// as separate items so they can be coloured by stream.
-pub struct OutItem {
-    pub text: String,
-    pub type_: OutType,
-    pub dt: DateTime<Utc>,
 }
 
 /// Render a path as `~/relative` when it lives under the home directory;

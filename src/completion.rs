@@ -58,11 +58,13 @@ fn complete_filename(
         Some((i, _)) => i + 1,
         None => before.rfind(char::is_whitespace).map_or(0, |i| i + 1),
     };
+
     let word = &before[start..];
     let (dir_part, leaf) = match word.rfind(['/', '\\']) {
         Some(i) => (&word[..=i], &word[i + 1..]),
         None => ("", word),
     };
+
     let dir = match dir_part
         .strip_prefix("~/")
         .or_else(|| dir_part.strip_prefix("~\\"))
@@ -70,6 +72,7 @@ fn complete_filename(
         Some(rest) => home?.join(rest),
         None => cwd.join(dir_part),
     };
+
     let leaf = fold_case(leaf);
 
     let mut candidates: Vec<CompletionCandidate> = fs::read_dir(dir)

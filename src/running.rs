@@ -8,21 +8,32 @@ use std::{
     io::{Read, Write},
     path::Path,
     process::{ChildStdin, ExitStatus, Stdio},
-    sync::mpsc::{self, Receiver, Sender},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver, SyncSender},
+    },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
-use chrono::Utc;
 use shell::quiet_command;
 
-use crate::{OutItem, OutType};
+use crate::{
+    OutType,
+    terminal::{Output, Stream as OutputStream},
+};
 
 /// How long to keep reading output once the shell has exited. Output it wrote
 /// just before exiting may still be in the pipe; but a program it started and
 /// left running (`notepad`, `code .`) holds the pipe open without writing to
 /// it, so we can't wait for it to close.
 const EXIT_GRACE: Duration = Duration::from_millis(300);
+/// At most ~512 KiB of normal UTF-8 output waiting for the UI per command
+/// (lossy decoding can expand invalid bytes by up to three times).
+const OUTPUT_QUEUE_CHUNKS: usize = 64;
+const POLL_BYTES: usize = 128 * 1024;
+const POLL_CHUNKS: usize = 32;
 
 /// Which of the command's output streams a chunk came from.
 #[derive(Clone, Copy, PartialEq)]
@@ -35,6 +46,9 @@ enum Msg {
     Out(Stream, String),
     /// A stream reached its end.
     Eof,
+}
+
+enum Lifecycle {
     /// The shell exited, with its status (`None` if waiting on it failed).
     Exited(Option<ExitStatus>),
     /// [EXIT_GRACE] has passed since `Exited`.
@@ -47,40 +61,44 @@ pub struct RunningCmd {
     pub line: String,
     /// A clone URL root to save if the command succeeds (see `util::handle_cmd`).
     pub clone_root: Option<String>,
-    /// Index into the tab's output where this command's output starts, so a
+    /// First stable line ID belonging to this command, so a
     /// failure can recolour its stderr.
-    out_start: usize,
+    out_start: u64,
     /// For stdout and stderr, the output item holding a line that stream has
     /// written only part of, so the rest of it continues that row even when
     /// the other stream wrote in between.
-    open_items: [Option<usize>; 2],
-    /// The output's length when this command last added to it, to tell when
+    streams: [OutputStream; 2],
+    /// The output revision when this command last added to it, to tell when
     /// something else has since (an echoed input line), which ends the rows
-    /// in `open_items`.
-    out_len: usize,
+    /// in `streams`.
+    out_revision: u64,
     /// Set once Stop ended it, so its exit isn't reported as a failure.
     stopped: bool,
     pid: u32,
     stdin: Option<ChildStdin>,
     rx: Receiver<Msg>,
+    lifecycle: Receiver<Lifecycle>,
+    reader_cancel: Arc<AtomicBool>,
+    ctx: egui::Context,
     /// Streams not yet at their end.
     open_streams: u8,
     /// Set once the shell has exited.
     exited: Option<Option<ExitStatus>>,
     grace_over: bool,
+    last_output: Instant,
     #[cfg(windows)]
     job: Option<win::Job>,
 }
 
 impl RunningCmd {
     /// Start `line` in the system shell (PowerShell 7 on Windows, `sh`
-    /// elsewhere) in `dir`. Its output will go after the first `out_len`
-    /// items of the tab's output. `ctx` is repainted whenever there's news,
+    /// elsewhere) in `dir`. `out` supplies stable IDs for the tab's output.
+    /// `ctx` is repainted whenever there's news,
     /// so the output shows without waiting for the user to move the mouse.
     pub fn start(
         line: &str,
         dir: &Path,
-        out_len: usize,
+        out: &Output,
         ctx: &egui::Context,
     ) -> std::io::Result<Self> {
         let mut cmd = if cfg!(windows) {
@@ -114,45 +132,65 @@ impl RunningCmd {
         #[cfg(windows)]
         let job = win::Job::new(&child);
 
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(OUTPUT_QUEUE_CHUNKS);
+        // Lifecycle messages must not wait behind a full output queue: close
+        // and Stop still need to know whether the shell has already exited.
+        let (lifecycle_tx, lifecycle) = mpsc::channel();
+        let reader_cancel = Arc::new(AtomicBool::new(false));
         let stdin = child.stdin.take();
         let mut open_streams = 0;
         if let Some(out) = child.stdout.take() {
-            read_stream(out, Stream::Stdout, tx.clone(), ctx.clone());
+            read_stream(
+                out,
+                Stream::Stdout,
+                tx.clone(),
+                ctx.clone(),
+                Arc::clone(&reader_cancel),
+            );
             open_streams += 1;
         }
         if let Some(err) = child.stderr.take() {
-            read_stream(err, Stream::Stderr, tx.clone(), ctx.clone());
+            read_stream(
+                err,
+                Stream::Stderr,
+                tx.clone(),
+                ctx.clone(),
+                Arc::clone(&reader_cancel),
+            );
             open_streams += 1;
         }
 
         let pid = child.id();
-        let ctx = ctx.clone();
+        let waiter_ctx = ctx.clone();
         thread::spawn(move || {
             let status = child.wait().ok();
-            if tx.send(Msg::Exited(status)).is_err() {
+            if lifecycle_tx.send(Lifecycle::Exited(status)).is_err() {
                 return;
             }
-            ctx.request_repaint();
+            waiter_ctx.request_repaint();
             thread::sleep(EXIT_GRACE);
-            if tx.send(Msg::GraceOver).is_ok() {
-                ctx.request_repaint();
+            if lifecycle_tx.send(Lifecycle::GraceOver).is_ok() {
+                waiter_ctx.request_repaint();
             }
         });
 
         Ok(Self {
             line: line.to_string(),
             clone_root: None,
-            out_start: out_len,
-            open_items: [None, None],
-            out_len,
+            out_start: out.next_id(),
+            streams: [OutputStream::default(), OutputStream::default()],
+            out_revision: out.revision(),
             stopped: false,
             pid,
             stdin,
             rx,
+            lifecycle,
+            reader_cancel,
+            ctx: ctx.clone(),
             open_streams,
             exited: None,
             grace_over: false,
+            last_output: Instant::now(),
             #[cfg(windows)]
             job,
         })
@@ -161,31 +199,50 @@ impl RunningCmd {
     /// Add the output that's arrived since the last call to `out`, the tab's
     /// pane. Returns `Some` once the command is done and all its output is
     /// in, with whether it succeeded.
-    pub fn poll(&mut self, out: &mut Vec<OutItem>) -> Option<bool> {
+    pub fn poll(&mut self, out: &mut Output) -> Option<bool> {
+        self.poll_lifecycle();
+        let mut bytes = 0;
+        let mut chunks = 0;
+        let started = Instant::now();
         while let Ok(msg) = self.rx.try_recv() {
+            chunks += 1;
             match msg {
-                Msg::Out(stream, text) => self.push_out(out, stream, &text),
+                Msg::Out(stream, text) => {
+                    self.last_output = Instant::now();
+                    bytes += text.len();
+                    self.push_out(out, stream, &text);
+                }
                 Msg::Eof => self.open_streams -= 1,
-                Msg::Exited(status) => self.exited = Some(status),
-                Msg::GraceOver => self.grace_over = true,
+            }
+            if bytes >= POLL_BYTES
+                || chunks >= POLL_CHUNKS
+                || started.elapsed() >= Duration::from_millis(4)
+            {
+                self.ctx.request_repaint();
+                return None;
             }
         }
         let status = match self.exited {
-            Some(status) if self.open_streams == 0 || self.grace_over => status,
-            _ => return None,
+            Some(status)
+                if self.open_streams == 0
+                    || (self.grace_over && self.last_output.elapsed() >= EXIT_GRACE) =>
+            {
+                status
+            }
+            Some(_) => {
+                self.ctx.request_repaint_after(EXIT_GRACE);
+                return None;
+            }
+            None => return None,
         };
 
         let success = status.is_some_and(|s| s.success());
         if self.stopped {
-            out.push(out_item("(stopped)", OutType::StdErrOk));
+            out.push("(stopped)", OutType::StdErrOk);
         } else if !success {
             // Its stderr showed as warnings while we couldn't tell; now it's
             // failed, it shows as errors, like a quick command's.
-            for item in out.iter_mut().skip(self.out_start) {
-                if item.type_ == OutType::StdErrOk {
-                    item.type_ = OutType::StdErr;
-                }
-            }
+            out.fail_since(self.out_start);
         }
         Some(success)
     }
@@ -193,39 +250,35 @@ impl RunningCmd {
     /// Add a chunk of output to `out`. It continues the row of a line the
     /// same stream left unfinished, so a line that arrives in pieces still
     /// shows as one.
-    fn push_out(&mut self, out: &mut Vec<OutItem>, stream: Stream, mut text: &str) {
-        if out.len() != self.out_len {
-            self.open_items = [None, None];
+    fn push_out(&mut self, out: &mut Output, stream: Stream, text: &str) {
+        if out.revision() != self.out_revision {
+            self.out_cleared();
         }
-        let open = &mut self.open_items[stream as usize];
-
-        if let Some(i) = *open {
-            let end = text.find('\n').map_or(text.len(), |n| n + 1);
-            out[i].text.push_str(&text[..end]);
-            text = &text[end..];
-            if out[i].text.ends_with('\n') {
-                *open = None;
-            }
-        }
-        if !text.is_empty() {
-            // Whether stderr is warnings or errors depends on how the command
-            // exits, so until then it's warnings (see [Self::poll]).
-            let type_ = match stream {
-                Stream::Stdout => OutType::StdOut,
-                Stream::Stderr => OutType::StdErrOk,
-            };
-            out.push(out_item(text, type_));
-            *open = (!text.ends_with('\n')).then_some(out.len() - 1);
-        }
-        self.out_len = out.len();
+        let kind = match stream {
+            Stream::Stdout => OutType::StdOut,
+            Stream::Stderr => OutType::StdErrOk,
+        };
+        out.write(text, kind, &mut self.streams[stream as usize]);
+        self.out_revision = out.revision();
     }
 
     /// The tab's output was emptied, taking what this command wrote so far
     /// with it, so the indices into it no longer point anywhere.
     pub fn out_cleared(&mut self) {
-        self.out_start = 0;
-        self.out_len = 0;
-        self.open_items = [None, None];
+        for stream in &mut self.streams {
+            stream.break_line();
+        }
+    }
+
+    fn poll_lifecycle(&mut self) {
+        while let Ok(msg) = self.lifecycle.try_recv() {
+            match msg {
+                Lifecycle::Exited(status) => self.exited = Some(status),
+                Lifecycle::GraceOver => {
+                    self.grace_over = true;
+                }
+            }
+        }
     }
 
     /// Send a line typed while the command runs to its stdin. Ignored once
@@ -245,6 +298,7 @@ impl RunningCmd {
     /// would (though without giving it the chance to clean up that a Ctrl+C
     /// does). Its exit then arrives through [Self::poll] as usual.
     pub fn stop(&mut self) {
+        self.reader_cancel.store(true, Ordering::Relaxed);
         if self.exited.is_some() {
             return;
         }
@@ -278,21 +332,10 @@ impl RunningCmd {
 /// it; nothing could show its output or stop it after that.
 impl Drop for RunningCmd {
     fn drop(&mut self) {
-        // Messages not yet polled may say it's already exited.
-        while let Ok(msg) = self.rx.try_recv() {
-            if let Msg::Exited(status) = msg {
-                self.exited = Some(status);
-            }
-        }
+        self.poll_lifecycle();
         self.stop();
-    }
-}
-
-fn out_item(text: &str, type_: OutType) -> OutItem {
-    OutItem {
-        text: text.to_string(),
-        type_,
-        dt: Utc::now(),
+        self.reader_cancel.store(true, Ordering::Relaxed);
+        // Dropping the receiver releases any reader blocked by backpressure.
     }
 }
 
@@ -302,8 +345,9 @@ fn out_item(text: &str, type_: OutType) -> OutItem {
 fn read_stream(
     mut src: impl Read + Send + 'static,
     stream: Stream,
-    tx: Sender<Msg>,
+    tx: SyncSender<Msg>,
     ctx: egui::Context,
+    cancelled: Arc<AtomicBool>,
 ) {
     thread::spawn(move || {
         let mut buf = [0; 8192];
@@ -311,6 +355,9 @@ fn read_stream(
         // remaining bytes are in the next read.
         let mut pending = Vec::new();
         loop {
+            if cancelled.load(Ordering::Relaxed) {
+                break;
+            }
             match src.read(&mut buf) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => pending.extend_from_slice(&buf[..n]),
@@ -344,6 +391,89 @@ fn take_utf8(bytes: &mut Vec<u8>) -> String {
     let text = String::from_utf8_lossy(&bytes[..end]).into_owned();
     bytes.drain(..end);
     text
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn streamed_utf8_waits_for_the_rest_of_a_character() {
+        let mut pending = vec![b'a', 0xf0, 0x9f];
+        assert_eq!(take_utf8(&mut pending), "a");
+        pending.extend_from_slice(&[0x98, 0x80, b'b']);
+        assert_eq!(take_utf8(&mut pending), "😀b");
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn a_full_queue_drains_in_bounded_passes_and_keeps_the_tail_and_stderr() {
+        let script = if cfg!(windows) {
+            r#"[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); $s = 'x' * 90; for ($i = 0; $i -lt 12000; $i++) { [Console]::Out.WriteLine(('{0:D8}: {1}' -f $i, $s)) }; [Console]::Error.Write('warning'); [Console]::Out.WriteLine('TAIL😀'); exit 3"#
+        } else {
+            r#"i=0; while [ "$i" -lt 12000 ]; do printf '%08d: %090d\n' "$i" 0; i=$((i+1)); done; printf 'TAIL😀\n'; printf warning >&2; exit 3"#
+        };
+        let mut out = Output::default();
+        let mut command = RunningCmd::start(
+            script,
+            &std::env::current_dir().unwrap(),
+            &out,
+            &egui::Context::default(),
+        )
+        .unwrap();
+        thread::sleep(Duration::from_millis(500));
+        assert!(command.poll(&mut out).is_none());
+        assert!(
+            out.lines.len() < 12000,
+            "one frame must not drain the entire command"
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let success = loop {
+            if let Some(success) = command.poll(&mut out) {
+                break success;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "command should finish without a backpressure deadlock"
+            );
+            thread::sleep(Duration::from_millis(2));
+        };
+        assert!(!success);
+        assert!(out.lines.iter().any(|l| l.text == "TAIL😀"));
+        assert!(
+            out.lines
+                .iter()
+                .any(|l| l.text == "warning" && l.kind == OutType::StdErr)
+        );
+    }
+
+    #[test]
+    fn stopping_a_producer_with_a_full_queue_does_not_block_drop() {
+        let script = if cfg!(windows) {
+            "while ($true) { [Console]::Out.Write(('x' * 8192)) }"
+        } else {
+            "while :; do printf '%08192d' 0; done"
+        };
+        let mut out = Output::default();
+        let mut command = RunningCmd::start(
+            script,
+            &std::env::current_dir().unwrap(),
+            &out,
+            &egui::Context::default(),
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while out.lines.is_empty() {
+            command.poll(&mut out);
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(5));
+        }
+        thread::sleep(Duration::from_millis(100));
+        let start = Instant::now();
+        command.stop();
+        drop(command);
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
 }
 
 #[cfg(windows)]

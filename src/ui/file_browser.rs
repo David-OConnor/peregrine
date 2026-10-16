@@ -145,13 +145,9 @@ pub(crate) fn file_browser(state: &mut State, ui: &mut Ui) {
         state.ui.rename_pending = None;
     }
 
-    ui::panel_header(ui, "Files", &mut state.ui.panel_vis.file_browser);
+    // No header here, to save vertical space; it's obvious this is the file browser.
+    // ui::panel_header(ui, "Files", &mut state.ui.panel_vis.file_browser);
 
-    // The directory being listed, colour-coded like the other panels' paths,
-    // and on green when it's bookmarked, as its rows are elsewhere.
-    // Wraps rather than widening the panel when it's long. The buttons to its
-    // right bookmark it (or remove the bookmark), and do what the `open`
-    // command does: show this dir in the OS's file manager.
     let bookmarked = state.dir_bookmarks.iter().any(|p| p == state.cwd());
     let home = state.home.clone();
     let dark = ui.visuals().dark_mode;
@@ -160,8 +156,10 @@ pub(crate) fn file_browser(state: &mut State, ui: &mut Ui) {
     } else {
         ui::path_job(ui, state.cwd(), home.as_deref())
     };
+
     let mut open_clicked = false;
     let mut star_clicked = false;
+
     ui.horizontal(|ui| {
         ui.with_layout(Layout::right_to_left(Align::TOP), |ui| {
             if ui
@@ -187,8 +185,7 @@ pub(crate) fn file_browser(state: &mut State, ui: &mut Ui) {
             });
         });
     });
-    // Bookmarking this dir, or showing it in the file manager, moves it to
-    // the top of Recent dirs (see [State::touch_recent_dir]).
+
     if star_clicked {
         let msg = state.toggle_bookmark_cwd();
         state.push_out(msg, OutType::StdOut);
@@ -197,6 +194,7 @@ pub(crate) fn file_browser(state: &mut State, ui: &mut Ui) {
             state.touch_recent_dir(&cwd);
         }
     }
+
     if open_clicked {
         let cwd = state.cwd().to_path_buf();
         shell::commands::open_dir(&cwd, &mut |kind, msg| {
@@ -212,6 +210,7 @@ pub(crate) fn file_browser(state: &mut State, ui: &mut Ui) {
     let parent = state.cwd().parent().map(Path::to_path_buf);
     let can_back = !state.ui.nav_back[i].is_empty();
     let can_forward = !state.ui.nav_forward[i].is_empty();
+
     // Common-destination shortcuts (see [files::shortcuts]): 🏠 Home,
     // ⚙ app data, 🖥 Desktop, 📥 Downloads, 📦 programs, 🖴 root, 🗑 trash.
     // Each is only enabled when the target actually exists, so we never `cd`
@@ -599,6 +598,7 @@ pub(super) fn delete_popup(state: &mut State, ctx: &egui::Context) {
     };
     let mut confirm = false;
     let mut cancel = false;
+
     let modal = Modal::new(egui::Id::new("delete_files_popup")).show(ctx, |ui| {
         ui::scale_panel_fonts(ui, state.gui_font_size);
         ui.set_width(360.0_f32.min((ctx.content_rect().width() - 48.0).max(100.0)));
@@ -727,9 +727,7 @@ fn file_list(state: &mut State, ui: &mut Ui, search_changed: bool, arrow_moved: 
     let lead = state.selected_file.as_ref().map(|d| d.path.as_path());
     let dark = ui.visuals().dark_mode;
     let mut action: Option<RowAction> = None;
-    // Set when the rename box loses focus: `true` to apply the new name,
-    // `false` if Escape cancelled it. Kept apart from `action` so a click on
-    // another row in the same frame can't drop the rename.
+
     let mut rename_done: Option<bool> = None;
 
     let columns = ScrollArea::vertical()
@@ -796,6 +794,7 @@ fn file_list(state: &mut State, ui: &mut Ui, search_changed: bool, arrow_moved: 
                 if bookmarked {
                     row = row.fill(bookmarked_fill(dark)).frame_when_inactive(true);
                 }
+                
                 let resp = ui.add(row);
                 let is_lead = lead == Some(f.path.as_path());
                 if is_lead && search_changed {

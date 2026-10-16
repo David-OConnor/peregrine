@@ -180,8 +180,10 @@ fn details_tags(text: &str) -> Vec<(Range<usize>, HtmlTag)> {
         | Options::ENABLE_FOOTNOTES
         | Options::ENABLE_DEFINITION_LIST
         | Options::ENABLE_MATH;
+    
     let mut tags = Vec::new();
     let mut depth = 0usize;
+    
     for (event, range) in Parser::new_ext(text, options).into_offset_iter() {
         match event {
             Event::Start(tag) => {
@@ -204,6 +206,7 @@ fn scan_html(block: &str, offset: usize, tags: &mut Vec<(Range<usize>, HtmlTag)>
     // in `block` too.
     let lower = block.to_ascii_lowercase();
     let mut i = 0;
+    
     while let Some(found) = lower[i..].find('<') {
         let at = i + found;
         let rest = &lower[at..];
@@ -233,6 +236,7 @@ fn scan_html(block: &str, offset: usize, tags: &mut Vec<(Range<usize>, HtmlTag)>
             i = at + 1;
             continue;
         };
+        
         tags.push((offset + at..offset + at + len, tag));
         i = at + len;
     }
@@ -332,10 +336,12 @@ fn link_target(url: &str, base_dir: &Path) -> LinkTarget {
     } else {
         url
     };
+    
     let path = local.split(['#', '?']).next().unwrap_or("");
     if path.is_empty() {
         return LinkTarget::Anchor;
     }
+    
     LinkTarget::Local(base_dir.join(percent_decode(path)))
 }
 
@@ -384,6 +390,7 @@ fn percent_decode(s: &str) -> String {
 /// process's cwd. Web links are left for egui to open in the browser.
 pub fn take_local_links(ctx: &Context, base_dir: &Path) -> Vec<PathBuf> {
     let mut targets = Vec::new();
+    
     ctx.output_mut(|o| {
         o.commands.retain(|cmd| {
             let OutputCommand::OpenUrl(open) = cmd else {
@@ -399,5 +406,6 @@ pub fn take_local_links(ctx: &Context, base_dir: &Path) -> Vec<PathBuf> {
             }
         })
     });
+    
     targets
 }

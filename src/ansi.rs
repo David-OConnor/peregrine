@@ -3,10 +3,10 @@
 //! Shells like PowerShell emit sequences such as `ESC[32;1m` to colour their
 //! output. We parse those into styled segments so the GUI can render.
 
-use egui::{Color32, FontId, Stroke, TextFormat, text::LayoutJob};
+use egui::{Color32, FontId, Stroke, TextFormat};
 
-#[derive(Clone, Copy)]
-struct Style {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Style {
     fg: Option<Color32>,
     bg: Option<Color32>,
     bold: bool,
@@ -24,6 +24,29 @@ impl Style {
             underline: false,
         }
     }
+
+    pub(crate) fn format(self, default_fg: Color32, font: FontId) -> TextFormat {
+        let color = self.fg.unwrap_or(default_fg);
+        let color = if self.bold { brighten(color) } else { color };
+        TextFormat {
+            font_id: font,
+            color,
+            background: self.bg.unwrap_or(Color32::TRANSPARENT),
+            italics: self.italic,
+            underline: if self.underline {
+                Stroke::new(1.0, color)
+            } else {
+                Stroke::NONE
+            },
+            ..Default::default()
+        }
+    }
+}
+
+impl Default for Style {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 pub struct Segment {
@@ -33,6 +56,18 @@ pub struct Segment {
     pub bold: bool,
     pub italic: bool,
     pub underline: bool,
+}
+
+impl Segment {
+    pub(crate) fn style(&self) -> Style {
+        Style {
+            fg: self.fg,
+            bg: self.bg,
+            bold: self.bold,
+            italic: self.italic,
+            underline: self.underline,
+        }
+    }
 }
 
 /// Standard 16-colour ANSI palette, tuned to read well on a black background.
@@ -128,70 +163,88 @@ fn apply_sgr(style: &mut Style, params: &[u32]) {
     }
 }
 
-/// Parse a string with ANSI escape sequences into styled text segments. SGR
-/// sequences (`ESC[...m`) update the running style; other CSI/OSC sequences
-/// are silently discarded so they don't leak into the rendered text.
-pub fn parse(input: &str) -> Vec<Segment> {
-    let mut segments: Vec<Segment> = Vec::new();
-    let mut style = Style::new();
-    let mut buf = String::new();
-    let mut chars = input.chars().peekable();
+#[derive(Default)]
+enum Escape {
+    #[default]
+    Text,
+    Start,
+    Csi,
+    Osc,
+    OscEnd,
+}
 
-    while let Some(c) = chars.next() {
-        if c != '\x1b' {
-            buf.push(c);
-            continue;
+/// Incremental parser: a read can end halfway through an escape sequence.
+/// ANSI is consumed once on arrival, rather than on every output repaint.
+#[derive(Default)]
+pub(crate) struct Parser {
+    style: Style,
+    escape: Escape,
+    params: String,
+    params_overflow: bool,
+}
+
+impl Parser {
+    pub(crate) fn feed(&mut self, input: &str) -> Vec<Segment> {
+        let mut segments = Vec::new();
+        let mut text = String::new();
+        for c in input.chars() {
+            match self.escape {
+                Escape::Text => {
+                    if c == '\x1b' {
+                        self.escape = Escape::Start;
+                    } else {
+                        text.push(c);
+                    }
+                }
+                Escape::Start => match c {
+                    '[' => {
+                        self.params.clear();
+                        self.params_overflow = false;
+                        self.escape = Escape::Csi;
+                    }
+                    ']' => self.escape = Escape::Osc,
+                    _ => self.escape = Escape::Text,
+                },
+                Escape::Csi => {
+                    if ('@'..='~').contains(&c) {
+                        if c == 'm' && !self.params_overflow {
+                            if !text.is_empty() {
+                                segments.push(make_segment(std::mem::take(&mut text), &self.style));
+                            }
+                            let params: Vec<u32> = self
+                                .params
+                                .split(';')
+                                .map(|p| p.parse().unwrap_or(0))
+                                .collect();
+                            apply_sgr(&mut self.style, &params);
+                        }
+                        self.escape = Escape::Text;
+                    } else if self.params.len() < 128 {
+                        self.params.push(c);
+                    } else {
+                        // Malformed controls must not become an unbounded buffer.
+                        self.params_overflow = true;
+                    }
+                }
+                Escape::Osc => match c {
+                    '\x07' => self.escape = Escape::Text,
+                    '\x1b' => self.escape = Escape::OscEnd,
+                    _ => {}
+                },
+                Escape::OscEnd => {
+                    self.escape = if c == '\\' || c == '\x07' {
+                        Escape::Text
+                    } else {
+                        Escape::Osc
+                    };
+                }
+            }
         }
-
-        let Some(&next) = chars.peek() else { break };
-
-        if next == '[' {
-            chars.next();
-            let mut params_str = String::new();
-            let mut final_char = None;
-            while let Some(pc) = chars.next() {
-                if pc.is_ascii_alphabetic() {
-                    final_char = Some(pc);
-                    break;
-                }
-                params_str.push(pc);
-            }
-            if final_char == Some('m') {
-                if !buf.is_empty() {
-                    segments.push(make_segment(std::mem::take(&mut buf), &style));
-                }
-                let params: Vec<u32> = if params_str.is_empty() {
-                    vec![0]
-                } else {
-                    params_str
-                        .split(';')
-                        .map(|s| s.parse().unwrap_or(0))
-                        .collect()
-                };
-                apply_sgr(&mut style, &params);
-            }
-        } else if next == ']' {
-            // OSC: consume until BEL or ESC \
-            chars.next();
-            while let Some(pc) = chars.next() {
-                if pc == '\x07' {
-                    break;
-                }
-                if pc == '\x1b' {
-                    let _ = chars.next();
-                    break;
-                }
-            }
-        } else {
-            // Unknown two-byte escape; drop the next char.
-            chars.next();
+        if !text.is_empty() {
+            segments.push(make_segment(text, &self.style));
         }
+        segments
     }
-
-    if !buf.is_empty() {
-        segments.push(make_segment(buf, &style));
-    }
-    segments
 }
 
 fn brighten(c: Color32) -> Color32 {
@@ -210,31 +263,50 @@ fn make_segment(text: String, style: &Style) -> Segment {
     }
 }
 
-/// Build a `LayoutJob` from parsed segments. `default_fg` is used for
-/// segments without an explicit foreground colour.
-pub fn to_layout_job(segments: &[Segment], default_fg: Color32, font: FontId) -> LayoutJob {
-    let mut job = LayoutJob::default();
-    for seg in segments {
-        let mut color = seg.fg.unwrap_or(default_fg);
-        if seg.bold {
-            // egui doesn't switch font weight without a bold font family,
-            // so approximate bold by brightening the foreground — most
-            // terminals do the same for the dim/bright palette swap.
-            color = brighten(color);
-        }
-        let fmt = TextFormat {
-            font_id: font.clone(),
-            color,
-            background: seg.bg.unwrap_or(Color32::TRANSPARENT),
-            italics: seg.italic,
-            underline: if seg.underline {
-                Stroke::new(1.0_f32, color)
-            } else {
-                Stroke::NONE
-            },
-            ..Default::default()
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn escape_sequences_survive_every_read_boundary() {
+        let text = "plain\x1b[31;1mred é\x1b[0m normal\x1b]title\x1b\\ end";
+        let expand = |segments: Vec<Segment>| -> Vec<(char, Style)> {
+            segments
+                .into_iter()
+                .flat_map(|s| {
+                    let style = s.style();
+                    s.text.chars().map(|c| (c, style)).collect::<Vec<_>>()
+                })
+                .collect()
         };
-        job.append(&seg.text, 0.0, fmt);
+        let expected = expand(Parser::default().feed(text));
+        for (i, _) in text.char_indices() {
+            let mut parser = Parser::default();
+            let mut actual = expand(parser.feed(&text[..i]));
+            actual.extend(expand(parser.feed(&text[i..])));
+            assert_eq!(actual, expected, "split at byte {i}");
+        }
+        assert_eq!(
+            expected.iter().map(|(c, _)| c).collect::<String>(),
+            "plainred é normal end"
+        );
     }
-    job
+
+    #[test]
+    fn malformed_controls_do_not_accumulate_unbounded_text() {
+        let mut parser = Parser::default();
+        assert!(
+            parser
+                .feed(&format!("\x1b[{}", "1".repeat(100_000)))
+                .is_empty()
+        );
+        assert!(parser.params.len() <= 128);
+        assert_eq!(parser.feed("mvisible")[0].text, "visible");
+        assert!(
+            parser
+                .feed(&format!("\x1b]{}", "x".repeat(100_000)))
+                .is_empty()
+        );
+        assert_eq!(parser.feed("\x07visible")[0].text, "visible");
+    }
 }
