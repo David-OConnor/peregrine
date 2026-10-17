@@ -7,7 +7,10 @@ use std::{
     path::{MAIN_SEPARATOR, Path, PathBuf},
 };
 
-use egui::{CollapsingHeader, Context, OutputCommand, RichText, Ui, ViewportId};
+use egui::{
+    CollapsingHeader, Context, OutputCommand, RichText, Ui, ViewportId,
+    collapsing_header::CollapsingState,
+};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use pulldown_cmark::{Event, Options, Parser, Tag};
 
@@ -22,6 +25,16 @@ pub fn is_markdown(path: &Path) -> bool {
         .is_some_and(|e| MARKDOWN_EXTENSIONS.contains(&e.as_str()))
 }
 
+/// How [show] draws `<details>` sections.
+pub enum Details<'a> {
+    /// For the user, who opens and closes them. Whether each is open is
+    /// recorded here, by its index.
+    Shown(&'a mut Vec<bool>),
+    /// For the viewer's find (see `crate::viewer::search`): open or closed as
+    /// recorded by a [Details::Shown] pass, at once rather than animated.
+    Measured(&'a [bool]),
+}
+
 /// Render the Markdown document `text`, split into `blocks` by
 /// [split_details], in viewer window `window`. `path` is the file it was read
 /// from: relative image paths load from its folder.
@@ -32,9 +45,10 @@ pub fn show(
     path: &Path,
     cache: &mut CommonMarkCache,
     window: ViewportId,
+    details: &mut Details,
 ) {
     ui.style_mut().url_in_tooltip = true;
-    show_blocks(ui, blocks, text, cache, &image_base(path), window);
+    show_blocks(ui, blocks, text, cache, &image_base(path), window, details);
 }
 
 /// The prefix `egui_commonmark` puts on image paths without a scheme, so
@@ -283,6 +297,7 @@ fn show_blocks(
     cache: &mut CommonMarkCache,
     image_base: &str,
     window: ViewportId,
+    details: &mut Details,
 ) {
     for (i, block) in blocks.iter().enumerate() {
         match block {
@@ -301,12 +316,27 @@ fn show_blocks(
                 index,
                 body,
             } => {
-                CollapsingHeader::new(RichText::new(summary).strong())
-                    .id_salt(("md_details", window, *index))
-                    .default_open(*open)
-                    .show(ui, |ui| {
-                        show_blocks(ui, body, text, cache, image_base, window)
-                    });
+                let salt = ("md_details", window, *index);
+                let id = ui.make_persistent_id(salt);
+                let mut header = CollapsingHeader::new(RichText::new(summary).strong())
+                    .id_salt(salt)
+                    .default_open(*open);
+                if let Details::Measured(states) = details {
+                    let open = states.get(*index).copied().unwrap_or(*open);
+                    // An animation time of zero jumps straight to the end.
+                    ui.ctx().animate_bool_with_time(id, open, 0.);
+                    header = header.open(Some(open));
+                }
+                header.show(ui, |ui| {
+                    show_blocks(ui, body, text, cache, image_base, window, details)
+                });
+                if let Details::Shown(states) = details {
+                    if states.len() <= *index {
+                        states.resize(*index + 1, false);
+                    }
+                    states[*index] =
+                        CollapsingState::load(ui.ctx(), id).map_or(*open, |s| s.is_open());
+                }
             }
         }
     }

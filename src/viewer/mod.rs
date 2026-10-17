@@ -20,9 +20,9 @@ use std::{
 
 use egui::{
     CentralPanel, Color32, ColorImage, Context, Frame, Id, Key, Label, Margin, Modifiers, Panel,
-    Rect, RichText, ScrollArea, Sense, TextureFilter, TextureHandle, TextureOptions, Ui, UiBuilder,
-    Vec2, ViewportBuilder, ViewportCommand, ViewportId, emath::GuiRounding, pos2, scroll_area,
-    vec2,
+    Rect, RichText, ScrollArea, Sense, Shape, TextureFilter, TextureHandle, TextureOptions, Ui,
+    UiBuilder, Vec2, ViewportBuilder, ViewportCommand, ViewportId, emath::GuiRounding, pos2,
+    scroll_area, vec2,
 };
 use egui_commonmark::CommonMarkCache;
 use image::{
@@ -32,10 +32,11 @@ use image::{
 
 use crate::{
     files::{format_size, open_with_default_app},
-    markdown::{self, Block, is_markdown},
+    markdown::{self, Block, Details, is_markdown},
 };
 
 mod gutter;
+mod search;
 mod syntax;
 
 /// Extensions (lowercase) of plain-text files. A `.lock` file that `syntax`
@@ -170,6 +171,8 @@ struct Doc {
     /// Markdown `content` split at its `<details>` blocks; see
     /// [markdown::split_details]. Empty for plain text and images.
     blocks: Vec<Block>,
+    /// Which of those `<details>` sections are open, by index.
+    details_open: Vec<bool>,
     /// Source or plain text laid out (source highlighted by a background
     /// task); invalidated on reload.
     layout: syntax::Source,
@@ -185,6 +188,8 @@ struct Doc {
     open: bool,
     /// A one-off message in the toolbar, e.g. a link whose target is missing.
     notice: Option<String>,
+    /// Find, for text: the toolbar's second row.
+    search: search::Search,
 }
 
 /// What a window shows.
@@ -232,6 +237,7 @@ impl Doc {
             content: Ok(Content::Loading),
             truncated: None,
             blocks: Vec::new(),
+            details_open: Vec::new(),
             layout: syntax::Source::default(),
             lines: 0,
             decoding: None,
@@ -240,6 +246,7 @@ impl Doc {
             last_poll: Instant::now(),
             open: true,
             notice: None,
+            search: search::Search::default(),
         };
         doc.reload(ctx);
         doc
@@ -679,6 +686,9 @@ impl Inner {
                 doc.navigate(&ctx, step);
             }
         }
+        if doc.kind != Kind::Image {
+            doc.search.keys(&ctx);
+        }
         doc.receive_image(&ctx);
         // Keep polling for edits while the window is idle.
         ctx.request_repaint_after(RELOAD_POLL);
@@ -687,7 +697,7 @@ impl Inner {
         // ids with the viewport's: each window keeps its own scroll position.
         Panel::top(Id::new(("viewer_toolbar", id)))
             .resizable(false)
-            .show(ui, |ui| toolbar(doc, ui));
+            .show(ui, |ui| toolbar(doc, ui, id));
 
         let mut margin = Margin::symmetric(16, 8);
         if matches!(doc.kind, Kind::Code(_) | Kind::Text) {
@@ -703,11 +713,41 @@ impl Inner {
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
                             let cache = cache.get_or_insert_with(CommonMarkCache::default);
-                            markdown::show(ui, text, &doc.blocks, &doc.path, cache, id);
+                            let top_left = ui.max_rect().min;
+                            let width = ui.available_width();
+                            let mut details = Details::Shown(&mut doc.details_open);
+                            markdown::show(
+                                ui,
+                                text,
+                                &doc.blocks,
+                                &doc.path,
+                                cache,
+                                id,
+                                &mut details,
+                            );
+                            let layout = search::Layout::markdown(
+                                text,
+                                width,
+                                ui.min_rect().height(),
+                                &doc.details_open,
+                            );
+                            doc.search.markdown(ui, top_left, layout, id, |ui| {
+                                let mut details = Details::Measured(&doc.details_open);
+                                markdown::show(
+                                    ui,
+                                    text,
+                                    &doc.blocks,
+                                    &doc.path,
+                                    cache,
+                                    id,
+                                    &mut details,
+                                );
+                            });
                         });
                 }
                 Ok(Content::Text(text)) => {
-                    show_text(ui, text, doc.kind, doc.lines, &mut doc.layout, id);
+                    let (kind, lines) = (doc.kind, doc.lines);
+                    show_text(ui, text, kind, lines, &mut doc.layout, &mut doc.search, id);
                 }
                 Ok(Content::Image(picture)) => show_image(ui, picture, &mut doc.zoom, id),
                 Ok(Content::Loading) => {
@@ -728,16 +768,19 @@ impl Inner {
 }
 
 /// Show source or plain text, its `lines` lines numbered down its left like
-/// an editor's, in viewer window `window`. Source scrolls sideways; plain
-/// text wraps to the window instead.
+/// an editor's, in viewer window `window`, with `search`'s matches
+/// highlighted. Source scrolls sideways; plain text wraps to the window
+/// instead.
 fn show_text(
     ui: &mut Ui,
     text: &Arc<str>,
     kind: Kind,
     lines: usize,
     layout: &mut syntax::Source,
+    search: &mut search::Search,
     window: ViewportId,
 ) {
+    search.find_in_text(ui.ctx(), text);
     let language = match kind {
         Kind::Code(language) => Some(language),
         _ => None,
@@ -759,8 +802,12 @@ fn show_text(
                         None => ui.available_width(),
                     };
                     let galley = layout.galley(ui, text, language, wrap_width);
+                    // Highlights go under the text, so they're drawn first.
+                    let behind = ui.painter().add(Shape::Noop);
                     let label = Label::new(Arc::clone(&galley)).selectable(true);
-                    (galley, ui.add(label).rect.min)
+                    let pos = ui.add(label).rect.min;
+                    search.paint_text(ui, &galley, pos, behind);
+                    (galley, pos)
                 })
         })
         .inner;
@@ -771,8 +818,9 @@ fn show_text(
 }
 
 /// Path, notices, and the Reload / Open externally buttons, plus previous /
-/// next and zoom controls for an image.
-fn toolbar(doc: &mut Doc, ui: &mut Ui) {
+/// next and zoom controls for an image, or the find bar under them for text.
+/// In viewer window `window`.
+fn toolbar(doc: &mut Doc, ui: &mut Ui, window: ViewportId) {
     ui.horizontal(|ui| {
         if doc.kind == Kind::Image {
             if ui
@@ -813,6 +861,9 @@ fn toolbar(doc: &mut Doc, ui: &mut Ui) {
         }
         ui.label(RichText::new(doc.path.display().to_string()).weak());
     });
+    if doc.kind != Kind::Image {
+        doc.search.bar(ui, window);
+    }
     if let Some(size) = doc.truncated {
         let msg = format!(
             "Showing the first {} MB of {}. Open externally to see it all.",

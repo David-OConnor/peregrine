@@ -26,7 +26,7 @@ use crate::{
     state::{FileRename, State},
     submit_command, viewer,
 };
-use crate::ui::dirs::{cleanup_missing_button, MIN_DIR_LABEL_LEN, MAX_DIR_LABEL_LEN};
+use crate::ui::dirs::cleanup_missing_button;
 
 /// Renders a single-line "Search" box that fills the available width and
 /// triggers `on_changed` when the buffer is edited. Pulled out so all three

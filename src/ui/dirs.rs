@@ -232,7 +232,7 @@ fn dir_label_len_control(ui: &mut Ui, label: &str, len: &mut usize, what: &str) 
              front. Drag, or click to type."
         ));
 
-    let mut done = (resp.changed() && !resp.dragged()) || resp.drag_stopped();
+    let done = (resp.changed() && !resp.dragged()) || resp.drag_stopped();
 
     done
 }
