@@ -5,6 +5,8 @@ An integrated and powerful terminal and file browser. For Linux, Windows, and Ma
 
 The initial inspiration: I do not enjoy manually navigating sequences of directories (In a terminal with `cd` commands, nor my OS's file browser). In the case of ones I use frequent, there is no reason I must!
 
+One way of looking at this: an **Integrate Field Environment or IFE**: like an IDE, but a general tool for files. Of course, most IDEs (Like Jetbrains') include functionality this program has (Plus a lot more!) - the differentiator here is that it's light, and is designed to work across the whole system instead of a project.
+
 It's based on the abstraction that navigating a filesystem in a GUI, and executing commands in a terminal are complementary operations that should interact. It also integrates a clipboard manager with history, a system PATH viewer/editor, and lightweight viewers for text and image files.
 
 This application takes its CLI component from [Shell](https://github.com/david-oconnor/shell), and shares its relevant systems including directory and command history and bookmarks. For information on terminal commands,see [its Readme](https://github.com/David-OConnor/shell/blob/main/README.md).
@@ -51,6 +53,8 @@ Click the red trash button beside Paste, or press Delete while the file list has
 Opening most popular text-based file formats (.txt, Markdown, TOML, most code files) or image (.png, .jpg, .bmp) file in the browser will open an integrated viewer; you can then open in your OS's default handler from there. In the image viewer, Ctrl+scroll zooms and dragging pans. 
 
 Code files are syntax highlighted.
+
+Text, code, and Markdown viewers have a find bar under the toolbar. It highlights every match and counts them. It can match case, or ignore spaces, underscores, and dashes, so `foo bar` also finds `foo_bar`, `foo-bar`, and `foobar`.
 
 
 ## CLI / terminal
@@ -110,13 +114,23 @@ Shortcuts to reduce typing:
 ## Keyboard shortcuts
 - **Ctrl + V**, **Ctrl + C**, **Ctrl + X** paste, copy, and cut using the native advanced clipboard, and/or system one
 - **Ctrl + Shift + V**: Toggle the clipboard pane
-- Image viewer: Left and Right arrow keys cycle to the prev and next image in the directory
 
 ### File browser
 - **Enter** opens a file. (Same as double-clicking) Native viewer for text, markdown, code, and image files. OS-default otherwise.
 - **Shift or Ctrl + arrow keys** extend the selection
 - **Ctrl + A** selects everything shown
 - **Escape** clears selections
+
+### File viewer
+On Mac, use **Cmd** in place of **Ctrl**.
+
+- **Ctrl + F**: Find. Focuses the find box, selecting its text
+- **Enter** / **Shift + Enter** (in the find box): Next / previous match
+- **F3** / **Shift + F3**: Next / previous match. Also **Ctrl + G** / **Ctrl + Shift + G**
+- **Alt + C**: Toggle match case. On Mac, **Cmd + Option + C**
+- **Escape** (in the find box): Clear the search
+- **F5**: Reload the file
+- **Left** and **Right** arrow keys (image viewer): Previous and next image in the directory
 
 ### Tabs
 On Mac, use **Cmd** in place of **Ctrl**, except for the **Ctrl + Tab** and **Ctrl + PageUp / PageDown** shortcuts, which use **Ctrl** on every OS.
