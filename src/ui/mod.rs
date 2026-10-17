@@ -161,7 +161,7 @@ const PANEL_FONT_REDUCTION: f32 = 2.;
 
 /// Width of every tab in the top strip, its `x` included. Longer labels are
 /// cut off at the edge (no ellipsis). See [tab_button].
-const TAB_WIDTH: f32 = 100.;
+const TAB_WIDTH: f32 = 120.;
 
 /// Gap either side of the separator between tabs in the top strip, and the
 /// separator's own width. See [tabs_bar].
@@ -1858,7 +1858,8 @@ fn tabs_bar(state: &mut State, ui: &mut Ui) {
                     });
 
                     let shortcut = ui.ctx().format_shortcut(&tab_keys::NEW_TAB);
-                    let plus_width = 2. * dirs::button_width(ui, "+");
+                    let plus_width = 1.5 * dirs::button_width(ui, "+");
+
                     if ui
                         .add(Button::new("+").min_size(egui::vec2(plus_width, 0.)))
                         .on_hover_text(format!("New tab ({shortcut})"))
