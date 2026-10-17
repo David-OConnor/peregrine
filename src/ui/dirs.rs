@@ -257,7 +257,7 @@ fn dir_label_mode_control(ui: &mut Ui, names: &mut bool, what: &str) -> bool {
 }
 
 /// Width of a (non-small) button labelled `text`, padding included.
-fn button_width(ui: &Ui, text: &str) -> f32 {
+pub(super) fn button_width(ui: &Ui, text: &str) -> f32 {
     let font = TextStyle::Button.resolve(ui.style());
     let text_width = ui.ctx().fonts_mut(|f| {
         f.layout_no_wrap(text.to_owned(), font, Color32::PLACEHOLDER)

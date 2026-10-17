@@ -1547,7 +1547,7 @@ fn remote_form(state: &mut State, ui: &mut Ui) {
 fn panel_toggles(state: &mut State, ui: &mut Ui) {
     ui.horizontal(|ui| {
         let v = &mut state.ui.panel_vis;
-        ui.toggle_value(&mut v.bookmarks, "Bosynokmarks");
+        ui.toggle_value(&mut v.bookmarks, "Bookmarks");
         ui.toggle_value(&mut v.recent_dirs, "Recent dirs");
         ui.toggle_value(&mut v.file_browser, "Files");
         ui.toggle_value(&mut v.remote_terminals, "Remote");
@@ -1858,8 +1858,9 @@ fn tabs_bar(state: &mut State, ui: &mut Ui) {
                     });
 
                     let shortcut = ui.ctx().format_shortcut(&tab_keys::NEW_TAB);
+                    let plus_width = 2. * dirs::button_width(ui, "+");
                     if ui
-                        .button("+ tab")
+                        .add(Button::new("+").min_size(egui::vec2(plus_width, 0.)))
                         .on_hover_text(format!("New tab ({shortcut})"))
                         .clicked()
                     {

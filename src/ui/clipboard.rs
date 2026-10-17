@@ -7,7 +7,9 @@ use std::{
 };
 
 use chrono::{DateTime, Local, Utc};
-use egui::{Align, Button, Color32, Frame, Layout, RichText, ScrollArea, Stroke, TextEdit, Ui};
+use egui::{
+    Align, Button, Color32, Frame, Layout, RichText, ScrollArea, Stroke, TextEdit, TextWrapMode, Ui,
+};
 
 use crate::{
     OutType,
@@ -68,7 +70,7 @@ fn text_paths(text: &str) -> Option<Vec<&Path>> {
 /// colour) at the right if it's on the system clipboard.
 fn title_row(ui: &mut Ui, kind: &str, detail: &str, added: &DateTime<Utc>, sys: Option<Color32>) {
     let added = added.with_timezone(&Local);
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 5.0;
         ui.strong(kind);
         ui.label(RichText::new(added_label(&added)).weak())
@@ -269,20 +271,30 @@ pub fn capture(state: &mut State, ctx: &egui::Context) {
 
 pub fn draw(state: &mut State, ui: &mut Ui) {
     super::panel_header(ui, "Clipboard", &mut state.ui.panel_vis.clipboard);
-    ui.label("Choose an entry, then paste normally, or use its paste button.");
-    ui.add(TextEdit::singleline(&mut state.ui.clipboard.search).hint_text("Search"));
 
-    if ui
-        .button("Clear")
-        .on_hover_text("Clears clipboard history and the system clipboard")
-        .clicked()
-    {
-        state.ui.clipboard.history.clear();
-        if let Err(e) = state.ui.clipboard.sys.clear() {
-            state.push_out(format!("clipboard: {e}"), OutType::StdErr);
-        }
-    }
+    ui.horizontal(|ui| {
+        // Reserve the button's width before the search box fills the rest.
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if ui
+                .button("Clear")
+                .on_hover_text("Clears clipboard history and the system clipboard")
+                .clicked()
+            {
+                state.ui.clipboard.history.clear();
+                if let Err(e) = state.ui.clipboard.sys.clear() {
+                    state.push_out(format!("clipboard: {e}"), OutType::StdErr);
+                }
+            }
+            ui.add(
+                TextEdit::singleline(&mut state.ui.clipboard.search)
+                    .hint_text("Search")
+                    .desired_width(f32::INFINITY),
+            );
+        });
+    });
+
     ui.separator();
+
     let query = state.ui.clipboard.search.to_lowercase();
     let sys_index = state.ui.clipboard.sys.find_in(&state.ui.clipboard.history);
     let sys_color = if ui.visuals().dark_mode {
@@ -290,11 +302,15 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
     } else {
         SYS_COLOR_LIGHT
     };
+
     let mut action = None;
     let mut remove = None;
+
     ScrollArea::vertical()
         .id_salt("clipboard_entries")
+        .auto_shrink([false, false])
         .show(ui, |ui| {
+            ui.style_mut().wrap_mode = Some(TextWrapMode::Wrap);
             if state.ui.clipboard.history.entries.is_empty() {
                 ui.label("Copy text or files to begin.");
             }
@@ -318,9 +334,11 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
                         ),
                     ),
                 };
+
                 if !body.to_lowercase().contains(&query) {
                     continue;
                 }
+
                 // Paths show as just their dir and name; hover for the full ones.
                 let compact = match entry {
                     Content::Files { paths, .. } => Some(compact_paths(
@@ -328,8 +346,10 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
                     )),
                     Content::Text(text) => text_paths(text).map(|paths| compact_paths(&paths)),
                 };
+
                 let shown = compact.as_deref().unwrap_or(&body);
                 let on_sys = sys_index == Some(index);
+
                 ui.push_id(index, |ui| {
                     // Every entry has an outline, so marking one doesn't shift it.
                     let outline = if on_sys {
@@ -350,6 +370,7 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
                             if truncated {
                                 preview.push('…');
                             }
+
                             let color = matches!(entry, Content::Text(_)).then(|| {
                                 if ui.visuals().dark_mode {
                                     TEXT_COLOR_DARK
@@ -357,6 +378,7 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
                                     TEXT_COLOR_LIGHT
                                 }
                             });
+
                             let styled = |text: &str| {
                                 let text = RichText::new(text);
                                 match color {
@@ -364,10 +386,12 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
                                     None => text,
                                 }
                             };
+
                             let label = ui.label(styled(&preview));
                             if compact.is_some() {
                                 label.on_hover_text(body.as_ref());
                             }
+
                             if truncated {
                                 egui::CollapsingHeader::new("Full contents").show(ui, |ui| {
                                     ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
@@ -375,6 +399,7 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
                                     });
                                 });
                             }
+
                             ui.horizontal_wrapped(|ui| {
                                 if ui
                                     .button("Use")

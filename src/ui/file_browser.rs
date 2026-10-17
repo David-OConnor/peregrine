@@ -1,9 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use egui::{
-    Align, Area, Button, Color32, DragAndDrop, Event, Frame, Key, Layout, Modal, Modifiers, Panel,
-    Response, RichText, ScrollArea, Sense, Stroke, StrokeKind, TextStyle, Ui,
-};
+use egui::{Align, Area, Button, Color32, DragAndDrop, Event, Frame, Id, Key, Layout, Modal, Modifiers, Panel, Response, RichText, ScrollArea, Sense, Stroke, StrokeKind, TextStyle, Ui};
 
 use crate::{
     OutType, clipboard,
@@ -282,8 +279,8 @@ pub(crate) fn file_browser(state: &mut State, ui: &mut Ui) {
                     }
                 }
             })
-            .response
-            .on_hover_text("This PC: devices and drives");
+                .response
+                .on_hover_text("This PC: devices and drives");
             if ui
                 .button("🗑")
                 .on_hover_text("Recycle Bin (opens in Explorer)")
@@ -403,32 +400,6 @@ pub(crate) fn file_browser(state: &mut State, ui: &mut Ui) {
             .clicked();
         ui.spacing_mut().item_spacing.x = spacing;
 
-        ui.separator();
-
-        // The listing's order. Clicking the current one reverses it.
-        let current = state.ui.files_sort;
-        for key in SortKey::ALL {
-            let on = current.key == key;
-            let label = match (on, current.descending) {
-                (true, false) => format!("{} ⬆", key.label()),
-                (true, true) => format!("{} ⬇", key.label()),
-                (false, _) => key.label().to_owned(),
-            };
-            let hover = if on {
-                format!("{}. Click to reverse the order.", key.hover())
-            } else {
-                key.hover().to_owned()
-            };
-            if ui.add(Button::selectable(on, label)).on_hover_text(hover).clicked() {
-                let descending = if on {
-                    !current.descending
-                } else {
-                    key.default_descending()
-                };
-                new_sort = Some(FileSort { key, descending });
-            }
-        }
-
         // Its space is kept while it's hidden, so it never wraps the row
         // anew and shifts the listing under the pointer as a click selects.
         unselect = ui
@@ -440,20 +411,27 @@ pub(crate) fn file_browser(state: &mut State, ui: &mut Ui) {
             ui.spinner();
         }
     });
+
+    sort_buttons(&mut new_sort, state.ui.files_sort, ui);
+
     if filters_changed {
         state.refresh_browser_files();
         let _ = state.save();
     }
+
     if let Some(sort) = new_sort {
         state.set_files_sort(sort);
     }
+
     if cut || copy {
         state.copy_selected(cut);
     }
+
     if unselect {
         state.clear_file_selection();
         state.ui.rename_pending = None;
     }
+
     if delete {
         state.request_delete_selected();
     }
@@ -493,10 +471,12 @@ pub(crate) fn file_browser(state: &mut State, ui: &mut Ui) {
         if state.ui.files_copy_pending.is_some() {
             ui.ctx().request_repaint();
         }
+
         // In a search box, text on the clipboard was pasted into it.
         paste |=
             paste_key && (!own_box_focused || clipboard::get_files().is_ok_and(|f| f.is_some()));
     }
+
     if paste {
         state.paste_files(ui.ctx());
     }
@@ -599,7 +579,7 @@ pub(super) fn delete_popup(state: &mut State, ctx: &egui::Context) {
     let mut confirm = false;
     let mut cancel = false;
 
-    let modal = Modal::new(egui::Id::new("delete_files_popup")).show(ctx, |ui| {
+    let modal = Modal::new(Id::new("delete_files_popup")).show(ctx, |ui| {
         ui::scale_panel_fonts(ui, state.gui_font_size);
         ui.set_width(360.0_f32.min((ctx.content_rect().width() - 48.0).max(100.0)));
         ui.heading("Delete selected items?");
@@ -794,7 +774,7 @@ fn file_list(state: &mut State, ui: &mut Ui, search_changed: bool, arrow_moved: 
                 if bookmarked {
                     row = row.fill(bookmarked_fill(dark)).frame_when_inactive(true);
                 }
-                
+
                 let resp = ui.add(row);
                 let is_lead = lead == Some(f.path.as_path());
                 if is_lead && search_changed {
@@ -972,8 +952,8 @@ struct DropHover {
     ok: bool,
 }
 
-fn drop_hover_id() -> egui::Id {
-    egui::Id::new("files_drop_hover")
+fn drop_hover_id() -> Id {
+    Id::new("files_drop_hover")
 }
 
 /// Let `resp`, a folder row or a button that goes to `dest`, take Files rows
@@ -995,10 +975,10 @@ pub(super) fn drop_target(ui: &Ui, resp: &Response, dest: &Path) -> Option<FileD
     };
     let copy = copy_key
         || (!move_key
-            && drag
-                .0
-                .first()
-                .is_some_and(|src| !files::same_volume(src, dest)));
+        && drag
+        .0
+        .first()
+        .is_some_and(|src| !files::same_volume(src, dest)));
     let name = dest.file_name().map_or_else(
         || dest.display().to_string(),
         |n| n.to_string_lossy().into_owned(),
@@ -1052,6 +1032,7 @@ fn drag_preview(ui: &Ui) {
             } else {
                 egui::CursorIcon::Grabbing
             };
+
             ctx.set_cursor_icon(icon);
             format!("{verb} {what} to {}", h.name)
         }
@@ -1062,7 +1043,7 @@ fn drag_preview(ui: &Ui) {
         None => what,
     };
 
-    Area::new(egui::Id::new("files_drag_preview"))
+    Area::new(Id::new("files_drag_preview"))
         .order(egui::Order::Tooltip)
         .interactable(false)
         .fixed_pos(pos + egui::vec2(16.0, 16.0))
@@ -1104,4 +1085,36 @@ pub(super) fn drag_autoscroll(ui: &Ui) {
 
     ui.scroll_with_delta(egui::vec2(0.0, 12.0 * depth * dt));
     ui.ctx().request_repaint();
+}
+
+fn sort_buttons(new_sort: &mut Option<FileSort>, files_sort: FileSort, ui: &mut Ui) {
+    // The listing's order. Clicking the current one reverses it.
+    let current = files_sort;
+
+    ui.horizontal_wrapped(|ui| {
+        for key in SortKey::ALL {
+            let on = current.key == key;
+            let label = match (on, current.descending) {
+                (true, false) => format!("{} ⬆", key.label()),
+                (true, true) => format!("{} ⬇", key.label()),
+                (false, _) => key.label().to_owned(),
+            };
+
+            let hover = if on {
+                format!("{}. Click to reverse the order.", key.hover())
+            } else {
+                key.hover().to_owned()
+            };
+
+            if ui.add(Button::selectable(on, label)).on_hover_text(hover).clicked() {
+                let descending = if on {
+                    !current.descending
+                } else {
+                    key.default_descending()
+                };
+
+                *new_sort = Some(FileSort { key, descending });
+            }
+        }
+    });
 }
