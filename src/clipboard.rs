@@ -166,6 +166,14 @@ impl SysClipboard {
         self.seen().current = Some(content);
     }
 
+    /// Empty the OS clipboard and forget its tracked contents and pending copies.
+    pub fn clear(&self) -> Result<(), String> {
+        let mut seen = self.seen();
+        os::clear()?;
+        *seen = Seen::default();
+        Ok(())
+    }
+
     /// Whether we know the OS clipboard holds `content`.
     pub fn holds(&self, content: &Content) -> bool {
         self.seen().current.as_ref() == Some(content)
@@ -211,6 +219,12 @@ fn watch(seen: &Weak<Mutex<Seen>>, ctx: &egui::Context) {
     loop {
         let seq = os::seq_num();
         if seq.is_none() || seq != seq_seen {
+            let Some(seen) = seen.upgrade() else {
+                return;
+            };
+            // Keep reading and recording together, so Clear can't be followed
+            // by an observation read before the clipboard was emptied.
+            let mut seen = seen.lock().unwrap_or_else(|e| e.into_inner());
             // Unreadable (another app has it open): try again next time.
             if let Ok(content) = os::get() {
                 seq_seen = seq;
@@ -224,14 +238,7 @@ fn watch(seen: &Weak<Mutex<Seen>>, ctx: &egui::Context) {
                         c => c,
                     })
                     .filter(History::fits);
-                let Some(seen) = seen.upgrade() else {
-                    return;
-                };
-                if seen
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .observe(content)
-                {
+                if seen.observe(content) {
                     ctx.request_repaint();
                 }
             }
@@ -287,7 +294,7 @@ pub fn clear_if_holds(paths: &[PathBuf]) {
     if let Ok(Some((held, _))) = get_files()
         && held == paths
     {
-        os::clear();
+        let _ = os::clear();
     }
 }
 
@@ -363,10 +370,9 @@ mod os {
         Ok((!paths.is_empty()).then_some((paths, cut)))
     }
 
-    pub fn clear() {
-        if let Ok(_clip) = open() {
-            let _ = raw::empty();
-        }
+    pub fn clear() -> Result<(), String> {
+        let _clip = open()?;
+        raw::empty().map_err(|e| e.to_string())
     }
 
     /// Changes whenever the clipboard's contents do. Reading it doesn't open
@@ -463,9 +469,10 @@ mod os {
         Ok(Some((paths, cut)))
     }
 
-    pub fn clear() {
-        let _ = with(|c| c.clear());
+    pub fn clear() -> Result<(), String> {
+        with(|c| c.clear())?;
         *CUT.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        Ok(())
     }
 
     /// There's no cheap way to tell that the clipboard has changed, so the

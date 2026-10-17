@@ -1595,20 +1595,27 @@ fn font_size_control(ui: &mut Ui, size: f32) -> f32 {
     }
 }
 
-fn step_control(ui: &mut Ui, label: &str, value: i32, less: &str, more: &str) -> i32 {
-    ui.label(label);
-    ui.label(format!("{value}"));
-    let mut delta = 0;
+/// A [DragValue] for [path_color::depth_levels]. Returns the change to apply.
+fn dir_depth_control(ui: &mut Ui) -> i32 {
+    let levels = path_color::depth_levels() as i32;
+    let mut val = levels;
 
-    if ui.small_button("-").on_hover_text(less).clicked() {
-        delta = -1;
+    let response = ui
+        .add(
+            DragValue::new(&mut val)
+                .range(path_color::MIN_DEPTH_LEVELS..=path_color::MAX_DEPTH_LEVELS)
+                .speed(0.1)
+                .update_while_editing(false),
+        )
+        .on_hover_text(
+            "Directory levels from purple (root or ~) to yellow. Drag, or click to type.",
+        );
+
+    if response.changed() {
+        val - levels
+    } else {
+        0
     }
-
-    if ui.small_button("+").on_hover_text(more).clicked() {
-        delta = 1;
-    }
-
-    delta
 }
 
 /// One [TAB_WIDTH]-wide tab of the top strip. The label is laid out by hand
@@ -1666,7 +1673,7 @@ fn tab_button(ui: &mut Ui, text: &str, selected: bool, closable: bool) -> (egui:
 
         // Only the active tab is closable, so match its label colour.
         let x = RichText::new("x").color(TAB_ACTIVE_TEXT);
-        let shortcut = ui.ctx().format_shortcut(&tab_keys::CLOSE_TAB);
+        let shortcut = format!("{} or middle click", ui.ctx().format_shortcut(&tab_keys::CLOSE_TAB));
         ui.put(close_rect, Button::new(x).frame_when_inactive(false))
             .on_hover_text(format!("Close tab ({shortcut})"))
             .clicked()
@@ -1754,20 +1761,19 @@ fn tabs_bar(state: &mut State, ui: &mut Ui) {
         // terminal panes, one for the side panels; then the path colours'
         // depth.
 
+        ui.label("CLI font:");
         font_delta = font_size_control(ui, font_size);
         ui.separator();
+
+        ui.label("GUI font:");
         gui_font_delta = font_size_control(ui, gui_font_size);
 
         ui.separator();
         // How deep a directory is when its colour reaches yellow (see
         // [path_color::depth_levels]).
-        dir_depth_delta = step_control(
-            ui,
-            "Dir color depth: ",
-            path_color::depth_levels() as i32,
-            "Fewer directory levels from purple (root or ~) to yellow",
-            "More directory levels from purple (root or ~) to yellow",
-        );
+        ui.label("Dir color depth:");
+        dir_depth_delta = dir_depth_control(ui);
+
         ui.separator();
         // Breathing room either side of the tab section.
         ui.add_space(TAB_SECTION_PADDING);

@@ -273,11 +273,14 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
     ui.add(TextEdit::singleline(&mut state.ui.clipboard.search).hint_text("Search"));
 
     if ui
-        .button("Clear history")
-        .on_hover_text("Leaves the system clipboard unchanged")
+        .button("Clear")
+        .on_hover_text("Clears clipboard history and the system clipboard")
         .clicked()
     {
         state.ui.clipboard.history.clear();
+        if let Err(e) = state.ui.clipboard.sys.clear() {
+            state.push_out(format!("clipboard: {e}"), OutType::StdErr);
+        }
     }
     ui.separator();
     let query = state.ui.clipboard.search.to_lowercase();
