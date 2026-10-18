@@ -33,6 +33,16 @@ image ={ version = "0.25", default-features = false, features = ["png", "jpeg", 
 
 shell = { path = "../shell" }
 
+# Checking for, downloading, and installing new releases, from the About window.
+# Without its default `gui` feature, which is the Software Manager application
+# itself.
+software_manager = { path = "../software_manager", default-features = false }
+
+# Terminal emulator for full-screen programs (vim, nano, less, top) run over
+# SSH: the remote's output is parsed into a screen of cells the GUI draws
+# (see `src/remote.rs`, `src/ui/remote_grid.rs`).
+vt100 = "0.16.2"
+
 # Files panel Deep search (see `src/deep_search.rs`): ripgrep's own library
 # crates, so results match what `rg` finds. `ignore` is its parallel,
 # .gitignore-aware directory walker; `grep-searcher` and `grep-regex` its

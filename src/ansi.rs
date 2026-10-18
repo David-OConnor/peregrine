@@ -1,7 +1,12 @@
-//! An ANSI SGR escape-sequence parser.
+//! An ANSI escape-sequence parser for line-oriented output.
 //!
 //! Shells like PowerShell emit sequences such as `ESC[32;1m` to colour their
-//! output. We parse those into styled segments so the GUI can render.
+//! output. We parse those into styled segments so the GUI can render. Output
+//! from a remote terminal also moves the cursor within a line to redraw it
+//! (progress bars, spinners); those few controls come out as [Ctl]s for the
+//! scrollback to apply. Anything else (cursor addressing, modes, titles) is
+//! dropped: full-screen programs get a real terminal screen instead (see
+//! `remote`).
 
 use egui::{Color32, FontId, Stroke, TextFormat};
 
@@ -49,6 +54,29 @@ impl Default for Style {
     }
 }
 
+/// A piece of parsed output: styled text, or a cursor control.
+pub(crate) enum Piece {
+    Text(Segment),
+    Ctl(Ctl),
+}
+
+/// The in-line cursor controls the scrollback applies.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Ctl {
+    /// Carriage return: back to the start of the line.
+    Cr,
+    /// One column left.
+    Backspace,
+    /// `ESC [ n K`: erase to the end of the line (0), from its start to the
+    /// cursor (1), or all of it (2).
+    EraseLine(u8),
+    /// `ESC [ n G`: to this column, from 0.
+    Column(usize),
+    /// `ESC [ n C` / `ESC [ n D`: this many columns right / left.
+    Forward(usize),
+    Back(usize),
+}
+
 pub struct Segment {
     pub text: String,
     pub fg: Option<Color32>,
@@ -71,7 +99,7 @@ impl Segment {
 }
 
 /// Standard 16-colour ANSI palette, tuned to read well on a black background.
-fn ansi_color(code: u32, bright: bool) -> Option<Color32> {
+pub(crate) fn ansi_color(code: u32, bright: bool) -> Option<Color32> {
     let (r, g, b) = match (code, bright) {
         (0, false) => (40, 40, 40),
         (1, false) => (200, 70, 70),
@@ -95,7 +123,7 @@ fn ansi_color(code: u32, bright: bool) -> Option<Color32> {
 }
 
 /// xterm 256-colour palette lookup.
-fn xterm256(n: u8) -> Color32 {
+pub(crate) fn xterm256(n: u8) -> Color32 {
     if n < 16 {
         let bright = n >= 8;
         let code = (n % 8) as u32;
@@ -168,7 +196,12 @@ enum Escape {
     #[default]
     Text,
     Start,
+    /// After `ESC` and an intermediate byte, as in `ESC ( B` (select a
+    /// character set): the next byte ends it.
+    Intermediate,
     Csi,
+    /// A string up to BEL or `ESC \`: OSC (`ESC ]`), and likewise DCS, SOS,
+    /// PM and APC.
     Osc,
     OscEnd,
 }
@@ -184,39 +217,72 @@ pub(crate) struct Parser {
 }
 
 impl Parser {
-    pub(crate) fn feed(&mut self, input: &str) -> Vec<Segment> {
-        let mut segments = Vec::new();
+    pub(crate) fn feed(&mut self, input: &str) -> Vec<Piece> {
+        let mut pieces = Vec::new();
         let mut text = String::new();
+        let flush = |pieces: &mut Vec<Piece>, text: &mut String, style: &Style| {
+            if !text.is_empty() {
+                pieces.push(Piece::Text(make_segment(std::mem::take(text), style)));
+            }
+        };
         for c in input.chars() {
             match self.escape {
-                Escape::Text => {
-                    if c == '\x1b' {
-                        self.escape = Escape::Start;
-                    } else {
-                        text.push(c);
+                Escape::Text => match c {
+                    '\x1b' => self.escape = Escape::Start,
+                    '\r' => {
+                        flush(&mut pieces, &mut text, &self.style);
+                        pieces.push(Piece::Ctl(Ctl::Cr));
                     }
-                }
+                    '\x08' => {
+                        flush(&mut pieces, &mut text, &self.style);
+                        pieces.push(Piece::Ctl(Ctl::Backspace));
+                    }
+                    // Other C0/C1 controls (BEL, shift-in/out, …) don't print.
+                    '\t' | '\n' => text.push(c),
+                    c if c.is_control() => {}
+                    _ => text.push(c),
+                },
                 Escape::Start => match c {
                     '[' => {
                         self.params.clear();
                         self.params_overflow = false;
                         self.escape = Escape::Csi;
                     }
-                    ']' => self.escape = Escape::Osc,
+                    ']' | 'P' | 'X' | '^' | '_' => self.escape = Escape::Osc,
+                    ' '..='/' => self.escape = Escape::Intermediate,
                     _ => self.escape = Escape::Text,
                 },
+                Escape::Intermediate => {
+                    if !(' '..='/').contains(&c) {
+                        self.escape = Escape::Text;
+                    }
+                }
                 Escape::Csi => {
                     if ('@'..='~').contains(&c) {
-                        if c == 'm' && !self.params_overflow {
-                            if !text.is_empty() {
-                                segments.push(make_segment(std::mem::take(&mut text), &self.style));
+                        // Private sequences (`ESC [ ? 25 l`) set modes.
+                        let plain = !self.params_overflow
+                            && self.params.bytes().all(|b| b.is_ascii_digit() || b == b';');
+                        let n = || -> Option<usize> { self.params.split(";").next()?.parse().ok() };
+                        let ctl = match c {
+                            'm' if plain => {
+                                flush(&mut pieces, &mut text, &self.style);
+                                let params: Vec<u32> = self
+                                    .params
+                                    .split(';')
+                                    .map(|p| p.parse().unwrap_or(0))
+                                    .collect();
+                                apply_sgr(&mut self.style, &params);
+                                None
                             }
-                            let params: Vec<u32> = self
-                                .params
-                                .split(';')
-                                .map(|p| p.parse().unwrap_or(0))
-                                .collect();
-                            apply_sgr(&mut self.style, &params);
+                            'K' if plain => Some(Ctl::EraseLine(n().unwrap_or(0).min(3) as u8)),
+                            'G' if plain => Some(Ctl::Column(n().unwrap_or(1).max(1) - 1)),
+                            'C' if plain => Some(Ctl::Forward(n().unwrap_or(1).max(1))),
+                            'D' if plain => Some(Ctl::Back(n().unwrap_or(1).max(1))),
+                            _ => None,
+                        };
+                        if let Some(ctl) = ctl {
+                            flush(&mut pieces, &mut text, &self.style);
+                            pieces.push(Piece::Ctl(ctl));
                         }
                         self.escape = Escape::Text;
                     } else if self.params.len() < 128 {
@@ -240,10 +306,8 @@ impl Parser {
                 }
             }
         }
-        if !text.is_empty() {
-            segments.push(make_segment(text, &self.style));
-        }
-        segments
+        flush(&mut pieces, &mut text, &self.style);
+        pieces
     }
 }
 
@@ -270,12 +334,15 @@ mod tests {
     #[test]
     fn escape_sequences_survive_every_read_boundary() {
         let text = "plain\x1b[31;1mred é\x1b[0m normal\x1b]title\x1b\\ end";
-        let expand = |segments: Vec<Segment>| -> Vec<(char, Style)> {
-            segments
+        let expand = |pieces: Vec<Piece>| -> Vec<(char, Style)> {
+            pieces
                 .into_iter()
-                .flat_map(|s| {
-                    let style = s.style();
-                    s.text.chars().map(|c| (c, style)).collect::<Vec<_>>()
+                .flat_map(|p| match p {
+                    Piece::Text(s) => {
+                        let style = s.style();
+                        s.text.chars().map(|c| (c, style)).collect::<Vec<_>>()
+                    }
+                    Piece::Ctl(_) => Vec::new(),
                 })
                 .collect()
         };
@@ -301,12 +368,39 @@ mod tests {
                 .is_empty()
         );
         assert!(parser.params.len() <= 128);
-        assert_eq!(parser.feed("mvisible")[0].text, "visible");
+        assert_eq!(text(parser.feed("mvisible")), "visible");
         assert!(
             parser
                 .feed(&format!("\x1b]{}", "x".repeat(100_000)))
                 .is_empty()
         );
-        assert_eq!(parser.feed("\x07visible")[0].text, "visible");
+        assert_eq!(text(parser.feed("\x07visible")), "visible");
+    }
+
+    fn text(pieces: Vec<Piece>) -> String {
+        pieces
+            .into_iter()
+            .filter_map(|p| match p {
+                Piece::Text(s) => Some(s.text),
+                Piece::Ctl(_) => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn line_controls_come_out_and_other_sequences_are_dropped() {
+        let pieces = Parser::default()
+            .feed("a\rb\x08\x1b[2K\x1b[5G\x1b(Bc\x1b[?25l\x07\x1bP1$r\x1b\\d");
+        let got: Vec<String> = pieces
+            .into_iter()
+            .map(|p| match p {
+                Piece::Text(s) => s.text,
+                Piece::Ctl(c) => format!("{c:?}"),
+            })
+            .collect();
+        assert_eq!(
+            got,
+            ["a", "Cr", "b", "Backspace", "EraseLine(2)", "Column(4)", "cd"]
+        );
     }
 }

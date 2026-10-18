@@ -6,13 +6,14 @@ use std::{
 };
 
 use egui::{text::{CCursor, CCursorRange, LayoutJob, TextWrapping}, Align, Button, CentralPanel, Color32, DragValue, FontData, FontDefinitions, FontFamily, FontId, FontSelection, Frame, Key, Layout, Panel, Rect, RichText, ScrollArea, TextEdit, TextFormat, TextStyle, TextWrapMode, Ui, WidgetText};
-use shell::{DirList, SshMode};
+use shell::DirList;
 
 mod about;
 pub mod clipboard;
 pub mod dirs;
 mod file_browser;
 pub mod path_panel;
+mod remote_grid;
 mod tab_keys;
 mod terminal;
 
@@ -22,6 +23,7 @@ use crate::{
     deep_search::{DeepSearch, MAX_MATCHES, Row},
     files::{FileDetails, SelectionSummary, format_size, open_with_default_app},
     path_color::{self, Part},
+    remote::Remote,
     render_with_tilde, run_command,
     state::{FileRename, State},
     submit_command, viewer,
@@ -633,10 +635,22 @@ fn set_mono_size(ui: &mut Ui, size: f32) {
 }
 
 /// The "terminal" output pane: scrolls, sticks to the bottom so the latest
-/// line stays in view, and colours rows by stream kind.
+/// line stays in view, and colours rows by stream kind. While a full-screen
+/// program runs on the tab's remote, its screen instead.
 fn term_out(state: &mut State, ui: &mut Ui) {
     set_mono_size(ui, state.font_size);
-    terminal::show(&mut state.ui.out[state.ui.active_tab], ui);
+    state.ui.term_size = remote_grid::size_in_cells(ui);
+    let i = state.ui.active_tab;
+    if let Some(live) = state.remote[i]
+        .as_mut()
+        .and_then(Remote::live_mut)
+        .filter(|l| l.grid_mode())
+    {
+        let paste = state.ui.clipboard.pending_text.take();
+        remote_grid::show(live, ui, paste);
+        return;
+    }
+    terminal::show(&mut state.ui.out[i], ui);
 }
 
 /// The input row: prompt line on top, with an edit beneath it that wraps long
@@ -662,8 +676,27 @@ fn term_in(state: &mut State, ui: &mut Ui) {
     // While remote, the cwd label already shows `user@host`; don't also show
     // the (stale) local git branch.
     let show_branch = !state.is_remote();
-    let running = state.running_here().map(|cmd| cmd.line.clone());
+    let connecting = matches!(state.remote_here(), Some(Remote::Connecting(_)));
+    // A command running on the tab's remote takes typed lines, as a local
+    // one does. Without a prompt hook the remote is a plain terminal, which
+    // takes everything.
+    let remote_busy = state.live_here().filter(|l| l.busy()).map(|l| {
+        l.session
+            .command()
+            .map_or_else(|| "remote terminal".to_string(), str::to_string)
+    });
+    // A full-screen remote program has the keyboard; see `term_out`. Once
+    // it's done, the keyboard comes back here.
+    let grid = state.live_here().is_some_and(|l| l.grid_mode());
+    if !grid && remote_grid::has_focus(ui.ctx()) {
+        state.ui.focus_input = true;
+    }
+    let running = state
+        .running_here()
+        .map(|cmd| cmd.line.clone())
+        .or(remote_busy.clone());
     let mut stop = false;
+    let mut cancel = false;
 
     // Wrapped, so a long cwd or running command flows onto extra rows (and
     // the Stop button drops below) instead of running off the right edge.
@@ -699,16 +732,21 @@ fn term_in(state: &mut State, ui: &mut Ui) {
 
         // While a command runs, the input goes to its stdin instead.
         match &running {
+            _ if connecting => {
+                cancel = ui.button("Cancel").on_hover_text("Stop connecting").clicked();
+            }
             Some(line) => {
                 ui.label(
                     RichText::new(format!("running: {line}"))
                         .color(COLOR_STDERR_OK)
                         .monospace(),
                 );
-                stop = ui
-                    .button("Stop")
-                    .on_hover_text("End the command and everything it started (Ctrl+C)")
-                    .clicked();
+                let hover = if remote_busy.is_some() {
+                    "Interrupt the remote command (Ctrl+C)"
+                } else {
+                    "End the command and everything it started (Ctrl+C)"
+                };
+                stop = ui.button("Stop").on_hover_text(hover).clicked();
             }
             None => {
                 ui.label(RichText::new("$").color(COLOR_PROMPT).monospace());
@@ -774,9 +812,36 @@ fn term_in(state: &mut State, ui: &mut Ui) {
             .unwrap_or(false);
         stop |= !input_selected && !label_selected;
     }
+    if cancel {
+        state.disconnect_remote();
+    }
     if stop {
-        state.stop_running();
+        if remote_busy.is_some() {
+            state.interrupt_remote();
+        } else {
+            state.stop_running();
+        }
         state.ui.focus_input = true;
+    }
+    // Ctrl+D on an empty line ends a remote program's input (`cat`, a REPL).
+    if remote_busy.is_some()
+        && focused
+        && state.ui.cli_input[active].is_empty()
+        && ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, Key::D))
+    {
+        if let Some(live) = state.live_here() {
+            live.session.send(&[0x04]);
+        }
+    }
+
+    // A full-screen remote program has the keyboard, and the pane.
+    if grid {
+        ui.label(
+            RichText::new("A full-screen program is running on the remote; keys go to it. Click it if they don't.")
+                .color(COLOR_STDERR_OK)
+                .small(),
+        );
+        return;
     }
 
     // Input box sits on its own row, directly beneath the prompt line above.
@@ -829,9 +894,10 @@ fn term_in(state: &mut State, ui: &mut Ui) {
     }
 
     if tab || accept_hint {
-        if tab {
+        // Completion looks at local files, which mean nothing on a remote.
+        if tab && !state.is_remote() {
             state.autocomplete_input();
-        } else if let Some(hint) = &hint {
+        } else if let Some(hint) = hint.as_ref().filter(|_| accept_hint) {
             state.ui.cli_input[active].push_str(hint);
         }
         // egui's TextEdit keeps its own caret position, which isn't
@@ -856,15 +922,10 @@ fn term_in(state: &mut State, ui: &mut Ui) {
 
     if submitted {
         let input = std::mem::take(&mut state.ui.cli_input[active]);
-        // In interactive (PTY) mode the line goes straight to the remote shell,
-        // which echoes it back — so we don't run it as a command or echo it
-        // locally. Exec mode (and all local tabs) go through `submit_command`.
-        let pty = state
-            .active_remote()
-            .map(|s| s.mode() == SshMode::Pty)
-            .unwrap_or(false);
-
-        if pty {
+        // A line for a program running on the remote goes straight to it; the
+        // remote terminal echoes it when the program wants it echoed (not a
+        // password, say), so it isn't echoed here.
+        if remote_busy.is_some() {
             state.send_remote_line(&input);
         } else if running.is_some() {
             state.send_running_line(&input);
@@ -1386,44 +1447,31 @@ fn selection_details(s: &SelectionSummary, home: Option<&Path>, ui: &mut Ui) {
 }
 
 /// Saved SSH remotes. Lists each `user@host:port` with Connect / Edit / delete
-/// controls, an add/edit form, and — when the active tab is connected — a
-/// status line with Disconnect and an Exec⇄PTY mode toggle. Passwords are kept
-/// in the OS keyring (see `shell::secrets`), never in the panel or state file.
+/// controls, an add/edit form, and — when the active tab is connected or
+/// connecting — a status line with Disconnect. Passwords are kept in the OS
+/// keyring (see `shell::secrets`), never in the panel or state file; SSH keys
+/// need no setup here.
 fn remote_terminals(state: &mut State, ui: &mut Ui) {
     panel_header(ui, "Remote", &mut state.ui.panel_vis.remote_terminals);
 
     // Connection status for the active tab.
-    if let Some(remote) = state.active_remote() {
-        let label = remote.label();
-        let mode = match remote.mode() {
-            SshMode::Exec => "exec",
-            SshMode::Pty => "interactive",
+    if let Some(remote) = state.remote_here() {
+        let (status, button) = match remote {
+            Remote::Connecting(c) => (
+                RichText::new(format!("◌ Connecting to {}…", c.label())).color(COLOR_STDERR_OK),
+                "Cancel",
+            ),
+            Remote::Live(l) => (
+                RichText::new(format!("● {}:{}", l.session.label(), l.session.display_cwd()))
+                    .color(COLOR_EXECUTABLE)
+                    .strong(),
+                "Disconnect",
+            ),
         };
-        ui.label(
-            RichText::new(format!("● {label}  [{mode}]"))
-                .color(COLOR_EXECUTABLE)
-                .strong(),
-        );
-        ui.horizontal(|ui| {
-            if ui.button("Disconnect").clicked() {
-                state.disconnect_remote();
-            }
-
-            let mut label = "Exec mode";
-            if let Some(s) = state.active_remote() {
-                if let SshMode::Pty = s.mode() {
-                    label = "PTY mode";
-                }
-            }
-
-            if ui
-                .button(label)
-                .on_hover_text("Toggle between per-command and interactive shell mode")
-                .clicked()
-            {
-                state.toggle_remote_mode();
-            }
-        });
+        ui.label(status);
+        if ui.button(button).clicked() {
+            state.disconnect_remote();
+        }
         ui.separator();
     }
 
@@ -1529,6 +1577,16 @@ fn remote_form(state: &mut State, ui: &mut Ui) {
         if ui.button("Save").clicked() {
             if let Err(e) = state.save_remote_from_form() {
                 state.push_out(format!("remote: {e}"), OutType::StdErr);
+            }
+        }
+        if ui
+            .button("Save & connect")
+            .on_hover_text("Save, then connect this tab")
+            .clicked()
+        {
+            match state.save_remote_from_form() {
+                Ok((host, port, user)) => state.connect_with(host, port, user),
+                Err(e) => state.push_out(format!("remote: {e}"), OutType::StdErr),
             }
         }
         if ui.button("Cancel").clicked() {
@@ -1696,13 +1754,17 @@ fn tabs_bar(state: &mut State, ui: &mut Ui) {
     let n = state.cwd.len();
     let home = state.home.clone();
 
+    // A connected tab is named for its remote.
     let labels: Vec<String> = state
         .cwd
         .iter()
-        .map(|p| {
-            p.file_name()
+        .zip(&state.remote)
+        .map(|(p, remote)| match remote {
+            Some(r) => r.label(),
+            None => p
+                .file_name()
                 .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| render_with_tilde(p, home.as_deref()))
+                .unwrap_or_else(|| render_with_tilde(p, home.as_deref())),
         })
         .collect();
 
@@ -1965,6 +2027,9 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
     // panel's own close button, or the clipboard shortcut (handled by
     // `capture`) is persisted at the end of the frame.
     let vis_before = state.ui.panel_vis;
+    if state.egui_ctx.is_none() {
+        state.egui_ctx = Some(ui.ctx().clone());
+    }
     // Take in what other apps copy, whether or not the panel is open.
     state.ui.clipboard.sys.watch(ui.ctx());
     clipboard::capture(state, ui.ctx());
@@ -1977,8 +2042,11 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
     }
 
     // After that command, which runs in the tab it was typed in, and before
-    // any widget, so the input box never sees these keys.
-    tab_keys::handle(state, ui.ctx());
+    // any widget, so the input box never sees these keys. Not while a remote
+    // full-screen program has the keyboard: Ctrl+W is vim's, and nano's.
+    if !remote_grid::has_focus(ui.ctx()) {
+        tab_keys::handle(state, ui.ctx());
+    }
 
     // Bring in output from shell commands running in the background, and
     // wrap up any that have finished. Their reader threads request a repaint
@@ -1988,10 +2056,10 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
     state.pump_paste();
     state.pump_delete(ui.ctx());
 
-    // Pump any live PTY output into the active tab's pane. While a PTY session
-    // is active, keep requesting repaints so streamed output (e.g. `top`) keeps
-    // flowing even when the user isn't interacting.
-    if state.pump_pty() {
+    // SSH: finished connection attempts, and remote output. The connection's
+    // own tasks request a repaint when there's news; this asks for another
+    // frame only while output is still queued.
+    if state.pump_remotes() {
         ui.ctx().request_repaint();
     }
 

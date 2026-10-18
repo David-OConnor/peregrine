@@ -14,23 +14,34 @@ use egui::{
     text::{ByteIndex, LayoutJob, LayoutSection},
 };
 
-use crate::{OutType, ansi};
+use crate::{
+    OutType,
+    ansi::{self, Ctl, Piece},
+};
 
 pub(crate) const MAX_BYTES: usize = 4 * 1024 * 1024;
 pub(crate) const MAX_LINES: usize = 20_000;
 pub(crate) const MAX_LINE_BYTES: usize = 16 * 1024;
 pub(crate) const CLOSED_BYTES: usize = 8 * 1024 * 1024;
 const PARSE_CHUNK_BYTES: usize = 4096;
+/// The furthest right a cursor control can move the column, so a stray
+/// `ESC [ 99999 C` can't pad a line out to megabytes.
+const MAX_COLUMN: usize = 4096;
 
 #[derive(Default)]
 pub(crate) struct Stream {
     parser: ansi::Parser,
     open: Option<u64>,
+    /// Where in the open line the next text goes, in chars, after a carriage
+    /// return or other cursor control moved it (see [ansi::Ctl]); `None` at
+    /// the end of the line, the usual case.
+    col: Option<usize>,
 }
 
 impl Stream {
     pub(crate) fn break_line(&mut self) {
         self.open = None;
+        self.col = None;
     }
 }
 
@@ -172,12 +183,22 @@ impl Output {
 
     /// Continue an unfinished line in this stream, including when the other
     /// stream has written in between. An echo/clear ends the continuation.
+    /// A carriage return (as in CRLF, or a progress bar redrawing itself)
+    /// and the other in-line cursor controls move where the stream writes
+    /// next within its line, as a terminal would.
     pub(crate) fn write(&mut self, mut text: &str, kind: OutType, stream: &mut Stream) {
         while !text.is_empty() {
             let end = text.floor_char_boundary(PARSE_CHUNK_BYTES.min(text.len()));
             let (chunk, rest) = text.split_at(end);
             text = rest;
-            for segment in stream.parser.feed(chunk) {
+            for piece in stream.parser.feed(chunk) {
+                let segment = match piece {
+                    Piece::Text(segment) => segment,
+                    Piece::Ctl(ctl) => {
+                        self.control(ctl, stream);
+                        continue;
+                    }
+                };
                 let style = segment.style();
                 for piece in segment.text.split_inclusive('\n') {
                     let id = match stream.open.filter(|&id| self.index(id).is_some()) {
@@ -190,28 +211,110 @@ impl Output {
                     };
                     let complete = piece.ends_with('\n');
                     let plain = piece.strip_suffix('\n').unwrap_or(piece);
-                    self.append(id, plain, style);
+                    self.put(id, plain, style, &mut stream.col);
                     if complete {
-                        // PowerShell writes CRLF, which may straddle reads.
-                        // Store the newline as a row boundary, not a stray CR.
-                        let i = self.index(id).unwrap();
-                        let line = &mut self.lines[i];
-                        if line.text.ends_with('\r') {
-                            line.text.pop();
-                            if let Some(span) = line.spans.last_mut() {
-                                span.range.end = line.text.len();
-                            }
-                            if line.spans.last().is_some_and(|s| s.range.is_empty()) {
-                                line.spans.pop();
-                            }
-                        }
                         stream.open = None;
+                        stream.col = None;
                     }
                     self.trim();
                 }
             }
         }
         self.revision += 1;
+    }
+
+    /// Apply a cursor control to `stream`'s open line.
+    fn control(&mut self, ctl: Ctl, stream: &mut Stream) {
+        let open = stream.open.and_then(|id| self.index(id));
+        let len = open.map_or(0, |i| self.lines[i].text.chars().count());
+        let cur = stream.col.unwrap_or(len);
+        stream.col = Some(match ctl {
+            Ctl::Cr => 0,
+            Ctl::Backspace => cur.saturating_sub(1),
+            Ctl::Column(n) => n.min(MAX_COLUMN),
+            Ctl::Forward(n) => (cur + n).min(MAX_COLUMN),
+            Ctl::Back(n) => cur.saturating_sub(n),
+            Ctl::EraseLine(mode) => {
+                if let Some(i) = open {
+                    self.edit(i, |cells| match mode {
+                        0 => cells.truncate(cur),
+                        1 => {
+                            let end = (cur + 1).min(cells.len());
+                            cells[..end].fill((' ', ansi::Style::default()));
+                        }
+                        _ => cells.clear(),
+                    });
+                }
+                cur
+            }
+        });
+    }
+
+    /// Write `text` into line `id` at `col` (its end when `None`), over
+    /// whatever's there, and move `col` past it.
+    fn put(&mut self, id: u64, text: &str, style: ansi::Style, col: &mut Option<usize>) {
+        if text.is_empty() {
+            return;
+        }
+        let Some(c) = *col else {
+            self.append(id, text, style);
+            return;
+        };
+        let i = self.index(id).expect("line created or checked before writing");
+        let len = self.lines[i].text.chars().count();
+        if c >= len {
+            if c > len {
+                self.append(id, &" ".repeat(c - len), ansi::Style::default());
+            }
+            self.append(id, text, style);
+            *col = None;
+            return;
+        }
+        let new: Vec<_> = text.chars().map(|ch| (ch, style)).collect();
+        let n = new.len();
+        self.edit(i, |cells| {
+            let end = (c + n).min(cells.len());
+            cells.splice(c..end, new);
+        });
+        *col = (c + n < self.lines[i].text.chars().count()).then_some(c + n);
+    }
+
+    /// Rewrite line `i` through its characters and their styles. Slower than
+    /// [Self::append], so only for redraws within a line.
+    fn edit(&mut self, i: usize, f: impl FnOnce(&mut Vec<(char, ansi::Style)>)) {
+        let line = &mut self.lines[i];
+        self.bytes -= line.bytes();
+        let mut spans = line.spans.iter().peekable();
+        let mut cells: Vec<_> = line
+            .text
+            .char_indices()
+            .map(|(at, ch)| {
+                while spans.peek().is_some_and(|s| s.range.end <= at) {
+                    spans.next();
+                }
+                let style = spans
+                    .peek()
+                    .filter(|s| s.range.start <= at)
+                    .map_or_else(ansi::Style::default, |s| s.style);
+                (ch, style)
+            })
+            .collect();
+        f(&mut cells);
+        line.text.clear();
+        line.spans.clear();
+        for (ch, style) in cells {
+            let start = line.text.len();
+            line.text.push(ch);
+            match line.spans.last_mut() {
+                Some(span) if span.style == style => span.range.end = line.text.len(),
+                _ => line.spans.push(Span {
+                    range: start..line.text.len(),
+                    style,
+                }),
+            }
+        }
+        line.height = None;
+        self.bytes += line.bytes();
     }
 
     pub(crate) fn fail_since(&mut self, first: u64) {
@@ -389,6 +492,28 @@ mod tests {
                 .iter()
                 .all(|l| l.spans.iter().all(|s| s.range.end <= l.text.len()))
         );
+    }
+
+    #[test]
+    fn carriage_returns_and_erases_redraw_the_line_like_a_terminal() {
+        let mut out = Output::default();
+        let mut stream = Stream::default();
+        for pct in [10, 55, 100] {
+            out.write(&format!("\r\x1b[Kprogress {pct}%"), OutType::StdOut, &mut stream);
+        }
+        out.write("\r\n", OutType::StdOut, &mut stream);
+        out.write("abcdef\rXY\n", OutType::StdOut, &mut stream);
+        out.write("\x1b[32mgreen\x1b[0m\x08\x08\x08EE\n", OutType::StdOut, &mut stream);
+        out.write("tab\x1b[8Gx\n", OutType::StdOut, &mut stream);
+        let texts: Vec<_> = out.lines.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(texts, ["progress 100%", "XYcdef", "grEEn", "tab    x"]);
+        // "gr" and "n" keep their colour; "EE" is unstyled.
+        let green = &out.lines[2];
+        assert_eq!(green.spans.len(), 3);
+        assert_eq!(green.spans[0].range, 0..2);
+        assert_eq!(green.spans[0].style, green.spans[2].style);
+        assert_ne!(green.spans[0].style, green.spans[1].style);
+        assert!(out.lines.iter().all(|l| l.bytes() > 0));
     }
 
     #[test]

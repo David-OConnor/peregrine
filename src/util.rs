@@ -3,11 +3,11 @@
 use std::{fs, io, path::Path};
 
 use shell::{
-    DirList, SshMode, clone_root, commands, commands::Frontend, find_bookmark, find_recent_dir,
+    DirList, clone_root, commands, commands::Frontend, find_bookmark, find_recent_dir,
     path_from_args, ssh,
 };
 
-use crate::{OutType, out_type_for, state::State, util};
+use crate::{OutType, out_type_for, remote::Remote, state::State, util};
 
 /// Read a file into a `String`. Used by the `cat` builtin to populate the
 /// output pane.
@@ -18,31 +18,26 @@ pub fn read_file(path: &Path) -> io::Result<String> {
 /// Note: In `shell`, this is in the `commands` module. To prevent possible confusion, we don't
 /// have an additoinal `commands` module in this program.
 pub fn handle_cmd(state: &mut State, cmd: &str, input: &str, args: &str, ctx: &egui::Context) {
-    // While the active tab is connected, route commands to the remote. Only
-    // the session-management keywords are intercepted; everything else (exec
-    // mode) runs on the remote shell. (PTY-mode input is sent directly from the
-    // input row, not here — see `ui::term_in`.)
-    if state.active_remote().is_some() {
+    // While the active tab is connecting, there's nowhere to run anything yet.
+    if let Some(Remote::Connecting(c)) = state.remote_here() {
         match cmd {
-            "exit" | "quit" | "logout" | "disconnect" => state.disconnect_remote(),
-            "mode" => {
-                let want = match args {
-                    "pty" | "interactive" | "shell" => Some(SshMode::Pty),
-                    "exec" | "cmd" => Some(SshMode::Exec),
-                    "" => None,
-                    other => {
-                        state.push_out(
-                            format!("mode: expected `exec` or `pty`, got `{other}`"),
-                            OutType::StdErr,
-                        );
-                        return;
-                    }
-                };
-                // Bare `mode` toggles; `mode <x>` only switches if not already there.
-                if want.is_none() || state.active_remote().map(|s| s.mode()) != want {
-                    state.toggle_remote_mode();
-                }
+            "disconnect" | "quit" | "exit" => state.disconnect_remote(),
+            _ => {
+                let msg = format!("ssh: still connecting to {}; `disconnect` cancels", c.label());
+                state.push_out(msg, OutType::StdErr);
             }
+        }
+        return;
+    }
+
+    // While the active tab is connected, commands run in the remote shell,
+    // which keeps its state (cwd, env) between them. Only the
+    // session-management keywords are intercepted; everything else, `cd` and
+    // `exit` included, goes to the remote. (Input for a command already
+    // running there is sent straight from the input row; see `ui::term_in`.)
+    if state.live_here().is_some() {
+        match cmd {
+            "disconnect" | "quit" => state.disconnect_remote(),
             // Our own help, not the remote's — answer locally.
             "shelp" => state.push_out(commands::shelp_text(Frontend::Gui), OutType::StdOut),
             "--version" | "-v" => state.push_out(commands::version_line(), OutType::StdOut),
@@ -53,13 +48,14 @@ pub fn handle_cmd(state: &mut State, cmd: &str, input: &str, args: &str, ctx: &e
             // command: the remote shell has never heard of them.
             "sync" | "logs" => {
                 let mut sink = |kind, msg| state.push_out(msg, out_type_for(kind));
+                // A snapshot, as the GUI's local `logs` shows.
                 let remote_cmd = if cmd == "sync" {
                     ssh::remote_sync_command(args, &mut sink)
                 } else {
-                    ssh::remote_logs_command(args, &mut sink)
+                    ssh::remote_logs_command(args, false, &mut sink)
                 };
                 if let Some(c) = remote_cmd {
-                    state.run_remote_exec(&c);
+                    state.run_remote(&c);
                 }
             }
             "rm_targets" | "open" => state.push_out(
@@ -77,7 +73,7 @@ pub fn handle_cmd(state: &mut State, cmd: &str, input: &str, args: &str, ctx: &e
                 if expanded.echo {
                     state.push_out(format!("> {}", expanded.line), OutType::Prompt);
                 }
-                state.run_remote_exec(&expanded.line);
+                state.run_remote(&expanded.line);
             }
         }
         return;

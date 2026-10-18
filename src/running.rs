@@ -382,7 +382,7 @@ fn read_stream(
 /// Decode and remove the text at the front of `bytes`, leaving behind a
 /// UTF-8 character cut off at the end. Invalid bytes become U+FFFD, as with
 /// [String::from_utf8_lossy].
-fn take_utf8(bytes: &mut Vec<u8>) -> String {
+pub(crate) fn take_utf8(bytes: &mut Vec<u8>) -> String {
     let cut_off = match std::str::from_utf8(bytes) {
         Err(e) if e.error_len().is_none() => bytes.len() - e.valid_up_to(),
         _ => 0,

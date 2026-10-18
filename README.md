@@ -72,7 +72,9 @@ Terminal scrollback keeps up to 20,000 lines per tab with a 4 MiB budget for lin
 ## System path editor
 
 ## SSH / remote capability
-Broken / WIP. Don't use.
+`ssh [user@]host [port]`, or a saved remote's button in the tab strip or Remote panel, connects the current tab. Connecting happens in the background, so an unreachable host never freezes the window. Once connected, commands typed in that tab run in your remote login shell, which keeps its working directory and environment between them. Full-screen programs (`vim`, `nano`, `top`, `less`) take over the output pane while they run, with the keyboard going to them; lines typed while any other remote command runs go to it as input, and Ctrl+C interrupts it. `exit` logs out; `disconnect` closes the connection.
+
+Logging in uses your SSH keys (from an SSH agent, or `~/.ssh/id_*` without a passphrase), or a password saved in the OS keyring via the Remote panel. When a password is needed, the Remote panel's form opens for it.
 
 
 ## Clipboard

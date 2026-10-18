@@ -2,14 +2,16 @@ use std::{
     collections::HashSet,
     env, io,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use chrono::Utc;
 use shell::{
     Appearance, BrowserFile, CmdHistoryPrefs, DirLabelLens, DirList, FilesPanelPrefs, FontSizes,
-    HistoryItem, NavState, OpenTabs, PaneSplits, PanelVis, PanelWidths, RecentDir, RemoteSession,
-    RemoteTerminal, SshMode, WindowSize, apply_completion, current_branch, dir_missing, get_home,
-    read_browser_files, remove_missing_recent_dirs, remove_saved_dir, save_data, ssh, ssh::secrets,
+    HistoryItem, NavState, OpenTabs, PaneSplits, PanelVis, PanelWidths, RecentDir,
+    RemoteTerminal, WindowSize, apply_completion, current_branch, dir_missing, get_home,
+    read_browser_files, remove_missing_recent_dirs, remove_saved_dir, save_data,
+    ssh::{self, ConnectError, ConnectRequest, secrets},
     stale_dir_list, truncate_branch,
 };
 
@@ -21,6 +23,7 @@ use crate::{
     deep_search::{self, DeepSearch},
     files::{Delete, FileDetails, FileSort, SelectionSummary, sort_browser_files},
     path_color,
+    remote::{LiveRemote, Remote},
     running::RunningCmd,
     terminal::{self, Output},
     ui::{self, path_panel::PathPanel},
@@ -35,6 +38,9 @@ pub struct StateUi {
     /// The About window and its last folder-opening error. Not persisted.
     pub about: bool,
     pub about_folder_error: Option<String>,
+    /// Checking for, downloading, and installing a newer release, from the
+    /// About window. Not persisted.
+    pub updater: software_manager::Updater,
     /// By tab
     pub cli_input: Vec<String>,
     /// Bounded terminal scrollback per tab.
@@ -168,6 +174,10 @@ pub struct StateUi {
     /// [State::reopen_closed_tab]. Capped at [CLOSED_TABS_MAX]; not
     /// persisted.
     pub closed_tabs: Vec<DetachedTab>,
+
+    /// The output pane's size in characters (columns, rows) as last drawn,
+    /// which remote terminals are kept at.
+    pub term_size: (u16, u16),
 }
 
 /// Most closed tabs kept for [State::reopen_closed_tab].
@@ -231,6 +241,7 @@ impl Default for StateUi {
             clipboard: ui::clipboard::ClipboardPane::default(),
             about: false,
             about_folder_error: None,
+            updater: Default::default(),
             cli_input: vec![String::new()],
             out: vec![Output::default()],
             active_tab: 0,
@@ -276,6 +287,7 @@ impl Default for StateUi {
             remote_password: String::new(),
             remote_edit_idx: None,
             closed_tabs: Vec::new(),
+            term_size: (80, 24),
         }
     }
 }
@@ -323,10 +335,10 @@ pub struct State {
     /// Roots of repos cloned by full URL (written by the CLI's `clone` alias).
     /// The GUI doesn't use these; it round-trips them so saving doesn't drop them.
     pub clone_roots: Vec<String>,
-    /// Live SSH session per tab (parallel to `cwd`). `Some` once a tab connects
-    /// via the Remote panel; while set, that tab's typed commands run on the
-    /// remote. Not persisted (a connection can't outlive the process).
-    pub active_remote: Vec<Option<RemoteSession>>,
+    /// SSH connection per tab (parallel to `cwd`): being made, or live.
+    /// While live, that tab's typed commands run on the remote. Not
+    /// persisted (a connection can't outlive the process).
+    pub remote: Vec<Option<Remote>>,
     /// The shell command running in each tab, if any (parallel to `cwd`).
     /// While set, that tab's typed lines go to its stdin. See [RunningCmd].
     pub running: Vec<Option<RunningCmd>>,
@@ -393,6 +405,9 @@ pub struct State {
     pub file_viewers: FileViewers,
     /// The PATH panel's lists and their unsaved edits. Not persisted.
     pub path_panel: PathPanel,
+    /// For background work (an SSH connection) to wake the UI with. Set by
+    /// the first frame.
+    pub egui_ctx: Option<egui::Context>,
 }
 
 /// A saved Bookmarks / Recent dirs path length, or the default when none was
@@ -417,7 +432,7 @@ impl Default for State {
             recent_dirs: Vec::new(),
             remote_terminals: Vec::new(),
             clone_roots: Vec::new(),
-            active_remote: vec![None],
+            remote: vec![None],
             running: vec![None],
             browser_files: Vec::new(),
             browser_dir: PathBuf::new(),
@@ -441,6 +456,7 @@ impl Default for State {
             dark_mode: None,
             file_viewers: FileViewers::default(),
             path_panel: PathPanel::default(),
+            egui_ctx: None,
         };
         s.refresh_all_filters();
         s.refresh_cmd_colors();
@@ -456,17 +472,12 @@ impl State {
     pub fn cwd_display(&self) -> String {
         // When the active tab is connected, show the remote location instead of
         // the local cwd so the user knows commands are running remotely.
-        if let Some(remote) = self.active_remote() {
-            let cwd = if remote.cwd().is_empty() {
-                "~"
-            } else {
-                remote.cwd()
-            };
-            let mode = match remote.mode() {
-                SshMode::Exec => "",
-                SshMode::Pty => " (pty)",
-            };
-            return format!("{}:{}{}", remote.label(), cwd, mode);
+        match self.remote_here() {
+            Some(Remote::Connecting(c)) => return format!("{} (connecting…)", c.label()),
+            Some(Remote::Live(l)) => {
+                return format!("{}:{}", l.session.label(), l.session.display_cwd());
+            }
+            None => {}
         }
         format!("{}{}", self.cwd_star(), self.cwd().display())
     }
@@ -489,10 +500,11 @@ impl State {
         path_color::parts(&self.cwd().display().to_string(), home.as_deref(), true)
     }
 
-    /// Whether the active tab has a live SSH session (used by the input row to
-    /// suppress the local git-branch label while remote).
+    /// Whether the active tab has an SSH connection, live or being made
+    /// (used by the input row to suppress the local git-branch label while
+    /// remote).
     pub fn is_remote(&self) -> bool {
-        self.active_remote().is_some()
+        self.remote_here().is_some()
     }
 
     /// Full prompt prefix used when echoing a command into the output
@@ -1211,7 +1223,7 @@ impl State {
             recent_dirs: loaded.recent_dirs,
             remote_terminals: loaded.remote_terminals,
             clone_roots: loaded.clone_roots,
-            active_remote: (0..n).map(|_| None).collect(),
+            remote: (0..n).map(|_| None).collect(),
             running: (0..n).map(|_| None).collect(),
             browser_files: Vec::new(),
             browser_dir: PathBuf::new(),
@@ -1234,6 +1246,7 @@ impl State {
             dark_mode: loaded.appearance.dark_mode,
             file_viewers: FileViewers::default(),
             path_panel: PathPanel::default(),
+            egui_ctx: None,
         };
         s.refresh_all_filters();
         s.refresh_cmd_colors();
@@ -1256,6 +1269,9 @@ impl State {
         self.ui.out[i].clear();
         if let Some(cmd) = self.running[i].as_mut() {
             cmd.out_cleared();
+        }
+        if let Some(live) = self.remote[i].as_mut().and_then(Remote::live_mut) {
+            live.out_cleared();
         }
     }
 
@@ -1288,7 +1304,7 @@ impl State {
         self.ui.nav_forward.insert(i, tab.nav_forward);
         self.branch.insert(i, branch);
         // Tabs go in local and idle; a connection isn't inherited.
-        self.active_remote.insert(i, None);
+        self.remote.insert(i, None);
         self.running.insert(i, None);
 
         self.ui.active_tab = i;
@@ -1332,7 +1348,7 @@ impl State {
         shift(&mut self.ui.nav_back, from, to);
         shift(&mut self.ui.nav_forward, from, to);
         shift(&mut self.branch, from, to);
-        shift(&mut self.active_remote, from, to);
+        shift(&mut self.remote, from, to);
         shift(&mut self.running, from, to);
 
         self.ui.active_tab = moved_tab_index(self.ui.active_tab, from, to);
@@ -1356,8 +1372,8 @@ impl State {
         self.ui.history_nav.remove(idx);
         self.branch.remove(idx);
         // Tear down any SSH session attached to the closed tab.
-        if let Some(session) = self.active_remote.remove(idx) {
-            session.disconnect();
+        if let Some(Remote::Live(live)) = self.remote.remove(idx) {
+            live.session.disconnect();
         }
         // Dropping a command still running there stops it.
         self.running.remove(idx);
@@ -1868,12 +1884,23 @@ impl State {
         }
     }
 
-    pub fn active_remote(&self) -> Option<&RemoteSession> {
-        self.active_remote[self.ui.active_tab].as_ref()
+    /// The active tab's SSH connection, if any.
+    pub fn remote_here(&self) -> Option<&Remote> {
+        self.remote[self.ui.active_tab].as_ref()
     }
 
-    /// Connect the active tab to the saved remote at `idx`. The password comes
-    /// from the OS keyring (saved when the remote was added).
+    /// The active tab's SSH session, once connected.
+    pub fn live_here(&self) -> Option<&LiveRemote> {
+        self.remote_here().and_then(Remote::live)
+    }
+
+    pub fn live_here_mut(&mut self) -> Option<&mut LiveRemote> {
+        self.remote[self.ui.active_tab]
+            .as_mut()
+            .and_then(Remote::live_mut)
+    }
+
+    /// Connect the active tab to the saved remote at `idx`.
     pub fn connect_remote(&mut self, idx: usize) {
         let Some(rt) = self.remote_terminals.get(idx) else {
             self.push_out(
@@ -1907,132 +1934,176 @@ impl State {
         self.connect_with(host, port, user);
     }
 
-    /// Shared connect path. Pulls the password from the OS keyring (a missing
-    /// one is reported rather than prompting — the GUI can't host a blocking
-    /// prompt mid-frame, so the user saves it via the Remote panel form first).
-    /// Blocks the UI thread for the duration of the connect, like a shelled-out
-    /// command. Replaces any existing session on the active tab.
-    fn connect_with(&mut self, host: String, port: u16, user: String) {
-        let Some(password) = secrets::get_password(&host, port, &user) else {
+    /// Start connecting the active tab, in the background: the window stays
+    /// live, and [Self::pump_remotes] takes over once the connection is up
+    /// (or has failed). SSH keys are tried, and the keyring's saved password
+    /// when there is one. Replaces any connection the tab already has.
+    pub fn connect_with(&mut self, host: String, port: u16, user: String) {
+        let i = self.ui.active_tab;
+        if self.running[i].is_some() {
             self.push_out(
-                format!("ssh: no saved password for {user}@{host}; add it in the Remote panel"),
+                "ssh: a command is running in this tab: stop it (Ctrl+C), or use another tab",
                 OutType::StdErr,
             );
             return;
-        };
-
+        }
+        let password = secrets::get_password(&host, port, &user);
+        let ctx = self.egui_ctx.clone();
+        let waker: ssh::Waker = Arc::new(move || {
+            if let Some(ctx) = &ctx {
+                ctx.request_repaint();
+            }
+        });
+        let (cols, rows) = self.ui.term_size;
         self.push_out(
             format!("Connecting to {user}@{host}:{port} …"),
             OutType::Prompt,
         );
-        match ssh::connect(&host, port, &user, &password) {
-            Ok(session) => {
-                let i = self.ui.active_tab;
-                // Drop any prior session on this tab before replacing it.
-                if let Some(old) = self.active_remote[i].replace(session) {
-                    old.disconnect();
-                }
-                self.push_out(format!("Connected to {user}@{host}"), OutType::StdOut);
-            }
-            Err(e) => self.push_out(format!("ssh: {e}"), OutType::StdErr),
+        let connecting = ssh::connect(
+            ConnectRequest {
+                host,
+                port,
+                user,
+                password,
+                cols,
+                rows,
+            },
+            waker,
+        );
+        if let Some(Remote::Live(old)) = self.remote[i].replace(Remote::Connecting(connecting)) {
+            old.session.disconnect();
         }
     }
 
-    /// Disconnect the active tab's session, if any.
+    /// Disconnect the active tab, or stop it connecting.
     pub fn disconnect_remote(&mut self) {
         let i = self.ui.active_tab;
-        if let Some(session) = self.active_remote[i].take() {
-            session.disconnect();
-            self.push_out("ssh: disconnected", OutType::StdOut);
-        }
-    }
-
-    /// Flip the active tab's session between exec and PTY mode.
-    pub fn toggle_remote_mode(&mut self) {
-        let i = self.ui.active_tab;
-        let res = self.active_remote[i].as_mut().map(|s| {
-            let next = match s.mode() {
-                SshMode::Exec => SshMode::Pty,
-                SshMode::Pty => SshMode::Exec,
-            };
-            (next, s.set_mode(next))
-        });
-
-        if let Some((next, r)) = res {
-            match r {
-                Ok(()) => self.push_out(
-                    format!(
-                        "ssh: switched to {} mode",
-                        if next == SshMode::Pty {
-                            "interactive"
-                        } else {
-                            "exec"
-                        }
-                    ),
-                    OutType::StdOut,
-                ),
-                Err(e) => self.push_out(format!("ssh: {e}"), OutType::StdErr),
+        match self.remote[i].take() {
+            Some(Remote::Live(live)) => {
+                live.session.disconnect();
+                self.push_out("ssh: disconnected", OutType::StdOut);
             }
+            Some(Remote::Connecting(_)) => self.push_out("ssh: cancelled", OutType::StdOut),
+            None => {}
         }
     }
 
-    /// Run one command on the active tab's remote in exec mode, buffering the
-    /// output and pushing it into the pane afterwards. We `take` the session
-    /// out of `self` for the call so `RemoteSession::run` (which needs `&mut
-    /// self`) doesn't clash with the `&mut self` borrow `push_out` needs.
-    pub fn run_remote_exec(&mut self, input: &str) {
-        let i = self.ui.active_tab;
-        let Some(mut session) = self.active_remote[i].take() else {
-            return;
-        };
-        let mut lines: Vec<(OutType, String)> = Vec::new();
-        let result = session.run(input, &mut |kind, msg| {
-            lines.push((crate::out_type_for(kind), msg));
-        });
-        self.active_remote[i] = Some(session);
-
-        for (t, m) in lines {
-            self.push_out(m, t);
-        }
-        if let Err(e) = result {
-            self.push_out(format!("ssh: {e}"), OutType::StdErr);
+    /// Run a command line in the active tab's remote shell.
+    pub fn run_remote(&mut self, line: &str) {
+        if let Some(live) = self.live_here_mut() {
+            live.run(line);
         }
     }
 
-    /// Send a line of input to the active tab's PTY session (the remote echoes
-    /// it back, so we don't echo locally).
+    /// Type a line into the program running on the active tab's remote.
     pub fn send_remote_line(&mut self, line: &str) {
-        if let Some(session) = self.active_remote() {
-            let mut bytes = line.as_bytes().to_vec();
-            bytes.push(b'\r');
-            let _ = session.send(&bytes);
+        if let Some(live) = self.live_here_mut() {
+            live.send_line(line);
         }
     }
 
-    /// Drain any live PTY output for the active tab into the output pane and,
-    /// if the remote shell has closed, drop back to local. Returns `true` when
-    /// a PTY session is active (so the caller keeps requesting repaints to keep
-    /// output flowing). Called once per frame.
-    pub fn pump_pty(&mut self) -> bool {
-        let i = self.ui.active_tab;
-        let (text, closed) = match self.active_remote[i].as_ref() {
-            Some(s) if s.mode() == SshMode::Pty => {
-                let bytes = s.drain_output();
-                (String::from_utf8_lossy(&bytes).into_owned(), s.pty_closed())
+    /// Ctrl+C for the program running on the active tab's remote.
+    pub fn interrupt_remote(&mut self) {
+        if let Some(live) = self.live_here() {
+            live.session.interrupt();
+        }
+    }
+
+    /// Bring in each tab's SSH news: a finished connection attempt, remote
+    /// output, or the connection closing. Called once per frame. Returns
+    /// whether more output is waiting, for another frame soon.
+    pub fn pump_remotes(&mut self) -> bool {
+        let mut more = false;
+        let (cols, rows) = self.ui.term_size;
+        for i in 0..self.remote.len() {
+            match self.remote[i].as_mut() {
+                None => {}
+                Some(Remote::Connecting(c)) => {
+                    let (host, port, user) = (c.host().to_string(), c.port(), c.user().to_string());
+                    match c.poll() {
+                        None => {}
+                        Some(Ok(session)) => {
+                            let label = session.label();
+                            self.remote[i] = Some(Remote::Live(Box::new(LiveRemote::new(session))));
+                            self.push_out_to(
+                                i,
+                                format!("Connected to {label}. Commands run there now; `exit` logs out."),
+                                OutType::StdOut,
+                            );
+                            self.record_remote(&host, port, &user);
+                        }
+                        Some(Err(e)) => {
+                            self.remote[i] = None;
+                            self.push_out_to(i, format!("ssh: {e}"), OutType::StdErr);
+                            if let ConnectError::Auth { password_tried } = e {
+                                self.ask_for_password(i, host, port, user, password_tried);
+                            }
+                        }
+                    }
+                }
+                Some(Remote::Live(live)) => {
+                    live.resize(cols, rows);
+                    let pumped = live.pump(&mut self.ui.out[i]);
+                    more |= pumped.more;
+                    if pumped.closed {
+                        let label = live.session.label();
+                        self.remote[i] = None;
+                        self.push_out_to(
+                            i,
+                            format!("ssh: connection to {label} closed"),
+                            OutType::StdOut,
+                        );
+                    }
+                }
             }
-            _ => return false,
+        }
+        more
+    }
+
+    /// After a login was turned down, open the Remote panel's form on that
+    /// remote, for its password.
+    fn ask_for_password(
+        &mut self,
+        tab: usize,
+        host: String,
+        port: u16,
+        user: String,
+        password_tried: bool,
+    ) {
+        let saved = self
+            .remote_terminals
+            .iter()
+            .position(|r| r.host == host && r.port == port && r.username == user);
+        self.ui.remote_host = host;
+        self.ui.remote_port = port.to_string();
+        self.ui.remote_user = user;
+        self.ui.remote_password.clear();
+        self.ui.remote_edit_idx = saved;
+        self.ui.remote_form_open = true;
+        self.ui.panel_vis.remote_terminals = true;
+        let msg = if password_tried {
+            "ssh: correct the password in the Remote panel, then Save & connect"
+        } else {
+            "ssh: enter the password in the Remote panel, then Save & connect"
         };
-        if !text.is_empty() {
-            self.push_out(text, OutType::StdOut);
+        self.push_out_to(tab, msg, OutType::StdOut);
+    }
+
+    /// Add a remote we've logged in to the saved list, as the CLI does.
+    fn record_remote(&mut self, host: &str, port: u16, user: &str) {
+        if self
+            .remote_terminals
+            .iter()
+            .any(|r| r.host == host && r.port == port && r.username == user)
+        {
+            return;
         }
-        if closed {
-            if let Some(session) = self.active_remote[i].take() {
-                session.disconnect();
-            }
-            self.push_out("ssh: remote shell exited; disconnected", OutType::StdOut);
-            return false;
-        }
-        true
+        self.remote_terminals.push(RemoteTerminal {
+            host: host.to_string(),
+            port,
+            username: user.to_string(),
+        });
+        let _ = self.save();
     }
 
     /// `remote list | add <[user@]host[:port]> | del <index>`, mirroring the
@@ -2102,7 +2173,7 @@ impl State {
     /// password in the keyring when one was entered. `edit_idx` updates an
     /// existing entry in place; `None` adds a new one (deduped on
     /// host/port/user). Returns an error string for the caller to surface.
-    pub fn save_remote_from_form(&mut self) -> Result<(), String> {
+    pub fn save_remote_from_form(&mut self) -> Result<(String, u16, String), String> {
         let host = self.ui.remote_host.trim().to_string();
         if host.is_empty() {
             return Err("host is required".to_string());
@@ -2125,22 +2196,17 @@ impl State {
                 .map_err(|e| format!("couldn't save password: {e}"))?;
         }
 
+        let entry = RemoteTerminal {
+            host: host.clone(),
+            port,
+            username: user.clone(),
+        };
         match self.ui.remote_edit_idx {
-            Some(i) if i < self.remote_terminals.len() => {
-                self.remote_terminals[i] = RemoteTerminal {
-                    host,
-                    port,
-                    username: user,
-                };
-            }
+            Some(i) if i < self.remote_terminals.len() => self.remote_terminals[i] = entry,
             _ => {
                 self.remote_terminals
                     .retain(|r| !(r.host == host && r.port == port && r.username == user));
-                self.remote_terminals.push(RemoteTerminal {
-                    host,
-                    port,
-                    username: user,
-                });
+                self.remote_terminals.push(entry);
             }
         }
 
@@ -2153,7 +2219,7 @@ impl State {
         self.ui.remote_port.clear();
         self.ui.remote_user.clear();
         self.ui.remote_password.clear();
-        Ok(())
+        Ok((host, port, user))
     }
 }
 
