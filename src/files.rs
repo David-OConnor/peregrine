@@ -486,17 +486,7 @@ pub fn open_with_default_app(path: &Path) -> io::Result<()> {
 /// replaces an existing file. A change of case alone is allowed: on a
 /// case-insensitive filesystem the "existing" entry is this one.
 pub fn rename_entry(path: &Path, new_name: &str) -> io::Result<PathBuf> {
-    let mut name = new_name.trim();
-    if cfg!(windows) {
-        name = name.trim_end_matches(['.', ' ']);
-    }
-    let seps: &[char] = if cfg!(windows) { &['/', '\\'] } else { &['/'] };
-    if name.is_empty() || name == "." || name == ".." || name.contains(seps) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("\"{new_name}\" isn't a valid name"),
-        ));
-    }
+    let name = valid_name(new_name)?;
     let (Some(parent), Some(old_name)) = (path.parent(), path.file_name()) else {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -523,6 +513,51 @@ pub fn rename_entry(path: &Path, new_name: &str) -> io::Result<PathBuf> {
 
     fs::rename(path, &new_path)?;
     Ok(new_path)
+}
+
+/// Create an empty folder (`folder`) or file named `name` in `dir`, as
+/// `mkdir` or `touch` would, returning its path. The name is trimmed and
+/// checked as [rename_entry]'s is. Unlike `touch`, an entry that's already
+/// there by that name is an error, rather than having its time updated.
+pub fn create_entry(dir: &Path, name: &str, folder: bool) -> io::Result<PathBuf> {
+    let name = valid_name(name)?;
+    let path = dir.join(name);
+    let made = if folder {
+        fs::create_dir(&path)
+    } else {
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map(drop)
+    };
+    match made {
+        // Said plainly, rather than as the OS's "Cannot create a file when
+        // that file already exists".
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("{name} already exists"),
+        )),
+        made => made.map(|()| path),
+    }
+}
+
+/// `name` with surrounding spaces trimmed (and on Windows, trailing dots,
+/// which it would drop anyway), if it can name an entry: not blank, `.` or
+/// `..`, and without a path separator, which would put it in another dir.
+fn valid_name(name: &str) -> io::Result<&str> {
+    let mut trimmed = name.trim();
+    if cfg!(windows) {
+        trimmed = trimmed.trim_end_matches(['.', ' ']);
+    }
+    let seps: &[char] = if cfg!(windows) { &['/', '\\'] } else { &['/'] };
+    if trimmed.is_empty() || trimmed == "." || trimmed == ".." || trimmed.contains(seps) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("\"{name}\" isn't a valid name"),
+        ));
+    }
+    Ok(trimmed)
 }
 
 /// One of the Files panel's jump-to buttons.

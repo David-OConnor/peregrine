@@ -1,5 +1,5 @@
-//! The kind of project the Files panel's dir holds, and the command lines its
-//! project rows' buttons run (see `ui::file_browser::project_rows`). Git is
+//! The kind of project the active tab's dir holds, and the command lines the
+//! project bar's buttons run (see `ui::project_bar`). Git is
 //! told by the tab's branch instead (see `State::branch`), as for the prompt.
 
 use std::{

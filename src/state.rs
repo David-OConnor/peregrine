@@ -129,6 +129,8 @@ pub struct StateUi {
     /// double-click can no longer follow, so double-clicking the selected
     /// row still opens it. Dropped by any other press in the meantime.
     pub rename_pending: Option<(PathBuf, f64)>,
+    /// The new Files-panel folder or file being named, if any.
+    pub create: Option<FileCreate>,
     /// Snapshot of the selected paths awaiting the delete confirmation.
     pub delete_pending: Option<Vec<PathBuf>>,
     /// Set while the last click was in the Files panel, so Ctrl+C / X / V
@@ -273,6 +275,7 @@ impl Default for StateUi {
             browser_files_filter: Vec::new(),
             rename: None,
             rename_pending: None,
+            create: None,
             delete_pending: None,
             files_active: false,
             files_activating_press: false,
@@ -316,6 +319,17 @@ pub struct FileRename {
     pub name: String,
     /// Set once the edit box has taken focus with the name selected, which
     /// happens the first frame it's drawn.
+    pub focused: bool,
+}
+
+/// A new folder or file being named in the Files panel, before it's made
+/// (see [State::start_create]).
+pub struct FileCreate {
+    /// A folder, rather than an empty file.
+    pub folder: bool,
+    /// The name as typed so far.
+    pub name: String,
+    /// Set once the edit box has taken focus, the first frame it's drawn.
     pub focused: bool,
 }
 
@@ -572,6 +586,7 @@ impl State {
             self.ui.files_search.clear();
             self.ui.rename = None;
             self.ui.rename_pending = None;
+            self.ui.create = None;
             self.ui.deep_search.clear();
             self.ui.deep_search_edited = None;
             self.deep_search = None;
@@ -881,6 +896,51 @@ impl State {
                 format!("rename: can't rename {}: {e}", r.path.display()),
                 OutType::StdErr,
             ),
+        }
+    }
+
+    /// Start naming a new folder (`folder`) or empty file for the Files
+    /// panel's dir, in an edit box above the listing (see
+    /// `ui::create_box`). A rename in progress is applied first.
+    pub fn start_create(&mut self, folder: bool) {
+        self.commit_rename();
+        self.ui.rename_pending = None;
+        self.ui.create = Some(FileCreate {
+            folder,
+            name: String::new(),
+            focused: false,
+        });
+    }
+
+    /// Finish naming a new folder or file, making it in the Files panel's
+    /// dir as `mkdir` or `touch` would (see [crate::files::create_entry]). A
+    /// blank name makes nothing; a failure is reported in the output pane.
+    /// The new entry is selected, and its dir moves to the top of Recent
+    /// dirs.
+    pub fn commit_create(&mut self) {
+        let Some(c) = self.ui.create.take() else {
+            return;
+        };
+        if c.name.trim().is_empty() {
+            return;
+        }
+        let dir = self.cwd().to_path_buf();
+        match crate::files::create_entry(&dir, &c.name, c.folder) {
+            Ok(path) => {
+                self.refresh_browser_files();
+                self.select_file(&path);
+                self.touch_recent_dir(&dir);
+            }
+            Err(e) => {
+                let cmd = if c.folder { "mkdir" } else { "touch" };
+                self.push_out(
+                    format!(
+                        "{cmd}: can't create {}: {e}",
+                        dir.join(c.name.trim()).display()
+                    ),
+                    OutType::StdErr,
+                );
+            }
         }
     }
 

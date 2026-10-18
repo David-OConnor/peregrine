@@ -13,6 +13,7 @@ pub mod clipboard;
 pub mod dirs;
 mod file_browser;
 pub mod path_panel;
+mod project_bar;
 mod remote_grid;
 mod tab_keys;
 mod terminal;
@@ -25,7 +26,7 @@ use crate::{
     path_color::{self, Part},
     remote::Remote,
     render_with_tilde, run_command,
-    state::{FileRename, State},
+    state::{FileCreate, FileRename, State},
     submit_command, viewer,
 };
 use crate::ui::dirs::cleanup_missing_button;
@@ -943,27 +944,57 @@ fn rename_box(ui: &mut Ui, r: &mut FileRename, is_folder: bool) -> Option<bool> 
     // Not derived from `ui`'s id, so it survives the row moving between the
     // list's columns (e.g. when a refresh changes the row count).
     let id = egui::Id::new("file_rename");
+    let icon = is_folder.then_some("📁");
+    name_box(ui, id, icon, &mut r.name, &mut r.focused, !is_folder, "")
+}
+
+/// The edit box above the Files listing where a new folder or file is
+/// named (see [State::start_create]). Returns as [rename_box] does.
+fn create_box(ui: &mut Ui, c: &mut FileCreate) -> Option<bool> {
+    let (icon, hint) = if c.folder {
+        ("📁", "New folder name")
+    } else {
+        ("🗋", "New file name, e.g. notes.txt")
+    };
+    let id = egui::Id::new("file_create");
+    name_box(ui, id, Some(icon), &mut c.name, &mut c.focused, false, hint)
+}
+
+/// A one-line edit box for a Files entry's `name`, after its `icon`, that
+/// takes focus the first frame it's drawn (as `focused` records) with the
+/// name selected, or with `select_stem`, all but its extension. Returns as
+/// [rename_box] does.
+fn name_box(
+    ui: &mut Ui,
+    id: egui::Id,
+    icon: Option<&str>,
+    name: &mut String,
+    focused: &mut bool,
+    select_stem: bool,
+    hint: &str,
+) -> Option<bool> {
     ui.horizontal(|ui| {
-        if is_folder {
-            ui.label(RichText::new("📁").monospace());
+        if let Some(icon) = icon {
+            ui.label(RichText::new(icon).monospace());
         }
-        let mut out = TextEdit::singleline(&mut r.name)
+        let mut out = TextEdit::singleline(name)
             .id(id)
             .font(TextStyle::Monospace)
+            .hint_text(hint)
             .desired_width(f32::INFINITY)
             .show(ui);
 
-        if !r.focused {
+        if !*focused {
             // Like Explorer, select the name but not its extension, so typing
             // replaces just the name; a folder's whole name is selected.
-            r.focused = true;
+            *focused = true;
             out.response.request_focus();
-            let end = if is_folder {
-                r.name.chars().count()
-            } else {
-                Path::new(&r.name)
+            let end = if select_stem {
+                Path::new(name.as_str())
                     .file_stem()
                     .map_or(0, |s| s.to_string_lossy().chars().count())
+            } else {
+                name.chars().count()
             };
             out.state
                 .cursor
@@ -1744,7 +1775,9 @@ fn tab_button(ui: &mut Ui, text: &str, selected: bool, closable: bool) -> (egui:
 /// folder; clicking selects, dragging moves it along the strip, the active
 /// tab's `x` (or middle-clicking any tab) closes it (unavailable when only
 /// one tab is left), and `+` appends a fresh tab inheriting the active tab's
-/// cwd. The keyboard shortcuts are in [tab_keys].
+/// cwd. The keyboard shortcuts are in [tab_keys]. The project bar (see
+/// [project_bar]) sits at the right end of the row, or on a row of its own
+/// below when it doesn't fit.
 fn tabs_bar(state: &mut State, ui: &mut Ui) {
     const TAB_SECTION_PADDING: f32 = 20.;
 
@@ -1789,6 +1822,7 @@ fn tabs_bar(state: &mut State, ui: &mut Ui) {
     let mut gui_font_delta = 0.;
     let mut dir_depth_delta = 0;
     let mut set_dark = None;
+    let mut project_bar_fits = true;
 
     ui.horizontal(|ui| {
         // The theme toggle comes first, showing the theme a click switches to.
@@ -1945,7 +1979,17 @@ fn tabs_bar(state: &mut State, ui: &mut Ui) {
                 connect_remote = Some(*i);
             }
         }
+
+        project_bar_fits =
+            ui.available_width() >= project_bar::last_width(ui) + TAB_SECTION_PADDING;
+        if project_bar_fits {
+            project_bar::project_bar(state, ui);
+        }
     });
+
+    if !project_bar_fits {
+        ui.horizontal(|ui| project_bar::project_bar(state, ui));
+    }
 
     if let Some(dark) = set_dark {
         state.set_dark_mode(ui.ctx(), dark);
