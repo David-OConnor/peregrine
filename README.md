@@ -5,7 +5,7 @@ An integrated and powerful terminal and file browser. For Linux, Windows, and Ma
 
 The initial inspiration: I do not enjoy manually navigating sequences of directories (In a terminal with `cd` commands, nor my OS's file browser). In the case of ones I use frequent, there is no reason I must!
 
-One way of looking at this: an **Integrate Field Environment or IFE**: like an IDE, but a general tool for files. Of course, most IDEs (Like Jetbrains') include functionality this program has (Plus a lot more!) - the differentiator here is that it's light, and is designed to work across the whole system instead of a project.
+One way of looking at this: an **Integrate File Environment or IFE**: like an IDE, but a general tool for files. Of course, most IDEs (Like Jetbrains') include functionality this program has (Plus a lot more!) - the differentiator here is that it's light, and is designed to work across the whole system instead of a project.
 
 It's based on the abstraction that navigating a filesystem in a GUI, and executing commands in a terminal are complementary operations that should interact. It also integrates a clipboard manager with history, a system PATH viewer/editor, and lightweight viewers for text and image files.
 
