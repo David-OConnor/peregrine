@@ -1,17 +1,15 @@
 # Peregrine
 
 
-An integrated and powerful terminal and file browser. For Linux, Windows, and MacOS. I built this for my own file-system and CLI workflows. Wherever I notice a friction point, I update this program to address it. For example, when using a `cd` command to navigate in a terminal, I've made it trivial to access ones I've used before, or to find the right directory using just the final dir's name without typing its full path. Another example is moving files and folders between my software projects without managing a collection of file browser tabs, or repeatedly typing full paths.
+An integrated terminal and file browser. For Linux, Windows, and MacOS. I built this for my own file-system and CLI workflows. Wherever I notice a friction point, I update this program to address it. For example, when using a `cd` command to navigate in a terminal, I've made it trivial to access ones I've used before, or to find the right directory using the final dir's name (or first few chars) without typing its full path. Another example is moving files and folders between projects without managing a collection of tabs, or repeatedly typing full paths.
 
-The initial inspiration: I do not enjoy manually navigating sequences of directories (In a terminal with `cd` commands, nor my OS's file browser). In the case of ones I use frequent, there is no reason I must!
+The initial inspiration: I do not enjoy manually navigating directories (In a terminal with `cd` commands, nor my OS's file browser). In the case of ones I use frequent, there is no reason I must!
 
-One way of looking at this: an **Integrate File Environment or IFE**: like an IDE, but a general tool for files. Of course, most IDEs (Like Jetbrains') include functionality this program has (Plus a lot more!) - the differentiator here is that it's light, and is designed to work across the whole system instead of a project.
+One description: an **Integrate File Environment or IFE**: like an IDE, but a general tool for files. Of course, most IDEs (Like Jetbrains') include functionality this program has (Plus a lot more!) - the differentiator is this is light, and is designed to work across the whole system instead of a project.
 
-It's based on the abstraction that navigating a filesystem in a GUI, and executing commands in a terminal are complementary operations that should interact. It also integrates a clipboard manager with history, a system PATH viewer/editor, and lightweight viewers for text and image files.
+It's based on the abstraction that navigating a filesystem in a GUI, and executing commands in a terminal are complementary operations that should interact. It also integrates a clipboard manager with history, a system PATH viewer/editor, and lightweight viewers for text and image files. (Misc system-level functionality I want to improve over OS defaults)
 
-This application takes its CLI component from [Shell](https://github.com/david-oconnor/shell), and shares its relevant systems including directory and command history and bookmarks. For information on terminal commands,see [its Readme](https://github.com/David-OConnor/shell/blob/main/README.md).
-
-Use is intuitive, leveraging what you already know about file browsers and terminals. Additional functionality this application provides is mostly obvious; exceptions and assumptions are included in this readme.
+This application takes its CLI component and shortcuts from [Shell](https://github.com/david-oconnor/shell), and shares its relevant systems including directory and command history and bookmarks. For information on terminal commands,see [its Readme](https://github.com/David-OConnor/shell/blob/main/README.md).
 
 
 ![Demo of the Peregrine UI](/screenshots/demo_0.png)
@@ -22,13 +20,13 @@ Use is intuitive, leveraging what you already know about file browsers and termi
 
 
 ## Who this is for, and its purpose
-This may be useful to those who execute CLI commands regularly, and find the OS's native file browser and terminal to be naive. For example, if you regularly execute commands like `git`, `python`, `cargo`, `gmx`, `orca`, `cd`, `ls`, `grep`/`rg` in a terminal. It makes accessing you usual workflows easier by remembering directories and commands. It has intuitive bookmark, history, and autocomplete systems.
+This may be useful to those who execute CLI commands, and find the OS's native file browser and terminal to be naive. For example, if you execute commands like `git`, `python`, `cargo`, `gmx`, `orca`, `cd`, `ls`, `grep`/`rg` in a terminal. It makes accessing you usual workflows easier by remembering directories and commands. It has intuitive bookmark, history, and autocomplete systems.
 
 If you are navigating to a regularly-used directory via CLI and are doing too much typing, this may help.
 
 
 ## Who this is not for
-If you use a fully CLI workflow, or if your terminal program must be available when you are using an arbitrary computer or via SSH, this is not what you're looking for. If you perform all file operations in a terminal, or all in a GUI, this is not for you - it's for workflows that use both. This is not a new shell scripting language, and its CLI functionality runs on top of your OS's native terminal.
+If you use a fully CLI workflow, or if your terminal program must be available when you are using an arbitrary computer or via SSH, this is not what you're looking for. If you perform all file operations in a terminal, or all in a GUI, this is not for you - it's for workflows that use both. This is not a shell scripting language, and its CLI functionality runs on top of your OS's native terminal.
 
 
 ## Everything is searchable
@@ -36,25 +34,19 @@ You can search in every GUI panel: bookmarks, recent directories, recent command
 
 ![Demo of the Peregrine UI showing the file viewer and a markdown file](/screenshots/demo_1.png)
 
-## Directory bookmarks
 
+## Directory bookmarks
+(Description todo)
 
 
 ## Recent directories
+(Description todo)
 
 
 ## File browser
-You can rename a file by selecting it, then clicking its name again. Double-clicking a file opens it in its default file handler.
-
-Select several items with Ctrl+click and Shift+click, as in your OS's file browser; the details pane then totals them up. Drag items onto a folder (or onto ⬆ or a shortcut button) to move them there; hold Ctrl as you let go to copy them instead. As in Explorer, items dragged to another drive are copied unless you hold Shift.
-
-Click the red trash button beside Paste, or press Delete while the file list has focus, to move the selected files and folders to the OS's Recycle Bin or Trash. A confirmation dialog lists the items first; Cancel or Esc keeps them.
+You can rename a file by selecting it, then clicking its name again. Double-clicking a file opens it in its default file handler. Broadly, the UX for selection, moving, and file operations follow conventions.
 
 Opening most popular text-based file formats (.txt, Markdown, TOML, most code files) or image (.png, .jpg, .bmp) file in the browser will open an integrated viewer; you can then open in your OS's default handler from there. In the image viewer, Ctrl+scroll zooms and dragging pans. 
-
-Code files are syntax highlighted.
-
-Text, code, and Markdown viewers have a find bar under the toolbar. It highlights every match and counts them. It can match case, or ignore spaces, underscores, and dashes, so `foo bar` also finds `foo_bar`, `foo-bar`, and `foobar`.
 
 
 ## CLI / terminal
@@ -65,11 +57,14 @@ Autocomplate works from a mixture of bookmarks, recent commands, and files in th
 
 Type `shelp` in the CLI input to list every command and key shortcut.
 
-Terminal scrollback keeps up to 20,000 lines per tab with a 4 MiB budget for line content and styles. Very long individual lines keep their newest 16 KiB. Older output is discarded when a limit is reached; `clear` releases the retained scrollback. Recently closed tabs share an 8 MiB output budget, while their directory and navigation history remain available for reopening.
 
 ## Command history
+(Description todo)
+
 
 ## System path editor
+(Description todo)
+
 
 ## SSH / remote capability
 `ssh [user@]host [port]`, or a saved remote's button in the tab strip or Remote panel, connects the current tab. Connecting happens in the background, so an unreachable host never freezes the window. Once connected, commands typed in that tab run in your remote login shell, which keeps its working directory and environment between them. Full-screen programs (`vim`, `nano`, `top`, `less`) take over the output pane while they run, with the keyboard going to them; lines typed while any other remote command runs go to it as input, and Ctrl+C interrupts it. `exit` logs out; `disconnect` closes the connection.
