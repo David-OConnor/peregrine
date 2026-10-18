@@ -1,12 +1,13 @@
 use std::path::{Path, PathBuf};
 
-use egui::{Align, Area, Button, Color32, DragAndDrop, Event, Frame, Id, Key, Layout, Modal, Modifiers, Panel, Response, RichText, ScrollArea, Sense, Stroke, StrokeKind, TextStyle, Ui};
+use egui::{Align, Area, Button, Color32, DragAndDrop, Event, Frame, Id, Key, Layout, Modal, Modifiers, Panel, Response, RichText, ScrollArea, Sense, Stroke, StrokeKind, TextEdit, TextStyle, Ui};
 
 use crate::{
     OutType, clipboard,
     files::{self, FileSort, SortKey},
-    path_color, render_with_tilde,
+    path_color, project, render_with_tilde,
     state::State,
+    submit_command,
     ui,
     ui::{
         COLOR_EXECUTABLE, FILES_COL_MIN_CHARS, ListAction,
@@ -27,7 +28,8 @@ use crate::{
 /// When the panel is wide enough (see [FILES_COL_MIN_CHARS]) the list is laid
 /// out in as many columns as fit. The arrow keys move the selection as the
 /// rows are laid out (see [arrow_target]); Up and Down work from the search
-/// box too.
+/// box too. Under the search boxes, Git, Cargo and Python buttons run the
+/// usual commands when the dir is that kind of project (see [project_rows]).
 ///
 /// Clicking a row selects it, and the pane at the bottom of the panel shows
 /// its details (see [ui::file_details]), with a picture of an image under
@@ -488,6 +490,7 @@ pub(crate) fn file_browser(state: &mut State, ui: &mut Ui) {
         state.refresh_browser_files_filter();
     }
     ui::deep_search_bar(state, ui);
+    project_rows(state, ui);
 
     if search_changed {
         state.ui.rename_pending = None;
@@ -560,6 +563,118 @@ pub(crate) fn file_browser(state: &mut State, ui: &mut Ui) {
     }
 
     drag_preview(ui);
+}
+
+/// The Cargo row's buttons, and the line each runs.
+const CARGO_BUTTONS: [(&str, &str); 6] = [
+    ("Run", "cargo run"),
+    ("Run rel", "cargo run --release"),
+    ("Build", "cargo build"),
+    ("Build rel", "cargo build --release"),
+    ("Fmt", "cargo +nightly fmt"),
+    ("Clippy", "cargo clippy"),
+];
+
+const BUSY: &str = "A command is already running in this tab: stop it first (Ctrl+C)";
+
+/// Between the search boxes and the listing, a row of buttons for each kind
+/// of project the listed dir is (see [project::Project]): Git while it's in
+/// a repo (as the prompt's branch shows), Cargo, Python. Each runs its line
+/// as if typed, so it's echoed, kept in history, and runs in the background
+/// like any other, with `python` the venv's. Not while connected over SSH,
+/// where typed lines go to the remote, and disabled while a command's
+/// already running in this tab.
+fn project_rows(state: &mut State, ui: &mut Ui) {
+    let branch = state.branch[state.ui.active_tab].clone();
+    let proj = state.project;
+    if state.is_remote() || (branch.is_none() && !proj.cargo && !proj.python) {
+        return;
+    }
+    let idle = state.running_here().is_none();
+    let dir = state.cwd().to_path_buf();
+    // The line to run, or why there's none.
+    let mut line: Option<Result<String, String>> = None;
+
+    if let Some(branch) = &branch {
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Git:");
+            for (label, cmd) in [("Pull", "git pull"), ("Push", "git push")] {
+                if cmd_button(ui, idle, label, cmd) {
+                    line = Some(Ok(cmd.to_owned()));
+                }
+            }
+
+            let input = &mut state.ui.git_branch_input;
+            let typed = !input.trim().is_empty();
+            let clicked = ui
+                .add_enabled(idle && typed, Button::new("Branch"))
+                .on_hover_text(
+                    "Switch to the branch named in the box (git switch), \
+                     or create it if there's none by that name (git switch -c)",
+                )
+                .on_disabled_hover_text(if idle {
+                    "Type a branch name in the box"
+                } else {
+                    BUSY
+                })
+                .clicked();
+            let resp = ui.add(
+                TextEdit::singleline(input)
+                    .hint_text(branch.as_str())
+                    .desired_width(ui::chars_width(ui, TextStyle::Body, 14.0)),
+            );
+            let entered = resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+
+            if idle && typed && (clicked || entered) {
+                let result = project::git_branch(&dir, input);
+                if result.is_ok() {
+                    input.clear();
+                }
+                line = Some(result);
+            }
+        });
+    }
+
+    if proj.cargo {
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Cargo:");
+            for (label, cmd) in CARGO_BUTTONS {
+                if cmd_button(ui, idle, label, cmd) {
+                    line = Some(Ok(cmd.to_owned()));
+                }
+            }
+        });
+    }
+
+    if proj.python {
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Python:");
+            let run_hover = "Django's `manage.py runserver`, or else run.py, main.py or app.py \
+                             from this folder, src, or the package folder. With uv when it's on \
+                             PATH and there's a pyproject.toml, else the venv's python.";
+            if cmd_button(ui, idle, "Run", run_hover) {
+                line = Some(project::python_run(&dir));
+            }
+            let black_hover = "Format every Python file here with black";
+            if cmd_button(ui, idle, "Black", black_hover) {
+                line = Some(Ok(project::python_black(&dir).to_owned()));
+            }
+        });
+    }
+
+    match line {
+        Some(Ok(line)) => submit_command(state, &line),
+        Some(Err(e)) => state.push_out(e, OutType::StdErr),
+        None => {}
+    }
+}
+
+/// A project-row button, saying on hover what it runs.
+fn cmd_button(ui: &mut Ui, idle: bool, label: &str, hover: &str) -> bool {
+    ui.add_enabled(idle, Button::new(label))
+        .on_hover_text(hover)
+        .on_disabled_hover_text(BUSY)
+        .clicked()
 }
 
 fn delete_button(label: &str) -> Button<'_> {

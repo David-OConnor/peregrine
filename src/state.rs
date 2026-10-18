@@ -23,6 +23,7 @@ use crate::{
     deep_search::{self, DeepSearch},
     files::{Delete, FileDetails, FileSort, SelectionSummary, sort_browser_files},
     path_color,
+    project::Project,
     remote::{LiveRemote, Remote},
     running::RunningCmd,
     terminal::{self, Output},
@@ -158,6 +159,8 @@ pub struct StateUi {
     pub deep_search_edited: Option<f64>,
     /// Regex or not, names or contents: the toggles beside the box.
     pub deep_search_opts: deep_search::Options,
+    /// The branch name typed beside the Files panel's Git Branch button.
+    pub git_branch_input: String,
 
     /// Remote-panel "add / edit remote" form state. `remote_form_open` shows
     /// the form; the text fields hold the in-progress entry; `remote_edit_idx`
@@ -280,6 +283,7 @@ impl Default for StateUi {
             deep_search: String::new(),
             deep_search_edited: None,
             deep_search_opts: deep_search::Options::default(),
+            git_branch_input: String::new(),
             remote_form_open: false,
             remote_host: String::new(),
             remote_port: String::new(),
@@ -355,6 +359,9 @@ pub struct State {
     pub selected_file: Option<FileDetails>,
     /// Every selected Files row (see [State::select_file] and co.).
     pub selection: FileSelection,
+    /// What kind of project `browser_dir` is, for the Files panel's project
+    /// rows. Re-detected along with `browser_files`.
+    pub project: Project,
     /// The picture under `selected_file`'s details, when it's an image. Not
     /// persisted.
     pub file_preview: ImagePreview,
@@ -438,6 +445,7 @@ impl Default for State {
             browser_dir: PathBuf::new(),
             selected_file: None,
             selection: FileSelection::default(),
+            project: Project::default(),
             file_preview: ImagePreview::default(),
             deep_search: None,
             paste: None,
@@ -569,6 +577,7 @@ impl State {
             self.deep_search = None;
         }
         self.browser_files = read_browser_files(&cwd);
+        self.project = Project::detect(&cwd);
         self.browser_dir = cwd;
         let (attr, dot) = (self.ui.show_hidden_attr, self.ui.show_dotfiles);
         self.browser_files.retain(|f| {
@@ -1229,6 +1238,7 @@ impl State {
             browser_dir: PathBuf::new(),
             selected_file: None,
             selection: FileSelection::default(),
+            project: Project::default(),
             file_preview: ImagePreview::default(),
             deep_search: None,
             paste: None,

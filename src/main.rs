@@ -13,6 +13,7 @@ mod files;
 mod markdown;
 mod path_color;
 mod path_env;
+mod project;
 mod remote;
 mod running;
 mod state;

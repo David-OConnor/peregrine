@@ -59,10 +59,12 @@ const VIRIDIS_DARK: [Color32; 11] = [
     Color32::from_rgb(0xFF, 0xEB, 0x5D), // deepest: yellow
 ];
 
-/// [VIRIDIS_DARK] for the light-mode panels: lightness 0.34 to 0.72, so the
-/// yellow end darkens to gold, and chroma tripled (as far as sRGB allows).
-/// Dark colours look alike on a light background unless they're vivid, so
-/// without the boost the purple, blue and teal end all read as near-black.
+/// [VIRIDIS_DARK] for the light-mode panels: lightness 0.34 to 0.53 up to the
+/// teal, then only to 0.55 for the green-to-gold end, so the yellow end
+/// darkens to olive gold and every stop keeps about 4.5:1 contrast on the
+/// panels; and chroma tripled (as far as sRGB allows). Dark colours look alike
+/// on a light background unless they're vivid, so without the boost the
+/// purple, blue and teal end all read as near-black.
 const VIRIDIS_LIGHT: [Color32; 11] = [
     Color32::from_rgb(0x59, 0x00, 0x68),
     Color32::from_rgb(0x58, 0x00, 0x94),
@@ -70,11 +72,11 @@ const VIRIDIS_LIGHT: [Color32; 11] = [
     Color32::from_rgb(0x00, 0x57, 0x99),
     Color32::from_rgb(0x00, 0x6C, 0x80),
     Color32::from_rgb(0x00, 0x7B, 0x75),
-    Color32::from_rgb(0x00, 0x8A, 0x6B),
-    Color32::from_rgb(0x00, 0x9A, 0x55),
-    Color32::from_rgb(0x34, 0xA7, 0x00),
-    Color32::from_rgb(0x89, 0xA7, 0x00),
-    Color32::from_rgb(0xBC, 0xA6, 0x00),
+    Color32::from_rgb(0x00, 0x7F, 0x62),
+    Color32::from_rgb(0x00, 0x83, 0x47),
+    Color32::from_rgb(0x28, 0x85, 0x00),
+    Color32::from_rgb(0x64, 0x7B, 0x00),
+    Color32::from_rgb(0x82, 0x72, 0x00),
 ];
 
 /// The colour of a directory `depth` levels below a root (or `~`), for a
