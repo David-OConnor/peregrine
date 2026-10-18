@@ -598,9 +598,9 @@ pub(super) fn delete_popup(state: &mut State, ctx: &egui::Context) {
         ui.horizontal(|ui| {
             let delete = ui.add(delete_button("Delete"));
             let keep = ui.button("Cancel");
-            // Keep keyboard focus in the modal, starting on Cancel.
+            // Keep keyboard focus in the modal, starting on Delete, so Enter confirms.
             if !delete.has_focus() && !keep.has_focus() {
-                keep.request_focus();
+                delete.request_focus();
             }
             confirm = delete.clicked();
             cancel = keep.clicked();
