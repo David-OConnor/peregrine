@@ -90,3 +90,6 @@ arboard = { version = "3.6", default-features = false }
 [build-dependencies]
 # Embeds `resources/icon.ico` in the Windows `.exe` (see `build.rs`).
 winresource = "0.1.31"
+
+[profile.release]
+strip = true  # Strip symbols from binary. Size reduction on Linux/Mac.
