@@ -2183,16 +2183,21 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
         .fill(Color32::BLACK)
         .inner_margin(egui::Margin::same(6));
 
+    // The terminal panes look the same in either theme: always the light
+    // visuals, whose white input box stands out against the black fill (the
+    // dark theme's near-black one would vanish into it).
     // Pin the input row to the bottom of the central area, with the
     // scrolling output pane filling the remaining space above it.
     Panel::bottom("term_in_panel")
         .resizable(false)
         .frame(term_frame)
         .show(ui, |ui| {
+            *ui.visuals_mut() = egui::Visuals::light();
             term_in(state, ui);
         });
 
     CentralPanel::default().frame(term_frame).show(ui, |ui| {
+        *ui.visuals_mut() = egui::Visuals::light();
         term_out(state, ui);
     });
 
