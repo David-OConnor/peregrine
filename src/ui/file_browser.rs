@@ -182,7 +182,7 @@ pub(super) fn file_browser(state: &mut State, ui: &mut Ui) {
     let can_forward = !state.ui.nav_forward[i].is_empty();
 
     // Common-destination shortcuts (see [files::shortcuts]): 🏠 Home,
-    // ⚙ app data, 🖥 Desktop, 📥 Downloads, 📦 programs, 🖴 root, 🗑 trash.
+    // 🗃 app data, 🖥 Desktop, 📥 Downloads, 📦 programs, 🖴 root, 🗑 trash.
     // Each is only enabled when the target actually exists, so we never `cd`
     // into a missing dir and push a diagnostic. On Windows, 🖴 is a menu of
     // drives and 🗑 opens the Recycle Bin in Explorer. Rows dragged onto ⬆
@@ -475,17 +475,32 @@ pub(super) fn file_browser(state: &mut State, ui: &mut Ui) {
         state.paste_files(ui.ctx());
     }
 
+    // Deep search follows the Search box on its row while there's room for
+    // it there (see [search::deep_search_min_width]), or else gets the next.
+    const SEARCH_GAP: f32 = 12.;
+    let one_row = ui.available_width()
+        >= search::QUICK_SEARCH_WIDTH
+            + ui.spacing().item_spacing.x
+            + SEARCH_GAP
+            + search::deep_search_min_width(ui);
+
     let mut search_changed = false;
-    ui.horizontal_wrapped(|ui| {
+    ui.horizontal(|ui| {
         // Text filter on names in this dir; cleared on cd (see
-        // [State::refresh_browser_files]).
-        search_changed = search::search_box(ui, &mut state.ui.files_search, "files_search");
+        // [State::refresh_browser_files]). By `search_id`, as it's checked
+        // for the keyboard above, outside this row.
+        search_changed = search::search_box_with_id(ui, &mut state.ui.files_search, search_id);
         if search_changed {
             state.refresh_browser_files_filter();
         }
-        ui.add_space(12.);
-        search::deep_search_bar(state, ui);
+        if one_row {
+            ui.add_space(SEARCH_GAP);
+            search::deep_search_bar(state, ui);
+        }
     });
+    if !one_row {
+        search::deep_search_bar(state, ui);
+    }
 
     if search_changed {
         state.ui.rename_pending = None;

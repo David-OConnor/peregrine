@@ -12,9 +12,12 @@ use eframe::{
         text::{LayoutJob, TextFormat},
     },
 };
-use egui::{Button, Key, Layout, RichText, ScrollArea, TextEdit, TextStyle, Ui, WidgetText};
+use egui::{
+    Button, Id, Key, Layout, Response, RichText, ScrollArea, TextEdit, TextStyle, Ui, WidgetText,
+};
 
 use crate::{
+    deep_search,
     deep_search::{DeepSearch, MAX_MATCHES, Row},
     path_color, render_with_tilde,
     state::State,
@@ -22,7 +25,12 @@ use crate::{
     ui::{dirs, dirs::BOOKMARKED_TEXT, file_browser, file_browser::RowAction},
 };
 
-const QUICK_SEARCH_WIDTH: f32 = 140.;
+pub const QUICK_SEARCH_WIDTH: f32 = 140.;
+
+/// The narrowest the Deep search box gets with its toggles beside it; any
+/// narrower and they go on a row of their own under it. No narrower than the
+/// Search box.
+const DEEP_SEARCH_MIN_WIDTH: f32 = QUICK_SEARCH_WIDTH;
 
 /// How long Deep search waits after the last keystroke before searching, so
 /// it doesn't walk the whole tree once per letter typed.
@@ -254,83 +262,64 @@ pub fn deep_search_results(
 /// Renders a single-line "Search" box that triggers `on_changed` when the buffer is edited. This is used
 /// in content-filter search on a number of panels.
 pub fn search_box(ui: &mut Ui, buf: &mut String, id_salt: &str) -> bool {
+    let id = ui.make_persistent_id(id_salt);
+    search_box_with_id(ui, buf, id)
+}
+
+/// A [search_box] with the given `id`, for one whose focus is checked from
+/// outside the `Ui` it's added to.
+pub fn search_box_with_id(ui: &mut Ui, buf: &mut String, id: Id) -> bool {
     ui.add(
         TextEdit::singleline(buf)
             .hint_text("Search")
             .desired_width(QUICK_SEARCH_WIDTH)
-            .id_salt(id_salt),
+            .id(id),
     )
     .changed()
 }
 
 /// The Files panel's Deep search box, followed on its row by the switch
 /// between searching file names and contents and the regex toggle (see
-/// `crate::deep_search`). A search starts once typing pauses for
-/// [DEEP_SEARCH_DELAY], or at once on Enter (which also re-runs an
-/// unchanged one) or a toggle; clearing the box ends it. Also takes in the
-/// running search's latest results.
+/// `crate::deep_search`), or if that would squeeze the box below
+/// [DEEP_SEARCH_MIN_WIDTH], with those on a row of their own under it. A
+/// search starts once typing pauses for [DEEP_SEARCH_DELAY], or at once on
+/// Enter (which also re-runs an unchanged one) or a toggle; clearing the box
+/// ends it. Also takes in the running search's latest results.
 pub fn deep_search_bar(state: &mut State, ui: &mut Ui) {
     let now = ui.input(|i| i.time);
-    let mut run_now = false;
-    // Filenames / Contents was switched; unlike the regex toggle, it's saved.
-    let mut mode_changed = false;
     let opts = &mut state.ui.deep_search_opts;
+    let buf = &mut state.ui.deep_search;
 
-    ui.horizontal(|ui| {
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if ui
-                .add(Button::selectable(opts.regex, ".*"))
-                .on_hover_text("Treat the Deep search as a regular expression, not plain text")
-                .clicked()
-            {
-                opts.regex = !opts.regex;
-                run_now = true;
-            }
+    // Give or take a point of rounding, so the Files panel's row, which
+    // leaves exactly this much for it, can't tip it into two.
+    let beside = ui.available_width() + 1.0 >= deep_search_min_width(ui);
 
-            // Right to left, so Contents comes before Filenames.
-            let before = opts.file_names;
-            ui.selectable_value(&mut opts.file_names, false, "Contents")
-                .on_hover_text("Match lines inside files, like `rg <search>`");
-            ui.selectable_value(&mut opts.file_names, true, "Filenames")
-                .on_hover_text(
-                    "Match file and folder names, like `rg --files` filtered by the search",
-                );
+    // Whether to re-run the search, and whether Filenames / Contents was
+    // switched; unlike the regex toggle, that's saved.
+    let ((mut run_now, mode_changed), resp) = if beside {
+        right_to_left_row(ui, |ui| {
+            let toggled = deep_search_toggles(ui, opts);
+            (toggled, deep_search_box(ui, buf, opts.file_names))
+        })
+    } else {
+        let resp = deep_search_box(ui, buf, opts.file_names);
+        (
+            right_to_left_row(ui, |ui| deep_search_toggles(ui, opts)),
+            resp,
+        )
+    };
 
-            mode_changed = opts.file_names != before;
-            run_now |= mode_changed;
+    if resp.changed() {
+        if state.ui.deep_search.is_empty() {
+            run_now = true;
+        } else {
+            state.ui.deep_search_edited = Some(now);
+        }
+    }
 
-            let what = if opts.file_names {
-                "names of every file and folder"
-            } else {
-                "contents of every file"
-            };
-
-            let resp = ui
-                .add(
-                    TextEdit::singleline(&mut state.ui.deep_search)
-                        .hint_text("Deep search")
-                        .desired_width(f32::INFINITY)
-                        .id(deep_search_id()),
-                )
-                .on_hover_text(format!(
-                    "Search the {what} in this folder and its subfolders, \
-                     as ripgrep does: hidden and .gitignored files are skipped. \
-                     Case-insensitive unless the search has a capital letter."
-                ));
-
-            if resp.changed() {
-                if state.ui.deep_search.is_empty() {
-                    run_now = true;
-                } else {
-                    state.ui.deep_search_edited = Some(now);
-                }
-            }
-
-            if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
-                run_now = true;
-            }
-        });
-    });
+    if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+        run_now = true;
+    }
 
     if mode_changed {
         let _ = state.save();
@@ -351,8 +340,90 @@ pub fn deep_search_bar(state: &mut State, ui: &mut Ui) {
 }
 
 /// The Deep search box's, for the Files panel to tell it has the keyboard.
-pub fn deep_search_id() -> egui::Id {
-    egui::Id::new("files_deep_search")
+pub fn deep_search_id() -> Id {
+    Id::new("files_deep_search")
+}
+
+/// How wide [deep_search_bar] needs to be to keep its toggles on the box's
+/// row: the box's minimum, plus the toggles as last drawn.
+pub fn deep_search_min_width(ui: &Ui) -> f32 {
+    let toggles = ui
+        .ctx()
+        .data(|d| d.get_temp::<f32>(toggles_width_id()))
+        .unwrap_or(0.0);
+    DEEP_SEARCH_MIN_WIDTH + ui.spacing().item_spacing.x + toggles
+}
+
+/// Where [deep_search_toggles] keeps its width for [deep_search_min_width].
+fn toggles_width_id() -> Id {
+    deep_search_id().with("toggles_width")
+}
+
+/// The Deep search box itself, filling what's left of its row.
+fn deep_search_box(ui: &mut Ui, buf: &mut String, file_names: bool) -> Response {
+    let what = if file_names {
+        "names of every file and folder"
+    } else {
+        "contents of every file"
+    };
+
+    ui.add(
+        TextEdit::singleline(buf)
+            .hint_text("Deep search")
+            .desired_width(f32::INFINITY)
+            .id(deep_search_id()),
+    )
+    .on_hover_text(format!(
+        "Search the {what} in this folder and its subfolders, \
+         as ripgrep does: hidden and .gitignored files are skipped. \
+         Case-insensitive unless the search has a capital letter."
+    ))
+}
+
+/// The Deep search toggles, added right to left: the regex one, then
+/// Contents and Filenames. Returns whether the search should re-run, and
+/// whether Filenames / Contents was switched. Remembers how wide they were
+/// for [deep_search_min_width], and redoes the frame if that changed (on the
+/// first, or with a new font size), as the bar's layout depends on it.
+fn deep_search_toggles(ui: &mut Ui, opts: &mut deep_search::Options) -> (bool, bool) {
+    let regex = ui
+        .add(Button::selectable(opts.regex, ".*"))
+        .on_hover_text("Treat the Deep search as a regular expression, not plain text");
+    if regex.clicked() {
+        opts.regex = !opts.regex;
+    }
+
+    // Right to left, so Contents comes before Filenames.
+    let before = opts.file_names;
+    let contents = ui
+        .selectable_value(&mut opts.file_names, false, "Contents")
+        .on_hover_text("Match lines inside files, like `rg <search>`");
+    let names = ui
+        .selectable_value(&mut opts.file_names, true, "Filenames")
+        .on_hover_text("Match file and folder names, like `rg --files` filtered by the search");
+    let mode_changed = opts.file_names != before;
+
+    let width = regex.rect.width()
+        + contents.rect.width()
+        + names.rect.width()
+        + 2.0 * ui.spacing().item_spacing.x;
+    let id = toggles_width_id();
+    let old = ui.ctx().data(|d| d.get_temp::<f32>(id));
+    if old.is_none_or(|w| (w - width).abs() > 1.0) {
+        ui.ctx().data_mut(|d| d.insert_temp(id, width));
+        ui.ctx().request_discard("Deep search toggles resized");
+    }
+
+    (regex.clicked() || mode_changed, mode_changed)
+}
+
+/// A row as wide as `ui`, filled from the right.
+fn right_to_left_row<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> R {
+    ui.horizontal(|ui| {
+        ui.with_layout(Layout::right_to_left(Align::Center), add_contents)
+            .inner
+    })
+    .inner
 }
 
 /// Append `text` to `job` in the `plain` format, except for its byte

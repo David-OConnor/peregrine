@@ -4,7 +4,6 @@
 //!
 //! This uses OS-specific APIs: One for Windows, another for Linux/X11, and another for Linux/Wayland.
 
-
 /// What became of a drag handed to the OS.
 #[derive(Debug)]
 pub enum Outcome {

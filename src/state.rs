@@ -40,6 +40,9 @@ pub struct StateUi {
     /// The About window and its last folder-opening error. Not persisted.
     pub about: bool,
     pub about_folder_error: Option<String>,
+    /// The Settings window, opened from the tab strip's gear button. Not
+    /// persisted.
+    pub settings: bool,
     /// Checking for, downloading, and installing a newer release, from the
     /// About window. Not persisted.
     pub updater: software_manager::Updater,
@@ -255,6 +258,7 @@ impl Default for StateUi {
             clipboard: ui::clipboard::ClipboardPane::default(),
             about: false,
             about_folder_error: None,
+            settings: false,
             updater: Default::default(),
             cli_input: vec![String::new()],
             out: vec![Output::default()],
@@ -1229,8 +1233,8 @@ impl State {
 
     /// Step how many directory levels the path colours take to go from
     /// purple to yellow (see [path_color::depth_levels]) by `delta`, and
-    /// persist the change. Wired to the "Dir depth" +/- buttons on the tab
-    /// strip.
+    /// persist the change. Wired to the "Dir color depth" control in the
+    /// Settings window.
     pub fn adjust_dir_color_depth(&mut self, delta: i32) {
         let cur = path_color::depth_levels();
         let next = (cur as i32 + delta).clamp(

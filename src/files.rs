@@ -625,7 +625,7 @@ fn app_data(home: Option<&Path>) -> Shortcut {
         ("~/.local", ".local")
     };
     Shortcut {
-        glyph: "⚙",
+        glyph: "🗃",
         hover,
         dir: home.map(|h| h.join(sub)),
     }

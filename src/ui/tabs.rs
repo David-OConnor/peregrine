@@ -138,12 +138,15 @@ pub fn tabs_bar(state: &mut State, ui: &mut Ui) {
     let mut connect_remote: Option<usize> = None;
     let mut font_delta = 0.;
     let mut gui_font_delta = 0.;
-    let mut dir_depth_delta = 0;
     let mut set_dark = None;
     let mut project_bar_fits = true;
 
     ui.horizontal(|ui| {
-        // The theme toggle comes first, showing the theme a click switches to.
+        if ui.button("⚙").on_hover_text("Settings").clicked() {
+            state.ui.settings = !state.ui.settings;
+        }
+
+        // Then the theme toggle, showing the theme a click switches to.
         let dark = ui.visuals().dark_mode;
         let (icon, other) = if dark {
             ("☀", "light")
@@ -172,8 +175,7 @@ pub fn tabs_bar(state: &mut State, ui: &mut Ui) {
 
         ui.separator();
         // Font-size controls sit to the left of the tab strip: one for the
-        // terminal panes, one for the side panels; then the path colours'
-        // depth.
+        // terminal panes, one for the side panels.
 
         ui.label("CLI font:");
         font_delta = ui::font_size_control(ui, font_size);
@@ -181,12 +183,6 @@ pub fn tabs_bar(state: &mut State, ui: &mut Ui) {
 
         ui.label("GUI font:");
         gui_font_delta = ui::font_size_control(ui, gui_font_size);
-
-        ui.separator();
-        // How deep a directory is when its colour reaches yellow (see
-        // [path_color::depth_levels]).
-        ui.label("Dir color depth:");
-        dir_depth_delta = ui::dir_depth_control(ui);
 
         ui.separator();
         // Breathing room either side of the tab section.
@@ -319,10 +315,6 @@ pub fn tabs_bar(state: &mut State, ui: &mut Ui) {
 
     if gui_font_delta != 0.0 {
         state.adjust_gui_font_size(gui_font_delta);
-    }
-
-    if dir_depth_delta != 0 {
-        state.adjust_dir_color_depth(dir_depth_delta);
     }
 
     if let Some(i) = to_select {

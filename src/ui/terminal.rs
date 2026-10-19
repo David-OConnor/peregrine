@@ -6,9 +6,9 @@ use std::sync::Arc;
 use egui::{
     Color32, Context, CursorIcon, Event, FontId, Galley, Key, KeyboardShortcut, Modifiers, Rect,
     RichText, ScrollArea, Sense, TextEdit, TextStyle, Ui,
+    os::OperatingSystem,
     text::CCursor,
     text_selection::{CCursorRange, TextCursorState, visuals::paint_text_selection},
-    os::OperatingSystem,
     vec2,
 };
 use shell::DirList;

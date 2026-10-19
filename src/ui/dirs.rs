@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 
 use eframe::epaint::{Color32, FontId, text::LayoutJob};
 use egui::{
-    Button, CursorIcon, DragValue, Modal, PointerButton, Pos2, Rangef, Rect, RichText, ScrollArea,
-    Sense, Stroke, TextFormat, TextStyle, Ui,
+    Button, CursorIcon, Modal, PointerButton, Pos2, Rangef, Rect, RichText, ScrollArea, Sense,
+    Stroke, TextFormat, TextStyle, Ui,
 };
 use shell::{BookmarkSort, DirList};
 
@@ -140,9 +140,11 @@ fn dir_button(
     let parts = dir_parts(path, opts, dark);
     let whole = !opts.names && parts_len(&parts) <= opts.max_len;
     let mut button = Button::new(dir_label(ui, prefix, parts, opts.max_len, text_color));
+
     if highlight {
         button = button.fill(bookmarked_fill(dark));
     }
+
     let resp = ui.add(button);
     if whole {
         resp
@@ -175,6 +177,7 @@ pub(super) fn bookmark_star(ui: &mut Ui, bookmarked: bool, small: bool) -> egui:
     } else {
         (RichText::new(STAR_OFF.to_string()), "Bookmark this dir")
     };
+
     let mut button = Button::new(text);
     if small {
         button = button.small();
@@ -193,11 +196,19 @@ fn cwd_bookmark_button(ui: &mut Ui, state: &State) -> egui::Response {
         || cwd.display().to_string(),
         |n| n.to_string_lossy().into_owned(),
     );
+
     let (text, hover) = if bookmarked {
-        (format!("x Rem {name}"), "Remove this dir from bookmarks")
+        (
+            format!("x Rem {name}"),
+            "Remove the current directory from bookmarks",
+        )
     } else {
-        (format!("{STAR_OFF} Bookmark {name}"), "Bookmark this dir")
+        (
+            format!("{STAR_OFF} {name}"),
+            "Make the current directory a bookmark",
+        )
     };
+
     let path = ui::path_job(ui, cwd, state.home.as_deref());
     ui.button(text).on_hover_ui(|ui| {
         ui.label(hover);
@@ -222,48 +233,24 @@ fn dir_label_chars<'a>(
         .min(opts.max_len)
 }
 
-/// A `<label> N + -` control for a Bookmarks / Recent dirs path length, like
-/// [ui::font_size_control] except `N` can also be dragged or clicked to type a
-/// value. Updates `len` live, clamped to [MIN_DIR_LABEL_LEN]..=
-/// [MAX_DIR_LABEL_LEN]. Returns true once a change is complete (a button
-/// click, a finished drag, or a committed edit), so the caller can persist it
-/// without saving on every frame of a drag. `what` names the panel's paths,
-/// for the tooltips.
-fn dir_label_len_control(ui: &mut Ui, label: &str, len: &mut usize, what: &str) -> bool {
-    ui.label(label);
-
-    let resp = ui
-        .add(
-            DragValue::new(len)
-                .range(MIN_DIR_LABEL_LEN..=MAX_DIR_LABEL_LEN)
-                .speed(0.25)
-                .update_while_editing(false),
-        )
-        .on_hover_text(format!(
-            "Max characters of {what} paths to show; longer ones are cut from the \
-             front. Drag, or click to type."
-        ));
-
-    let done = (resp.changed() && !resp.dragged()) || resp.drag_stopped();
-
-    done
-}
-
-/// A `Paths | Names` selector: whether each Bookmarks / Recent dirs row shows
-/// the dir's path or just its final name. `what` names the panel's dirs, for
-/// the tooltips. Returns true if it changed.
+/// The `Paths | Names` selector at the top of the Bookmarks / Recent dirs
+/// panels: whether each row shows the dir's path or just its final name. How
+/// many characters of it to show is in the Settings window. `what` names the
+/// panel's dirs, for the tooltips. Returns true if it changed.
 fn dir_label_mode_control(ui: &mut Ui, names: &mut bool, what: &str) -> bool {
     let before = *names;
 
-    ui.selectable_value(names, false, "Paths")
-        .on_hover_text(format!(
-            "Show each {what}'s path, e.g. ~/code/Bio/molchanica"
-        ));
+    ui.horizontal(|ui| {
+        ui.selectable_value(names, false, "Paths")
+            .on_hover_text(format!(
+                "Show each {what}'s path, e.g. ~/code/Bio/molchanica"
+            ));
 
-    ui.selectable_value(names, true, "Names")
-        .on_hover_text(format!(
-            "Show just each {what}'s final name, e.g. molchanica"
-        ));
+        ui.selectable_value(names, true, "Names")
+            .on_hover_text(format!(
+                "Show just each {what}'s final name, e.g. molchanica"
+            ));
+    });
 
     *names != before
 }
@@ -288,38 +275,6 @@ pub(super) fn cleanup_missing_button(ui: &mut Ui) -> bool {
              nothing on disk is touched.",
         )
         .clicked()
-}
-
-/// The controls at the top of the Bookmarks / Recent dirs panels: how many
-/// characters of each row to show (see [dir_label_len_control]), and whether a
-/// row shows the dir's path or just its name (see [dir_label_mode_control]).
-/// Both share a row when the panel is wide enough; otherwise the selector
-/// wraps, whole, to the next. `what` names the panel's dirs, for the tooltips.
-/// Returns true once a change is complete, so the caller can save it.
-fn dir_label_settings(ui: &mut Ui, len: &mut usize, names: &mut bool, what: &str) -> bool {
-    let spacing = ui.spacing().item_spacing.x;
-    // Extra space between the two groups of controls.
-    let gap = 2.0 * spacing;
-    let mode_width = gap + button_width(ui, "Paths") + spacing + button_width(ui, "Names");
-
-    let mut done = false;
-    let mut wrap = false;
-
-    ui.horizontal(|ui| {
-        done = dir_label_len_control(ui, "Chars: ", len, what);
-        wrap = ui.available_width() < mode_width;
-
-        if !wrap {
-            ui.add_space(gap);
-            done |= dir_label_mode_control(ui, names, what);
-        }
-    });
-
-    if wrap {
-        ui.horizontal(|ui| done |= dir_label_mode_control(ui, names, what));
-    }
-
-    done
 }
 
 /// Width a Bookmarks / Recent dirs column needs so none of its rows spill into
@@ -393,12 +348,12 @@ const BOOKMARK_SORTS: [(BookmarkSort, &str, &str); 4] = [
     ),
     (
         BookmarkSort::Added,
-        "Added",
+        "Date",
         "In the order they were bookmarked, oldest first",
     ),
     (
         BookmarkSort::Proximity,
-        "Proximity",
+        "Prox",
         "By path, so dirs in the same part of the file system sit together",
     ),
     (
@@ -456,13 +411,7 @@ fn bookmark_drop_slot(rows: &[(usize, Rect)], pos: Pos2, gap: f32) -> Option<(us
 pub(super) fn dir_bookmarks(state: &mut State, ui: &mut Ui) {
     ui::panel_header(ui, "Bookmarks", &mut state.ui.panel_vis.bookmarks);
 
-    // Applied every frame so the list follows a drag live; saved once done.
-    if dir_label_settings(
-        ui,
-        &mut state.bookmark_label_len,
-        &mut state.bookmark_names,
-        "bookmark",
-    ) {
+    if dir_label_mode_control(ui, &mut state.bookmark_names, "bookmark") {
         let _ = state.save();
     }
 
@@ -586,13 +535,7 @@ pub(super) fn dir_bookmarks(state: &mut State, ui: &mut Ui) {
 pub(super) fn dir_history(state: &mut State, ui: &mut Ui) {
     ui::panel_header(ui, "Recent dirs", &mut state.ui.panel_vis.recent_dirs);
 
-    // Applied every frame so the list follows a drag live; saved once done.
-    if dir_label_settings(
-        ui,
-        &mut state.recent_dir_label_len,
-        &mut state.recent_dir_names,
-        "recent dir",
-    ) {
+    if dir_label_mode_control(ui, &mut state.recent_dir_names, "recent dir") {
         let _ = state.save();
     }
 

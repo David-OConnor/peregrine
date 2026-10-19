@@ -21,6 +21,7 @@ mod project_bar;
 mod remote;
 mod remote_grid;
 mod search;
+mod settings;
 mod tab_keys;
 mod tabs;
 mod terminal;
@@ -646,25 +647,6 @@ fn font_size_control(ui: &mut Ui, size: f32) -> f32 {
     }
 }
 
-/// A [DragValue] for [path_color::depth_levels]. Returns the change to apply.
-fn dir_depth_control(ui: &mut Ui) -> i32 {
-    let levels = path_color::depth_levels() as i32;
-    let mut val = levels;
-
-    let response = ui
-        .add(
-            DragValue::new(&mut val)
-                .range(path_color::MIN_DEPTH_LEVELS..=path_color::MAX_DEPTH_LEVELS)
-                .speed(0.1)
-                .update_while_editing(false),
-        )
-        .on_hover_text(
-            "Directory levels from purple (root or ~) to yellow. Drag, or click to type.",
-        );
-
-    if response.changed() { val - levels } else { 0 }
-}
-
 /// Cap a resizable side panel so the central output/input column keeps at
 /// least [MIN_CENTRAL_WIDTH] points. `ui` is queried for the width still
 /// available at the point the panel is about to be added (egui lays panels out
@@ -891,6 +873,7 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
     path_panel::path_window(state, ui.ctx());
 
     about::show(state, ui.ctx());
+    settings::show(state, ui.ctx());
     dirs::stale_dir_popup(state, ui.ctx());
     file_browser::delete_popup(state, ui.ctx());
 
