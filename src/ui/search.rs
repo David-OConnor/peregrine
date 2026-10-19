@@ -22,7 +22,7 @@ use crate::{
     ui::{dirs, dirs::BOOKMARKED_TEXT, file_browser, file_browser::RowAction},
 };
 
-const QUICK_SEARCH_WIDTH: f32 = 120.;
+const QUICK_SEARCH_WIDTH: f32 = 140.;
 
 /// How long Deep search waits after the last keystroke before searching, so
 /// it doesn't walk the whole tree once per letter typed.

@@ -16,7 +16,7 @@ use crate::{
 /// button, shown while "Show dir" is on, re-runs it in the directory it was
 /// originally run from.
 pub fn cmd_history(state: &mut State, ui: &mut Ui) {
-    ui::panel_header(ui, "Cmd history", &mut state.ui.panel_vis.recent_cmds);
+    ui::panel_header(ui, "Recent cmds", &mut state.ui.panel_vis.recent_cmds);
 
     let show_dir = state.cmd_history_show_dir;
     let hover = if show_dir {

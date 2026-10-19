@@ -521,26 +521,27 @@ pub(crate) fn file_browser(state: &mut State, ui: &mut Ui) {
         state.paste_files(ui.ctx());
     }
 
-    ui.horizontal(|ui| {
+    let mut search_changed = false;
+    ui.horizontal_wrapped(|ui| {
 
 
         // Text filter on names in this dir; cleared on cd (see
         // [State::refresh_browser_files]).
-        let search_changed = search::search_box(ui, &mut state.ui.files_search, "files_search");
+        search_changed = search::search_box(ui, &mut state.ui.files_search, "files_search");
         if search_changed {
             state.refresh_browser_files_filter();
         }
-        ui.add_space(20.);
+        ui.add_space(12.);
         search::deep_search_bar(state, ui);
-
-        if search_changed {
-            state.ui.rename_pending = None;
-            match state.shown_files().first().map(|p| p.to_path_buf()) {
-                Some(path) => state.select_file(&path),
-                None => state.clear_file_selection(),
-            }
-        }
     });
+
+    if search_changed {
+        state.ui.rename_pending = None;
+        match state.shown_files().first().map(|p| p.to_path_buf()) {
+            Some(path) => state.select_file(&path),
+            None => state.clear_file_selection(),
+        }
+    }
 
     let arrow_moved = move_selection(state, &arrows);
 

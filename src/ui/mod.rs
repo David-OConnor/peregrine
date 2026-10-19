@@ -656,7 +656,7 @@ fn panel_toggles(state: &mut State, ui: &mut Ui) {
         ui.toggle_value(&mut v.file_browser, "Files");
         ui.toggle_value(&mut v.remote_terminals, "Remote");
         ui.toggle_value(&mut v.recent_cmds_in_dir, "Cmds this dir");
-        ui.toggle_value(&mut v.recent_cmds, "Cmd history");
+        ui.toggle_value(&mut v.recent_cmds, "Recent cmds");
         // Opens a window of its own rather than a side panel.
         ui.toggle_value(&mut v.path_editor, "PATH");
         ui.toggle_value(&mut v.clipboard, "Clipboard")
