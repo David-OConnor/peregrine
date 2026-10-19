@@ -3,11 +3,10 @@
 use eframe::epaint::text::TextWrapMode;
 use egui::{Button, ScrollArea, TextStyle, Ui};
 
-use crate::ui::search;
 use crate::{
     state::State,
     ui,
-    ui::{CMD_COL_MIN_CHARS, ListAction},
+    ui::{CMD_COL_MIN_CHARS, ListAction, search},
 };
 
 /// Display recent commands entered, newest first, in columns when the panel

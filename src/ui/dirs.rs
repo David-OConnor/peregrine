@@ -7,14 +7,13 @@ use eframe::epaint::{Color32, FontId, text::LayoutJob};
 use egui::{Button, DragValue, Modal, RichText, ScrollArea, TextFormat, TextStyle, Ui};
 use shell::DirList;
 
-use crate::ui::search;
 use crate::{
     OutType, path_color,
     path_color::Part,
     render_with_tilde,
     state::State,
     ui,
-    ui::ListAction,
+    ui::{ListAction, search},
 };
 
 /// Default max displayed length (in characters) of a Bookmarks / Recent dirs

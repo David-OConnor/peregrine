@@ -1,17 +1,14 @@
-use std::
-path::{Path, PathBuf},
-;
+use std::path::{Path, PathBuf};
 
 use eframe::epaint::text::cursor::CCursor;
 use egui::{
     Align, Area, Button, Color32, DragAndDrop, Event, Frame, Id, Key, Layout, Modal, Modifiers,
-    Panel, Response, RichText, ScrollArea, Sense, Stroke, StrokeKind, TextEdit, TextStyle, Ui, text::CCursorRange,
+    Panel, Response, RichText, ScrollArea, Sense, Stroke, StrokeKind, TextEdit, TextStyle, Ui,
+    text::CCursorRange,
 };
 
-use crate::ui::search;
 use crate::{
-    OutType, clipboard,
-    drag_out,
+    OutType, clipboard, drag_out,
     files::{self, FileSort, SortKey},
     path_color, render_with_tilde,
     state::{FileCreate, FileRename, State},
@@ -19,6 +16,7 @@ use crate::{
     ui::{
         COLOR_EXECUTABLE, FILES_COL_MIN_CHARS, ListAction,
         dirs::{BOOKMARKED_TEXT, bookmarked_fill},
+        search,
     },
     viewer,
 };
@@ -300,8 +298,8 @@ pub(crate) fn file_browser(state: &mut State, ui: &mut Ui) {
                     }
                 }
             })
-            .response
-            .on_hover_text("This PC: devices and drives");
+                .response
+                .on_hover_text("This PC: devices and drives");
             if ui
                 .button("🗑")
                 .on_hover_text("Recycle Bin (opens in Explorer)")
@@ -356,6 +354,7 @@ pub(crate) fn file_browser(state: &mut State, ui: &mut Ui) {
 
     let (mut cut, mut copy, mut paste, mut unselect) = (false, false, false, false);
     let mut new_file = false;
+
     // Explorer's shortcut for it.
     let mut new_folder = list_has_keys
         && ui.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::N));
@@ -483,7 +482,7 @@ pub(crate) fn file_browser(state: &mut State, ui: &mut Ui) {
     // or in the details pane, is copied as usual instead. Since egui only
     // copies that at the end of the frame, the files wait for the next one
     // to see whether it did (see `ui::clipboard::capture`).
-    let deep_search_id = deep_search_id();
+    let deep_search_id = search::deep_search_id();
     let own_box_focused = focused.is_some_and(|id| id == search_id || id == deep_search_id);
     if !modal_open
         && state.ui.files_active
@@ -522,21 +521,26 @@ pub(crate) fn file_browser(state: &mut State, ui: &mut Ui) {
         state.paste_files(ui.ctx());
     }
 
-    // Text filter on names in this dir; cleared on cd (see
-    // [State::refresh_browser_files]).
-    let search_changed = search::search_box(ui, &mut state.ui.files_search, "files_search");
-    if search_changed {
-        state.refresh_browser_files_filter();
-    }
-    deep_search_bar(state, ui);
+    ui.horizontal(|ui| {
 
-    if search_changed {
-        state.ui.rename_pending = None;
-        match state.shown_files().first().map(|p| p.to_path_buf()) {
-            Some(path) => state.select_file(&path),
-            None => state.clear_file_selection(),
+
+        // Text filter on names in this dir; cleared on cd (see
+        // [State::refresh_browser_files]).
+        let search_changed = search::search_box(ui, &mut state.ui.files_search, "files_search");
+        if search_changed {
+            state.refresh_browser_files_filter();
         }
-    }
+        ui.add_space(20.);
+        search::deep_search_bar(state, ui);
+
+        if search_changed {
+            state.ui.rename_pending = None;
+            match state.shown_files().first().map(|p| p.to_path_buf()) {
+                Some(path) => state.select_file(&path),
+                None => state.clear_file_selection(),
+            }
+        }
+    });
 
     let arrow_moved = move_selection(state, &arrows);
 
@@ -1033,10 +1037,10 @@ pub(super) fn drop_target(ui: &Ui, resp: &Response, dest: &Path) -> Option<FileD
     };
     let copy = copy_key
         || (!move_key
-            && drag
-                .0
-                .first()
-                .is_some_and(|src| !files::same_volume(src, dest)));
+        && drag
+        .0
+        .first()
+        .is_some_and(|src| !files::same_volume(src, dest)));
     let name = dest.file_name().map_or_else(
         || dest.display().to_string(),
         |n| n.to_string_lossy().into_owned(),
@@ -1162,8 +1166,8 @@ fn drag_out(state: &mut State, ui: &Ui) {
     let out = ctx.input(|i| {
         i.pointer.primary_down()
             && i.pointer
-                .latest_pos()
-                .is_none_or(|p| !i.viewport_rect().contains(p))
+            .latest_pos()
+            .is_none_or(|p| !i.viewport_rect().contains(p))
     });
     let (Some(window), Some(drag), true) = (state.main_window, drag, out) else {
         ctx.data_mut(|d| d.remove_temp::<bool>(pending_id));
@@ -1282,101 +1286,6 @@ fn sort_buttons(new_sort: &mut Option<FileSort>, files_sort: FileSort, ui: &mut 
     });
 }
 
-/// The Files panel's Deep search box, followed on its row by the switch
-/// between searching file names and contents and the regex toggle (see
-/// `crate::deep_search`). A search starts once typing pauses for
-/// [DEEP_SEARCH_DELAY], or at once on Enter (which also re-runs an
-/// unchanged one) or a toggle; clearing the box ends it. Also takes in the
-/// running search's latest results.
-fn deep_search_bar(state: &mut State, ui: &mut Ui) {
-    let now = ui.input(|i| i.time);
-    let mut run_now = false;
-    // Filenames / Contents was switched; unlike the regex toggle, it's saved.
-    let mut mode_changed = false;
-    let opts = &mut state.ui.deep_search_opts;
-
-    ui.horizontal(|ui| {
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if ui
-                .add(Button::selectable(opts.regex, ".*"))
-                .on_hover_text("Treat the Deep search as a regular expression, not plain text")
-                .clicked()
-            {
-                opts.regex = !opts.regex;
-                run_now = true;
-            }
-            // Right to left, so Contents comes before Filenames.
-            let before = opts.file_names;
-            ui.selectable_value(&mut opts.file_names, false, "Contents")
-                .on_hover_text("Match lines inside files, like `rg <search>`");
-            ui.selectable_value(&mut opts.file_names, true, "Filenames")
-                .on_hover_text(
-                    "Match file and folder names, like `rg --files` filtered by the search",
-                );
-
-            mode_changed = opts.file_names != before;
-            run_now |= mode_changed;
-
-            let what = if opts.file_names {
-                "names of every file and folder"
-            } else {
-                "contents of every file"
-            };
-
-            let resp = ui
-                .add(
-                    TextEdit::singleline(&mut state.ui.deep_search)
-                        .hint_text("Deep search")
-                        .desired_width(f32::INFINITY)
-                        .id(deep_search_id()),
-                )
-                .on_hover_text(format!(
-                    "Search the {what} in this folder and its subfolders, \
-                     as ripgrep does: hidden and .gitignored files are skipped. \
-                     Case-insensitive unless the search has a capital letter."
-                ));
-
-            if resp.changed() {
-                if state.ui.deep_search.is_empty() {
-                    run_now = true;
-                } else {
-                    state.ui.deep_search_edited = Some(now);
-                }
-            }
-
-            if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
-                run_now = true;
-            }
-        });
-    });
-
-    if mode_changed {
-        let _ = state.save();
-    }
-    if run_now {
-        state.start_deep_search(ui.ctx());
-    } else if let Some(t) = state.ui.deep_search_edited {
-        let wait = t + DEEP_SEARCH_DELAY - now;
-        if wait > 0.0 {
-            ui.ctx().request_repaint_after_secs(wait as f32);
-        } else {
-            state.start_deep_search(ui.ctx());
-        }
-    }
-    if let Some(s) = &mut state.deep_search {
-        s.poll();
-    }
-}
-
-/// The Deep search box's, for the Files panel to tell it has the keyboard.
-fn deep_search_id() -> egui::Id {
-    egui::Id::new("files_deep_search")
-}
-
-/// How long Deep search waits after the last keystroke before searching, so
-/// it doesn't walk the whole tree once per letter typed.
-const DEEP_SEARCH_DELAY: f64 = 0.3;
-
 /// The edit box that stands in for a Files row while it's being renamed.
 /// Returns `Some(true)` once editing ends with Enter or a click elsewhere,
 /// and `Some(false)` if Escape cancelled it.
@@ -1428,7 +1337,9 @@ fn name_box(
             // Like Explorer, select the name but not its extension, so typing
             // replaces just the name; a folder's whole name is selected.
             *focused = true;
+
             out.response.request_focus();
+
             let end = if select_stem {
                 Path::new(name.as_str())
                     .file_stem()
@@ -1436,6 +1347,7 @@ fn name_box(
             } else {
                 name.chars().count()
             };
+
             out.state
                 .cursor
                 .set_char_range(Some(CCursorRange::two(CCursor::new(0), CCursor::new(end))));
@@ -1445,6 +1357,5 @@ fn name_box(
             .lost_focus()
             .then(|| !ui.input(|i| i.key_pressed(Key::Escape)))
     })
-    .inner
+        .inner
 }
-
