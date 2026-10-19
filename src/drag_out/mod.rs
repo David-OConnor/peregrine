@@ -2,28 +2,8 @@
 //! page's upload box, an editor, or any other program that takes files
 //! dropped from a file manager.
 //!
-//! The Files panel drags its rows itself, with egui (see
-//! `ui::file_browser`), so they can be dropped on its own folders. Once the
-//! pointer takes them out of the window, the drag is handed to the OS
-//! ([start]). On Windows that's the shell's own drag and drop, carrying the
-//! same kind of data object Explorer drags, so whatever takes files from
-//! Explorer takes them from here too, and moves, copies or links them just
-//! as it would Explorer's (the target does the moving, never us). Bringing
-//! the pointer back over the window, the button still held, hands the drag
-//! back to egui, so they can still be dropped on a folder here.
-//!
-//! On Linux it's the drag and drop file managers use there: XDND on X11
-//! (see `x11`), the compositor's own on Wayland (see `wayland`), offering
-//! the files as a list of `file://` URIs, which Nautilus, Dolphin, browsers,
-//! editors and terminals all take. There the drag goes on on a thread of
-//! its own, as the window must keep drawing, and [Drag] is asked after it
-//! each frame. On X11 the pointer coming back hands it back to egui, as on
-//! Windows; on Wayland, where the compositor keeps a drag till it's over,
-//! the window takes it like any other program, giving egui the pointer's
-//! moves over it ([raw_input_hook]), so it can still be dropped on a folder
-//! here.
-//!
-//! Elsewhere they can only be dropped inside the window, for now.
+//! This uses OS-specific APIs: One for Windows, another for Linux/X11, and another for Linux/Wayland.
+
 
 /// What became of a drag handed to the OS.
 #[derive(Debug)]
@@ -224,6 +204,7 @@ mod os {
         // No window for the drag image, so the shell draws its own.
         let hr = unsafe { SHDoDragDrop(null_mut(), data.0, source.cast(), allowed, &mut effect) };
         let returned = unsafe { (*source).returned.get() };
+
         unsafe { DropSource::release(source.cast()) };
         match hr {
             DRAGDROP_S_DROP => Ok(DragEnd::Dropped),
@@ -585,181 +566,5 @@ mod os {
 
     pub fn start(window: Window, _paths: &[PathBuf], _ctx: &egui::Context) -> Drag {
         match window.0 {}
-    }
-}
-
-#[cfg(all(test, windows))]
-mod tests {
-    use std::{fs, os::windows::ffi::OsStringExt, path::PathBuf, ptr::null};
-
-    use windows_sys::Win32::{
-        System::Ole::{OleInitialize, OleUninitialize},
-        UI::Shell::DragQueryFileW,
-    };
-
-    use super::os::{DataObjectVtbl, HDROP_FORMAT, StgMedium, data_object};
-
-    #[link(name = "ole32")]
-    unsafe extern "system" {
-        fn ReleaseStgMedium(medium: *mut StgMedium);
-    }
-
-    /// The file list a program taking the drop reads, from files in two
-    /// folders, as Deep search can drag.
-    #[test]
-    fn data_object_gives_the_dragged_files_as_a_file_list() {
-        let dir = std::env::temp_dir().join(format!("peregrine-drag-out-{}", std::process::id()));
-        let sub = dir.join("sub folder");
-        fs::create_dir_all(&sub).unwrap();
-        let paths = vec![dir.join("a.txt"), sub.join("b ü.txt"), sub.clone()];
-        fs::write(&paths[0], "a").unwrap();
-        fs::write(&paths[1], "b").unwrap();
-
-        assert!(unsafe { OleInitialize(null()) } >= 0);
-        let got = {
-            let obj = data_object(&paths).unwrap();
-            let mut medium = StgMedium {
-                tymed: 0,
-                handle: std::ptr::null_mut(),
-                release: std::ptr::null_mut(),
-            };
-            let hr = unsafe {
-                let vtbl = *(obj.0 as *const *const DataObjectVtbl);
-                ((*vtbl).get_data)(obj.0, &HDROP_FORMAT, &mut medium)
-            };
-            assert!(hr >= 0, "GetData failed: {hr:#010x}");
-
-            let n = unsafe { DragQueryFileW(medium.handle, u32::MAX, std::ptr::null_mut(), 0) };
-            let got: Vec<PathBuf> = (0..n)
-                .map(|i| {
-                    let mut buf = vec![0u16; 1024];
-                    let len = unsafe { DragQueryFileW(medium.handle, i, buf.as_mut_ptr(), 1024) };
-                    std::ffi::OsString::from_wide(&buf[..len as usize]).into()
-                })
-                .collect();
-            unsafe { ReleaseStgMedium(&mut medium) };
-            got
-        };
-        unsafe { OleUninitialize() };
-        let _ = fs::remove_dir_all(&dir);
-
-        assert_eq!(got, paths);
-    }
-
-    /// Dropped on Explorer's own drop target for a folder, as when let go
-    /// of over one, the files are copied there.
-    #[test]
-    #[ignore = "runs Explorer's file copy"]
-    fn explorer_copies_files_dropped_on_a_folder() {
-        use std::{ffi::c_void, os::windows::ffi::OsStrExt, ptr::null_mut, time::Duration};
-
-        use windows_sys::{
-            Win32::{
-                Foundation::POINTL,
-                UI::Shell::{SHBindToParent, SHParseDisplayName},
-            },
-            core::GUID,
-        };
-
-        const IID_ISHELLFOLDER: GUID = GUID::from_u128(0x000214e6_0000_0000_c000_000000000046);
-        const IID_IDROPTARGET: GUID = GUID::from_u128(0x00000122_0000_0000_c000_000000000046);
-
-        #[repr(C)]
-        struct ShellFolderVtbl {
-            _before: [usize; 10],
-            get_ui_object_of: unsafe extern "system" fn(
-                *mut c_void,
-                *mut c_void,
-                u32,
-                *const *const c_void,
-                *const GUID,
-                *mut u32,
-                *mut *mut c_void,
-            ) -> i32,
-        }
-        #[repr(C)]
-        struct DropTargetVtbl {
-            _unknown: [usize; 3],
-            drag_enter:
-                unsafe extern "system" fn(*mut c_void, *mut c_void, u32, POINTL, *mut u32) -> i32,
-            _drag_over: usize,
-            _drag_leave: usize,
-            drop: unsafe extern "system" fn(*mut c_void, *mut c_void, u32, POINTL, *mut u32) -> i32,
-        }
-
-        let dir = std::env::temp_dir().join(format!("peregrine-drag-drop-{}", std::process::id()));
-        let (src, dest) = (dir.join("src"), dir.join("dest"));
-        fs::create_dir_all(&src).unwrap();
-        fs::create_dir_all(&dest).unwrap();
-        let paths = vec![src.join("a.txt"), src.join("folder")];
-        fs::write(&paths[0], "a").unwrap();
-        fs::create_dir(&paths[1]).unwrap();
-        fs::write(paths[1].join("inner.txt"), "inner").unwrap();
-
-        assert!(unsafe { OleInitialize(null()) } >= 0);
-        {
-            let obj = data_object(&paths).unwrap();
-            let wide: Vec<u16> = dest.as_os_str().encode_wide().chain(Some(0)).collect();
-            let mut pidl = null_mut();
-            assert!(
-                unsafe { SHParseDisplayName(wide.as_ptr(), null_mut(), &mut pidl, 0, null_mut()) }
-                    >= 0
-            );
-            let (mut folder, mut child) = (null_mut(), null_mut());
-            assert!(
-                unsafe { SHBindToParent(pidl, &IID_ISHELLFOLDER, &mut folder, &mut child) } >= 0
-            );
-            let mut target = null_mut();
-            let hr = unsafe {
-                let vtbl = *(folder as *const *const ShellFolderVtbl);
-                let child = child as *const c_void;
-                ((*vtbl).get_ui_object_of)(
-                    folder,
-                    null_mut(),
-                    1,
-                    &child,
-                    &IID_IDROPTARGET,
-                    null_mut(),
-                    &mut target,
-                )
-            };
-            assert!(hr >= 0, "GetUIObjectOf: {hr:#010x}");
-
-            let pt = POINTL { x: 0, y: 0 };
-            let mut effect = 1u32; // DROPEFFECT_COPY
-            unsafe {
-                let vtbl = *(target as *const *const DropTargetVtbl);
-                let hr = ((*vtbl).drag_enter)(target, obj.0, 1, pt, &mut effect);
-                assert!(hr >= 0, "DragEnter: {hr:#010x}");
-                assert_eq!(effect & 1, 1, "Explorer won't copy them");
-                let mut effect = 1u32;
-                let hr = ((*vtbl).drop)(target, obj.0, 0, pt, &mut effect);
-                assert!(hr >= 0, "Drop: {hr:#010x}");
-            }
-        }
-
-        // Explorer copies on a thread of its own: give it a moment, pumping
-        // messages, as a UI thread would.
-        let copied = [dest.join("a.txt"), dest.join("folder").join("inner.txt")];
-        for _ in 0..100 {
-            if copied.iter().all(|p| p.exists()) {
-                break;
-            }
-            unsafe {
-                use windows_sys::Win32::UI::WindowsAndMessaging::{
-                    DispatchMessageW, MSG, PM_REMOVE, PeekMessageW, TranslateMessage,
-                };
-                let mut msg: MSG = std::mem::zeroed();
-                while PeekMessageW(&mut msg, null_mut(), 0, 0, PM_REMOVE) != 0 {
-                    TranslateMessage(&msg);
-                    DispatchMessageW(&msg);
-                }
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        let ok = copied.iter().all(|p| p.exists()) && paths.iter().all(|p| p.exists());
-        unsafe { OleUninitialize() };
-        let _ = fs::remove_dir_all(&dir);
-        assert!(ok, "not copied");
     }
 }

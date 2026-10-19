@@ -1,4 +1,4 @@
-//! The project bar, right-aligned on the tab strip's row: a group of buttons
+//! The project bar a group of buttons
 //! for each kind of project the active tab's dir is (see [project::Project]).
 
 use egui::{
@@ -120,6 +120,7 @@ fn groups(state: &mut State, ui: &mut Ui) {
     if state.is_remote() || (branch.is_none() && !proj.cargo && !proj.python) {
         return;
     }
+
     let idle = state.running_here().is_none();
     let dir = state.cwd().to_path_buf();
     // The line to run, or why there's none.

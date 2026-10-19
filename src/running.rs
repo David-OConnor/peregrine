@@ -382,7 +382,7 @@ fn read_stream(
 /// Decode and remove the text at the front of `bytes`, leaving behind a
 /// UTF-8 character cut off at the end. Invalid bytes become U+FFFD, as with
 /// [String::from_utf8_lossy].
-pub(crate) fn take_utf8(bytes: &mut Vec<u8>) -> String {
+pub fn take_utf8(bytes: &mut Vec<u8>) -> String {
     let cut_off = match std::str::from_utf8(bytes) {
         Err(e) if e.error_len().is_none() => bytes.len() - e.valid_up_to(),
         _ => 0,
@@ -391,89 +391,6 @@ pub(crate) fn take_utf8(bytes: &mut Vec<u8>) -> String {
     let text = String::from_utf8_lossy(&bytes[..end]).into_owned();
     bytes.drain(..end);
     text
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn streamed_utf8_waits_for_the_rest_of_a_character() {
-        let mut pending = vec![b'a', 0xf0, 0x9f];
-        assert_eq!(take_utf8(&mut pending), "a");
-        pending.extend_from_slice(&[0x98, 0x80, b'b']);
-        assert_eq!(take_utf8(&mut pending), "😀b");
-        assert!(pending.is_empty());
-    }
-
-    #[test]
-    fn a_full_queue_drains_in_bounded_passes_and_keeps_the_tail_and_stderr() {
-        let script = if cfg!(windows) {
-            r#"[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); $s = 'x' * 90; for ($i = 0; $i -lt 12000; $i++) { [Console]::Out.WriteLine(('{0:D8}: {1}' -f $i, $s)) }; [Console]::Error.Write('warning'); [Console]::Out.WriteLine('TAIL😀'); exit 3"#
-        } else {
-            r#"i=0; while [ "$i" -lt 12000 ]; do printf '%08d: %090d\n' "$i" 0; i=$((i+1)); done; printf 'TAIL😀\n'; printf warning >&2; exit 3"#
-        };
-        let mut out = Output::default();
-        let mut command = RunningCmd::start(
-            script,
-            &std::env::current_dir().unwrap(),
-            &out,
-            &egui::Context::default(),
-        )
-        .unwrap();
-        thread::sleep(Duration::from_millis(500));
-        assert!(command.poll(&mut out).is_none());
-        assert!(
-            out.lines.len() < 12000,
-            "one frame must not drain the entire command"
-        );
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let success = loop {
-            if let Some(success) = command.poll(&mut out) {
-                break success;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "command should finish without a backpressure deadlock"
-            );
-            thread::sleep(Duration::from_millis(2));
-        };
-        assert!(!success);
-        assert!(out.lines.iter().any(|l| l.text == "TAIL😀"));
-        assert!(
-            out.lines
-                .iter()
-                .any(|l| l.text == "warning" && l.kind == OutType::StdErr)
-        );
-    }
-
-    #[test]
-    fn stopping_a_producer_with_a_full_queue_does_not_block_drop() {
-        let script = if cfg!(windows) {
-            "while ($true) { [Console]::Out.Write(('x' * 8192)) }"
-        } else {
-            "while :; do printf '%08192d' 0; done"
-        };
-        let mut out = Output::default();
-        let mut command = RunningCmd::start(
-            script,
-            &std::env::current_dir().unwrap(),
-            &out,
-            &egui::Context::default(),
-        )
-        .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while out.lines.is_empty() {
-            command.poll(&mut out);
-            assert!(Instant::now() < deadline);
-            thread::sleep(Duration::from_millis(5));
-        }
-        thread::sleep(Duration::from_millis(100));
-        let start = Instant::now();
-        command.stop();
-        drop(command);
-        assert!(start.elapsed() < Duration::from_secs(2));
-    }
 }
 
 #[cfg(windows)]

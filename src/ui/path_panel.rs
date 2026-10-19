@@ -1,4 +1,4 @@
-//! The PATH panel: edits the PATH each [Scope] keeps (see `crate::path_env`)
+//! The system PATH panel: edits the PATH each [Scope] keeps (see `crate::path_env`)
 //! one directory per row, like Windows' "Edit environment variable" dialog,
 //! though PATH itself is a single string. It's shown in a window of its own
 //! (see [path_window]) rather than as a side panel.

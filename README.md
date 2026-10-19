@@ -141,3 +141,6 @@ On Mac, use **Cmd** in place of **Ctrl**, except for the **Ctrl + Tab** and **Ct
 - **Ctrl + Shift + Tab** or **Ctrl + PageUp**: Previous tab. On Mac, also **Cmd + Option + Left**
 - **Ctrl + 1** to **Ctrl + 8**: Jump to that tab, counting from the left
 - **Ctrl + 9**: Jump to the last tab
+
+### Bookmarks
+- **Alt + 0** to **Alt + 9**: Go to that bookmark, by its number in the Bookmarks panel. (Same as `bm 1` etc in the CLI.) On Mac, **Cmd + Option + 0** to **9**

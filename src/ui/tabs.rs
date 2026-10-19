@@ -14,11 +14,7 @@ use crate::{
     render_with_tilde,
     state::State,
     ui,
-    ui::{
-        TAB_ACTIVE_FILL, TAB_ACTIVE_TEXT, TAB_BAR_FILL_DARK, TAB_BAR_FILL_LIGHT,
-        TAB_DROP_MARKER_WIDTH, TAB_GAP, TAB_SECTION_MARGIN, TAB_SECTION_ROUNDING, TAB_WIDTH, dirs,
-        dirs::cleanup_missing_button, project_bar, tab_keys,
-    },
+    ui::{dirs, dirs::cleanup_missing_button, project_bar, tab_keys},
 };
 
 /// One [TAB_WIDTH]-wide tab of the top strip. The label is laid out by hand
@@ -351,3 +347,24 @@ pub fn tabs_bar(state: &mut State, ui: &mut Ui) {
         state.connect_remote(i);
     }
 }
+
+/// Width of every tab in the top strip, its `x` included. Longer labels are
+/// cut off at the edge (no ellipsis). See [tab_button].
+const TAB_WIDTH: f32 = 120.;
+/// Gap either side of the separator between tabs in the top strip, and the
+/// separator's own width. See [tabs_bar].
+const TAB_GAP: f32 = 2.;
+/// The active tab's fill and label colour: purple, so it can't be mistaken
+/// for the blue "on" state of the panel toggles below. See [tab_button].
+const TAB_ACTIVE_FILL: Color32 = Color32::from_rgb(128, 64, 208);
+const TAB_ACTIVE_TEXT: Color32 = Color32::WHITE;
+/// Background of the tab section of the top strip (the tabs and `+ tab`),
+/// setting it apart from the controls beside it and the panel-toggle row
+/// beneath. A deep violet or a light lavender, per theme. See [tabs_bar].
+const TAB_BAR_FILL_DARK: Color32 = Color32::from_rgb(36, 28, 66);
+const TAB_BAR_FILL_LIGHT: Color32 = Color32::from_rgb(226, 220, 248);
+/// Padding between that background's edge and the tabs, and its rounding.
+const TAB_SECTION_MARGIN: egui::Margin = egui::Margin::symmetric(6, 3);
+const TAB_SECTION_ROUNDING: u8 = 4;
+/// Width of the line marking where a dragged tab will land. See [tabs_bar].
+const TAB_DROP_MARKER_WIDTH: f32 = 2.;

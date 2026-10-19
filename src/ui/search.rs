@@ -207,7 +207,7 @@ pub fn deep_search_results(
                                     base.color = c;
                                 }
                             }
-                            ui::append_highlighted(&mut job, &path, &ranges, &base, &hl);
+                            append_highlighted(&mut job, &path, &ranges, &base, &hl);
                             job.into()
                         }
                         Row::File(_) => {
@@ -221,7 +221,7 @@ pub fn deep_search_results(
                                 hit.lines.last().map_or(1, |l| l.line_num.to_string().len());
                             let mut job = LayoutJob::default();
                             job.append(&format!("  {:>width$}: ", m.line_num), 0.0, weak.clone());
-                            ui::append_highlighted(&mut job, &m.text, &m.ranges, &plain, &hl);
+                            append_highlighted(&mut job, &m.text, &m.ranges, &plain, &hl);
                             job.into()
                         }
                     };
@@ -353,4 +353,22 @@ pub fn deep_search_bar(state: &mut State, ui: &mut Ui) {
 /// The Deep search box's, for the Files panel to tell it has the keyboard.
 pub fn deep_search_id() -> egui::Id {
     egui::Id::new("files_deep_search")
+}
+
+/// Append `text` to `job` in the `plain` format, except for its byte
+/// `ranges` (in order, not overlapping), which get `hl`.
+fn append_highlighted(
+    job: &mut LayoutJob,
+    text: &str,
+    ranges: &[std::ops::Range<usize>],
+    plain: &TextFormat,
+    hl: &TextFormat,
+) {
+    let mut at = 0;
+    for r in ranges {
+        job.append(&text[at..r.start], 0.0, plain.clone());
+        job.append(&text[r.clone()], 0.0, hl.clone());
+        at = r.end;
+    }
+    job.append(&text[at..], 0.0, plain.clone());
 }

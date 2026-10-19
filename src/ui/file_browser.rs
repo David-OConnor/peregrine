@@ -14,61 +14,15 @@ use crate::{
     state::{FileCreate, FileRename, State},
     ui,
     ui::{
-        COLOR_EXECUTABLE, FILES_COL_MIN_CHARS, ListAction,
+        ListAction,
         dirs::{BOOKMARKED_TEXT, bookmarked_fill},
         search,
     },
     viewer,
 };
 
-/// Files in the active tab's cwd, as a selectable list. Folders are
-/// sorted first (then by the Name / Modified / Type / Size buttons) and
-/// prefixed with 📁, on green when bookmarked (as in
-/// Recent dirs); executable files (Unix +x, or
-/// Windows `.exe`/`.msi`) are coloured green. The listing is refreshed
-/// by [State::refresh_browser_files] on every cwd change and after every
-/// command, so we just read what's already there. The search box under the
-/// hidden/dotfile toggles narrows the listing by name and selects the first
-/// match as it's edited. Enter opens the selected row, just like a double-click.
-/// When the panel is wide enough (see [FILES_COL_MIN_CHARS]) the list is laid
-/// out in as many columns as fit. The arrow keys move the selection as the
-/// rows are laid out (see [arrow_target]); Up and Down work from the search
-/// box too.
-///
-/// Clicking a row selects it, and the pane at the bottom of the panel shows
-/// its details (see [ui::file_details]), with a picture of an image under
-/// them. As in a file manager, Ctrl+click adds a row to the selection (or
-/// takes it out), Shift+click or Shift+arrow selects the rows from the one
-/// last clicked, Ctrl+A selects them all, and a click on the background,
-/// Escape or the Unselect button (shown while anything's selected) selects
-/// none; the pane then totals up what's selected. The divider above
-/// that pane drags up and down (see [ui::Divider]).
-/// Double-clicking a folder row navigates into
-/// it (same path as clicking a bookmark or recent dir), and middle-clicking
-/// opens it in a new tab; double-clicking a
-/// Markdown or plain-text (`.txt`, `.gitignore`, `.gitattributes`, `LICENSE`)
-/// file opens it in a viewer
-/// window (see `crate::viewer`); any other file opens with the OS's default
-/// associated program (see
-/// [open_with_default_app]). Clicking the already-selected row again renames
-/// it in place (see [rename_box]): Enter or clicking away applies the new
-/// name, Escape cancels.
-///
-/// Cut / Copy (or Ctrl+X / C) put the selected rows on the OS clipboard, and
-/// Paste (Ctrl+V) copies or moves the files there into this dir, so files
-/// can go to and from the OS file manager too (see `crate::clipboard`).
-/// Delete (or the red trash button) confirms before moving the selected
-/// files and folders to the OS's Recycle Bin / Trash.
-/// Dragging rows onto a folder (or onto ⬆ or a shortcut button) moves them
-/// there, or copies them with Ctrl held (see [drop_target]). Dragged out of
-/// the window, they can be dropped on other programs, as Explorer's can (see
-/// [drag_out()]).
-///
-/// +📁 (or Ctrl+Shift+N) and +🗋 make a new folder or empty file in this
-/// dir, as `mkdir` and `touch` do: it's named in an edit box above the
-/// listing (see [create_box]), and Enter or clicking away makes it and
-/// selects it, while Escape or a blank name makes nothing.
-pub(crate) fn file_browser(state: &mut State, ui: &mut Ui) {
+/// Primary component for the file browser pane.
+pub(super) fn file_browser(state: &mut State, ui: &mut Ui) {
     // Measured before anything is laid out, so the details pane's share is
     // of the whole panel rather than of what's left under the header.
     let split = &mut state.ui.files_details_split;
@@ -298,8 +252,8 @@ pub(crate) fn file_browser(state: &mut State, ui: &mut Ui) {
                     }
                 }
             })
-                .response
-                .on_hover_text("This PC: devices and drives");
+            .response
+            .on_hover_text("This PC: devices and drives");
             if ui
                 .button("🗑")
                 .on_hover_text("Recycle Bin (opens in Explorer)")
@@ -523,8 +477,6 @@ pub(crate) fn file_browser(state: &mut State, ui: &mut Ui) {
 
     let mut search_changed = false;
     ui.horizontal_wrapped(|ui| {
-
-
         // Text filter on names in this dir; cleared on cd (see
         // [State::refresh_browser_files]).
         search_changed = search::search_box(ui, &mut state.ui.files_search, "files_search");
@@ -909,6 +861,7 @@ pub(super) fn row_action(
     if resp.drag_started_by(egui::PointerButton::Primary) {
         return Some(RowAction::Drag(path));
     }
+
     // A double-click's first click has already selected the row. Then a
     // folder navigates into it; a file opens with its associated program,
     // just like a desktop file manager. A middle click opens a folder in a
@@ -1038,19 +991,21 @@ pub(super) fn drop_target(ui: &Ui, resp: &Response, dest: &Path) -> Option<FileD
     };
     let copy = copy_key
         || (!move_key
-        && drag
-        .0
-        .first()
-        .is_some_and(|src| !files::same_volume(src, dest)));
+            && drag
+                .0
+                .first()
+                .is_some_and(|src| !files::same_volume(src, dest)));
     let name = dest.file_name().map_or_else(
         || dest.display().to_string(),
         |n| n.to_string_lossy().into_owned(),
     );
+
     ui.ctx()
         .data_mut(|d| d.insert_temp(drop_hover_id(), DropHover { name, copy, ok }));
     if !ok {
         return None;
     }
+
     let visuals = ui.visuals();
     let stroke = Stroke::new(2.0, visuals.widgets.active.fg_stroke.color);
     let radius = visuals.widgets.hovered.corner_radius;
@@ -1167,8 +1122,8 @@ fn drag_out(state: &mut State, ui: &Ui) {
     let out = ctx.input(|i| {
         i.pointer.primary_down()
             && i.pointer
-            .latest_pos()
-            .is_none_or(|p| !i.viewport_rect().contains(p))
+                .latest_pos()
+                .is_none_or(|p| !i.viewport_rect().contains(p))
     });
     let (Some(window), Some(drag), true) = (state.main_window, drag, out) else {
         ctx.data_mut(|d| d.remove_temp::<bool>(pending_id));
@@ -1358,5 +1313,12 @@ fn name_box(
             .lost_focus()
             .then(|| !ui.input(|i| i.key_pressed(Key::Escape)))
     })
-        .inner
+    .inner
 }
+
+// Executable-file colour in the file-browser column.
+pub const COLOR_EXECUTABLE: Color32 = Color32::from_rgb(120, 220, 120);
+/// The Files list splits into as many columns as fit at least this many
+/// monospace characters each (so the threshold follows the GUI font size).
+/// See [ui::file_browser] and [ui::list_columns].
+const FILES_COL_MIN_CHARS: f32 = 26.;

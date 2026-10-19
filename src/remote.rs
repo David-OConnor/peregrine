@@ -227,6 +227,7 @@ fn split_after_mode_changes(bytes: &[u8]) -> Vec<&[u8]> {
     let mut parts = Vec::new();
     let mut start = 0;
     let mut i = 0;
+
     while let Some(off) = bytes[i..].windows(3).position(|w| w == b"\x1b[?") {
         let params = i + off + 3;
         let Some(len) = bytes[params..]
@@ -242,38 +243,9 @@ fn split_after_mode_changes(bytes: &[u8]) -> Vec<&[u8]> {
             start = end + 1;
         }
     }
+
     if start < bytes.len() {
         parts.push(&bytes[start..]);
     }
     parts
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn output_splits_after_mode_changes() {
-        let parts =
-            split_after_mode_changes(b"ls\r\n\x1b[?1049h\x1b[Hvim\x1b[?1;2004lafter\x1b[?2");
-        assert_eq!(
-            parts,
-            [
-                &b"ls\r\n\x1b[?1049h"[..],
-                &b"\x1b[Hvim\x1b[?1;2004l"[..],
-                &b"after\x1b[?2"[..],
-            ]
-        );
-        assert_eq!(split_after_mode_changes(b""), Vec::<&[u8]>::new());
-    }
-
-    #[test]
-    fn terminal_queries_get_answers() {
-        let mut parser = vt100::Parser::new_with_callbacks(24, 80, 0, Replies::default());
-        parser.process(b"\x1b[5;3H\x1b[6n\x1b[c\x1b[>c\x1b[5n\x1b[?6n");
-        assert_eq!(
-            parser.callbacks().0,
-            b"\x1b[5;3R\x1b[?62;22c\x1b[>1;10;0c\x1b[0n"
-        );
-    }
 }

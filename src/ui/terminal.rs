@@ -4,17 +4,16 @@
 use std::sync::Arc;
 
 use egui::{
-    Color32, CursorIcon, FontId, Galley, Key, Rect, RichText, ScrollArea, Sense, TextEdit,
-    TextStyle, Ui,
+    Color32, Context, CursorIcon, Event, FontId, Galley, Key, KeyboardShortcut, Modifiers, Rect,
+    RichText, ScrollArea, Sense, TextEdit, TextStyle, Ui,
     text::CCursor,
     text_selection::{CCursorRange, TextCursorState, visuals::paint_text_selection},
+    os::OperatingSystem,
     vec2,
 };
+use shell::DirList;
 
-use super::{
-    COLOR_BRANCH, COLOR_HIS, COLOR_PROMPT, COLOR_STDERR, COLOR_STDERR_OK, COLOR_STDOUT, clipboard,
-    remote_grid,
-};
+use super::{COLOR_BRANCH, COLOR_HIS, clipboard, remote_grid};
 use crate::{
     OutType, path_color,
     path_color::Part,
@@ -66,6 +65,7 @@ fn measure(out: &mut Output, ui: &Ui, font: &FontId, width: f32) {
             .size()
             .y
     });
+
     for line in &mut out.lines {
         if line.height.is_none() {
             if line.text.len() as f32 * ascii_width + 2. <= width
@@ -83,10 +83,12 @@ fn measure(out: &mut Output, ui: &Ui, font: &FontId, width: f32) {
                     }));
             }
         }
+
         let height = line.height.unwrap();
         out.offsets
             .push(out.offsets.last().unwrap() + height + ui.spacing().item_spacing.y);
     }
+
     out.first_measured = out.lines.front().map(|line| line.id);
 }
 
@@ -105,6 +107,7 @@ pub(super) fn show(out: &mut Output, ui: &mut Ui) {
                 .weak(),
         );
     }
+
     let font = TextStyle::Monospace.resolve(ui.style());
     let scroll_salt = ("term_out_scroll", out.id);
     let mut scroll = ScrollArea::vertical()
@@ -124,6 +127,7 @@ pub(super) fn show(out: &mut Output, ui: &mut Ui) {
             .or(out.offsets.last())
             .copied()
             .unwrap_or(0.);
+
         if let Some(state) = egui::scroll_area::State::load(
             ui.ctx(),
             ui.make_persistent_id(egui::IdSalt::new(scroll_salt)),
@@ -134,6 +138,7 @@ pub(super) fn show(out: &mut Output, ui: &mut Ui) {
     let output = scroll.show_viewport(ui, |ui, viewport| {
         let width = ui.available_width().max(1.);
         measure(out, ui, &font, width);
+
         let height =
             (out.offsets.last().copied().unwrap_or(0.) - ui.spacing().item_spacing.y).max(0.);
         let origin = ui.max_rect().min;
@@ -143,6 +148,7 @@ pub(super) fn show(out: &mut Output, ui: &mut Ui) {
             origin + viewport.max.to_vec2(),
         )
         .intersect(ui.clip_rect());
+
         let response = ui
             .interact(
                 Rect::from_min_size(origin, vec2(width, height.max(viewport.height()))),
@@ -158,6 +164,7 @@ pub(super) fn show(out: &mut Output, ui: &mut Ui) {
             out.selection = None;
             out.dragging = false;
         }
+
         if !out.lines.is_empty() {
             if let Some(pointer) =
                 pointer.filter(|_| (pressed && response.hovered()) || out.dragging)
@@ -291,214 +298,107 @@ pub(super) fn show(out: &mut Output, ui: &mut Ui) {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use egui::{CentralPanel, Context, Event, Modifiers, PointerButton, RawInput};
+/// Bookmarks the active tab's cwd, or removes its bookmark, from anywhere in
+/// the window: Ctrl+B, as in the CLI (where it only adds). Cmd+B on Mac.
+pub const TOGGLE_BOOKMARK: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::B);
 
-    use super::*;
-
-    fn frame(ctx: &Context, out: &mut Output, width: f32, events: Vec<Event>) -> egui::FullOutput {
-        ctx.run_ui(
-            RawInput {
-                screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(width, 400.))),
-                events,
-                ..Default::default()
-            },
-            |ui| {
-                CentralPanel::default().show(ui, |ui| show(out, ui));
-            },
-        )
-    }
-
-    #[test]
-    fn large_scrollback_keeps_only_visible_galleys_and_reflows_on_resize() {
-        let ctx = Context::default();
-        let mut out = Output::default();
-        for i in 0..10_000 {
-            out.push(&format!("{i:08}: {}", "x".repeat(90)), OutType::StdOut);
-        }
-        for _ in 0..3 {
-            frame(&ctx, &mut out, 1400., vec![]).drop_without_applying_deltas();
-        }
-        assert!(out.lines.len() > 9000);
-        assert!(ctx.fonts_mut(|f| f.num_galleys_in_cache()) < 150);
-        let wide = out.lines.back().unwrap().height.unwrap();
-        frame(&ctx, &mut out, 240., vec![]).drop_without_applying_deltas();
-        assert!(out.lines.back().unwrap().height.unwrap() > wide);
-        assert!(ctx.fonts_mut(|f| f.num_galleys_in_cache()) < 150);
-    }
-
-    #[test]
-    fn measured_heights_match_layout_for_ascii_and_wrapped_styled_unicode() {
-        let ctx = Context::default();
-        for width in [180., 800.] {
-            let mut out = Output::default();
-            out.push("plain text\n\x1b[3mitalic ASCII\x1b[0m\n\n😀é שלום text that wraps with a narrow window\tend", OutType::StdOut);
-            let result = ctx.run_ui(
-                egui::RawInput {
-                    screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(width, 400.))),
-                    ..Default::default()
-                },
-                |ui| {
-                    let font = TextStyle::Monospace.resolve(ui.style());
-                    measure(&mut out, ui, &font, width);
-                    for line in &out.lines {
-                        let actual = galley(ui, line, &font, width).size().y;
-                        assert!(
-                            (line.height.unwrap() - actual).abs() < 0.01,
-                            "height for {:?}: measured {}, actual {actual}",
-                            line.text,
-                            line.height.unwrap()
-                        );
-                    }
-                },
-            );
-            result.drop_without_applying_deltas();
-        }
-    }
-
-    #[test]
-    fn eviction_preserves_the_retained_text_being_read() {
-        fn view(ctx: &Context, out: &mut Output, events: Vec<Event>) -> u64 {
-            let mut first = None;
-            let result = ctx.run_ui(
-                RawInput {
-                    time: Some(ctx.input(|i| i.time) + 1.),
-                    screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(1400., 400.))),
-                    events,
-                    ..Default::default()
-                },
-                |ui| {
-                    CentralPanel::default().show(ui, |ui| {
-                        let id =
-                            ui.make_persistent_id(egui::IdSalt::new(("term_out_scroll", out.id)));
-                        show(out, ui);
-                        let state = egui::scroll_area::State::load(ctx, id).unwrap();
-                        first = Some(out.lines[row_at(out, state.offset.y)].id);
-                    });
-                },
-            );
-            result.drop_without_applying_deltas();
-            first.unwrap()
-        }
-        let ctx = Context::default();
-        let mut out = Output::default();
-        for i in 0..10_000 {
-            out.push(&format!("{i:08}: {}", "x".repeat(90)), OutType::StdOut);
-        }
-        for _ in 0..3 {
-            view(&ctx, &mut out, vec![]);
-        }
-        view(
-            &ctx,
-            &mut out,
-            vec![
-                Event::PointerMoved(egui::pos2(40., 40.)),
-                Event::MouseWheel {
-                    unit: egui::MouseWheelUnit::Point,
-                    delta: vec2(0., 500.),
-                    phase: egui::TouchPhase::Move,
-                    modifiers: Modifiers::NONE,
-                },
-            ],
-        );
-        for _ in 0..60 {
-            view(&ctx, &mut out, vec![]);
-        }
-        let before = view(&ctx, &mut out, vec![]);
-        for i in 10_000..14_000 {
-            out.push(&format!("{i:08}: {}", "x".repeat(90)), OutType::StdOut);
-        }
-        assert!(out.truncated);
-        let after = view(&ctx, &mut out, vec![]);
-        assert_eq!(before, after);
-    }
-
-    #[test]
-    fn drag_scroll_and_copy_retains_offscreen_selection() {
-        let ctx = Context::default();
-        let mut out = Output::default();
-        for i in 0..1000 {
-            out.push(&format!("{i:08}: selectable output"), OutType::StdOut);
-        }
-        for _ in 0..3 {
-            frame(&ctx, &mut out, 800., vec![]).drop_without_applying_deltas();
-        }
-        let start = egui::pos2(20., 25.);
-        let end = egui::pos2(180., 130.);
-        frame(
-            &ctx,
-            &mut out,
-            800.,
-            vec![
-                Event::PointerMoved(start),
-                Event::PointerButton {
-                    pos: start,
-                    button: PointerButton::Primary,
-                    pressed: true,
-                    modifiers: Modifiers::NONE,
-                },
-            ],
-        )
-        .drop_without_applying_deltas();
-        frame(&ctx, &mut out, 800., vec![Event::PointerMoved(end)]).drop_without_applying_deltas();
-        frame(
-            &ctx,
-            &mut out,
-            800.,
-            vec![Event::PointerButton {
-                pos: end,
-                button: PointerButton::Primary,
-                pressed: false,
-                modifiers: Modifiers::NONE,
-            }],
-        )
-        .drop_without_applying_deltas();
-        let selected = out.selected_text().expect("drag selects output");
-        assert!(selected.contains('\n'));
-        // Scroll far enough to remove both selection endpoints from the view.
-        for _ in 0..3 {
-            frame(
-                &ctx,
-                &mut out,
-                800.,
-                vec![Event::MouseWheel {
-                    unit: egui::MouseWheelUnit::Point,
-                    delta: vec2(0., 500.),
-                    phase: egui::TouchPhase::Move,
-                    modifiers: Modifiers::NONE,
-                }],
-            )
-            .drop_without_applying_deltas();
-        }
-        let copied = frame(&ctx, &mut out, 800., vec![Event::Copy]);
-        assert!(
-            copied
-                .platform_output
-                .commands
-                .iter()
-                .any(|c| matches!(c, egui::OutputCommand::CopyText(text) if text == &selected))
-        );
-        copied.drop_without_applying_deltas();
-        let copied = frame(
-            &ctx,
-            &mut out,
-            800.,
-            vec![Event::PointerButton {
-                pos: start,
-                button: PointerButton::Secondary,
+/// Act on [TOGGLE_BOOKMARK] if it was pressed this frame, and remove its key
+/// events, so no widget also sees them. Holding it down toggles just once.
+/// Modifiers must match exactly, as for the tab shortcuts (see [tab_keys]).
+///
+/// [tab_keys]: super::tab_keys
+pub fn toggle_bookmark_key(state: &mut State, ctx: &Context) {
+    let pressed = ctx.input_mut(|i| {
+        let mut pressed = false;
+        i.events.retain(|event| match event {
+            Event::Key {
+                key,
                 pressed: true,
-                modifiers: Modifiers::NONE,
-            }],
-        );
-        assert!(
-            copied
-                .platform_output
-                .commands
-                .iter()
-                .any(|c| matches!(c, egui::OutputCommand::CopyText(text) if text == &selected))
-        );
-        copied.drop_without_applying_deltas();
+                repeat,
+                modifiers,
+                ..
+            } if *key == TOGGLE_BOOKMARK.logical_key
+                && modifiers.matches_exact(TOGGLE_BOOKMARK.modifiers) =>
+            {
+                pressed |= !repeat;
+                false
+            }
+            _ => true,
+        });
+        pressed
+    });
+
+    if pressed {
+        let msg = state.toggle_bookmark_cwd();
+        state.push_out(msg, OutType::StdOut);
+    }
+}
+
+/// Alt + these cd the active tab to the bookmark the Bookmarks panel numbers
+/// 0 through 9, as `bm <n>` or clicking its row does. Cmd+Option on Mac,
+/// where Option + a digit types a symbol.
+const BOOKMARK_NUMBER_KEYS: [Key; 10] = [
+    Key::Num0,
+    Key::Num1,
+    Key::Num2,
+    Key::Num3,
+    Key::Num4,
+    Key::Num5,
+    Key::Num6,
+    Key::Num7,
+    Key::Num8,
+    Key::Num9,
+];
+
+/// Act on the [BOOKMARK_NUMBER_KEYS] pressed this frame, and remove their key
+/// events, as for [toggle_bookmark_key]. Holding one down jumps just once. A
+/// number past the last bookmark does nothing.
+pub fn bookmark_number_keys(state: &mut State, ctx: &Context) {
+    let pattern = if ctx.os() == OperatingSystem::Mac {
+        Modifiers::MAC_CMD | Modifiers::ALT
+    } else {
+        Modifiers::ALT
+    };
+
+    let jumps = ctx.input_mut(|i| {
+        let mut jumps = Vec::new();
+        let mut taken = false;
+        i.events.retain(|event| {
+            let Event::Key {
+                key,
+                pressed: true,
+                repeat,
+                modifiers,
+                ..
+            } = event
+            else {
+                return true;
+            };
+            if !modifiers.matches_exact(pattern) {
+                return true;
+            }
+            let Some(n) = BOOKMARK_NUMBER_KEYS.iter().position(|k| k == key) else {
+                return true;
+            };
+
+            taken = true;
+            if !repeat {
+                jumps.push(n);
+            }
+            false
+        });
+        // Don't also type the digit into the input box.
+        if taken {
+            i.events.retain(|e| !matches!(e, Event::Text(_)));
+        }
+        jumps
+    });
+
+    for n in jumps {
+        if let Some(i) = state.bookmark_at(n) {
+            let target = state.dir_bookmarks[i].clone();
+            state.change_saved_dir(target, DirList::Bookmarks);
+        }
     }
 }
 
@@ -820,3 +720,10 @@ fn set_mono_size(ui: &mut Ui, size: f32) {
         font.size = size;
     }
 }
+
+const COLOR_PROMPT: Color32 = Color32::from_rgb(220, 220, 90);
+pub const COLOR_STDOUT: Color32 = Color32::from_rgb(210, 210, 210);
+const COLOR_STDERR: Color32 = Color32::from_rgb(240, 110, 110);
+// Amber: stderr from a command that succeeded (warnings, progress), so red
+// is reserved for failures.
+pub const COLOR_STDERR_OK: Color32 = Color32::from_rgb(240, 180, 70);

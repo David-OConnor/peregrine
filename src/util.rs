@@ -156,10 +156,11 @@ pub fn handle_cmd(state: &mut State, cmd: &str, input: &str, args: &str, ctx: &e
                 None => (args, ""),
             };
             match sub {
+                // Numbered as the Bookmarks panel shows them, in its sort order.
                 "bm" => match rest.parse::<usize>() {
                     Ok(idx) => {
-                        if idx < state.dir_bookmarks.len() {
-                            let path = state.dir_bookmarks.remove(idx);
+                        if let Some(i) = state.bookmark_at(idx) {
+                            let path = state.dir_bookmarks.remove(i);
                             state.refresh_bookmarks_filter();
                             state.push_out(
                                 format!("Deleted bookmark: {}", path.display()),
@@ -225,8 +226,11 @@ pub fn handle_cmd(state: &mut State, cmd: &str, input: &str, args: &str, ctx: &e
         }
 
         "bm" => {
+            // As for `del bm`, a number is the one the Bookmarks panel shows.
             let resolved = if let Ok(idx) = args.parse::<usize>() {
-                state.dir_bookmarks.get(idx).cloned()
+                state
+                    .bookmark_at(idx)
+                    .map(|i| state.dir_bookmarks[i].clone())
             } else if !args.is_empty() {
                 find_bookmark(&state.dir_bookmarks, args)
             } else {

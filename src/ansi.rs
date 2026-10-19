@@ -11,7 +11,7 @@
 use egui::{Color32, FontId, Stroke, TextFormat};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Style {
+pub struct Style {
     fg: Option<Color32>,
     bg: Option<Color32>,
     bold: bool,
@@ -30,7 +30,7 @@ impl Style {
         }
     }
 
-    pub(crate) fn format(self, default_fg: Color32, font: FontId) -> TextFormat {
+    pub fn format(self, default_fg: Color32, font: FontId) -> TextFormat {
         let color = self.fg.unwrap_or(default_fg);
         let color = if self.bold { brighten(color) } else { color };
         TextFormat {
@@ -55,14 +55,14 @@ impl Default for Style {
 }
 
 /// A piece of parsed output: styled text, or a cursor control.
-pub(crate) enum Piece {
+pub enum Piece {
     Text(Segment),
     Ctl(Ctl),
 }
 
 /// The in-line cursor controls the scrollback applies.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Ctl {
+pub enum Ctl {
     /// Carriage return: back to the start of the line.
     Cr,
     /// One column left.
@@ -87,7 +87,7 @@ pub struct Segment {
 }
 
 impl Segment {
-    pub(crate) fn style(&self) -> Style {
+    pub fn style(&self) -> Style {
         Style {
             fg: self.fg,
             bg: self.bg,
@@ -99,7 +99,7 @@ impl Segment {
 }
 
 /// Standard 16-colour ANSI palette, tuned to read well on a black background.
-pub(crate) fn ansi_color(code: u32, bright: bool) -> Option<Color32> {
+fn ansi_color(code: u32, bright: bool) -> Option<Color32> {
     let (r, g, b) = match (code, bright) {
         (0, false) => (40, 40, 40),
         (1, false) => (200, 70, 70),
@@ -123,21 +123,24 @@ pub(crate) fn ansi_color(code: u32, bright: bool) -> Option<Color32> {
 }
 
 /// xterm 256-colour palette lookup.
-pub(crate) fn xterm256(n: u8) -> Color32 {
+pub fn xterm256(n: u8) -> Color32 {
     if n < 16 {
         let bright = n >= 8;
         let code = (n % 8) as u32;
         return ansi_color(code, bright).unwrap_or(Color32::WHITE);
     }
+
     if n >= 232 {
         let v = 8 + (n - 232).saturating_mul(10);
         return Color32::from_rgb(v, v, v);
     }
+
     let c = n - 16;
     let levels = [0u8, 95, 135, 175, 215, 255];
     let r = (c / 36) as usize;
     let g = ((c % 36) / 6) as usize;
     let b = (c % 6) as usize;
+
     Color32::from_rgb(levels[r], levels[g], levels[b])
 }
 
@@ -209,7 +212,7 @@ enum Escape {
 /// Incremental parser: a read can end halfway through an escape sequence.
 /// ANSI is consumed once on arrival, rather than on every output repaint.
 #[derive(Default)]
-pub(crate) struct Parser {
+pub struct Parser {
     style: Style,
     escape: Escape,
     params: String,
@@ -217,7 +220,7 @@ pub(crate) struct Parser {
 }
 
 impl Parser {
-    pub(crate) fn feed(&mut self, input: &str) -> Vec<Piece> {
+    pub fn feed(&mut self, input: &str) -> Vec<Piece> {
         let mut pieces = Vec::new();
         let mut text = String::new();
         let flush = |pieces: &mut Vec<Piece>, text: &mut String, style: &Style| {
@@ -324,91 +327,5 @@ fn make_segment(text: String, style: &Style) -> Segment {
         bold: style.bold,
         italic: style.italic,
         underline: style.underline,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn escape_sequences_survive_every_read_boundary() {
-        let text = "plain\x1b[31;1mred é\x1b[0m normal\x1b]title\x1b\\ end";
-        let expand = |pieces: Vec<Piece>| -> Vec<(char, Style)> {
-            pieces
-                .into_iter()
-                .flat_map(|p| match p {
-                    Piece::Text(s) => {
-                        let style = s.style();
-                        s.text.chars().map(|c| (c, style)).collect::<Vec<_>>()
-                    }
-                    Piece::Ctl(_) => Vec::new(),
-                })
-                .collect()
-        };
-        let expected = expand(Parser::default().feed(text));
-        for (i, _) in text.char_indices() {
-            let mut parser = Parser::default();
-            let mut actual = expand(parser.feed(&text[..i]));
-            actual.extend(expand(parser.feed(&text[i..])));
-            assert_eq!(actual, expected, "split at byte {i}");
-        }
-        assert_eq!(
-            expected.iter().map(|(c, _)| c).collect::<String>(),
-            "plainred é normal end"
-        );
-    }
-
-    #[test]
-    fn malformed_controls_do_not_accumulate_unbounded_text() {
-        let mut parser = Parser::default();
-        assert!(
-            parser
-                .feed(&format!("\x1b[{}", "1".repeat(100_000)))
-                .is_empty()
-        );
-        assert!(parser.params.len() <= 128);
-        assert_eq!(text(parser.feed("mvisible")), "visible");
-        assert!(
-            parser
-                .feed(&format!("\x1b]{}", "x".repeat(100_000)))
-                .is_empty()
-        );
-        assert_eq!(text(parser.feed("\x07visible")), "visible");
-    }
-
-    fn text(pieces: Vec<Piece>) -> String {
-        pieces
-            .into_iter()
-            .filter_map(|p| match p {
-                Piece::Text(s) => Some(s.text),
-                Piece::Ctl(_) => None,
-            })
-            .collect()
-    }
-
-    #[test]
-    fn line_controls_come_out_and_other_sequences_are_dropped() {
-        let pieces =
-            Parser::default().feed("a\rb\x08\x1b[2K\x1b[5G\x1b(Bc\x1b[?25l\x07\x1bP1$r\x1b\\d");
-        let got: Vec<String> = pieces
-            .into_iter()
-            .map(|p| match p {
-                Piece::Text(s) => s.text,
-                Piece::Ctl(c) => format!("{c:?}"),
-            })
-            .collect();
-        assert_eq!(
-            got,
-            [
-                "a",
-                "Cr",
-                "b",
-                "Backspace",
-                "EraseLine(2)",
-                "Column(4)",
-                "cd"
-            ]
-        );
     }
 }

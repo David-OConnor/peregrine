@@ -56,6 +56,7 @@ pub fn cmd_history(state: &mut State, ui: &mut Ui) {
                 let Some(item) = state.history.get(i) else {
                     return;
                 };
+
                 let label = ui::cmd_label(ui, &state.cmd_colors, i, &item.text);
                 let btn = Button::new(label)
                     .wrap()
@@ -66,6 +67,7 @@ pub fn cmd_history(state: &mut State, ui: &mut Ui) {
                 if !show_dir {
                     return;
                 }
+
                 // "In <leaf>" sits on its own row underneath so it
                 // doesn't fight the wrapping command-text button for
                 // horizontal space.
@@ -79,6 +81,7 @@ pub fn cmd_history(state: &mut State, ui: &mut Ui) {
                 } else {
                     leaf
                 };
+
                 if ui.small_button(format!("In {leaf}")).clicked() {
                     action = Some(ListAction::RunHistoryInDir(i));
                 }

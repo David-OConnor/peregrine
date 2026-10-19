@@ -7,10 +7,10 @@ use std::{
 
 use chrono::Utc;
 use shell::{
-    Appearance, BrowserFile, CmdHistoryPrefs, DirLabelLens, DirList, FilesPanelPrefs, FontSizes,
-    HistoryItem, NavState, OpenTabs, PaneSplits, PanelVis, PanelWidths, RecentDir, RemoteTerminal,
-    WindowSize, apply_completion, current_branch, dir_missing, get_home, read_browser_files,
-    remove_missing_recent_dirs, remove_saved_dir, save_data,
+    Appearance, BookmarkSort, BookmarkView, BrowserFile, CmdHistoryPrefs, DirLabelLens, DirList,
+    FilesPanelPrefs, FontSizes, HistoryItem, NavState, OpenTabs, PaneSplits, PanelVis, PanelWidths,
+    RecentDir, RemoteTerminal, WindowSize, apply_completion, current_branch, dir_missing, get_home,
+    read_browser_files, remove_missing_recent_dirs, remove_saved_dir, save_data,
     ssh::{self, ConnectError, ConnectRequest, secrets},
     stale_dir_list, truncate_branch,
 };
@@ -69,9 +69,14 @@ pub struct StateUi {
     pub history_search: String,
     pub cwd_history_search: String,
 
-    /// Indices into the corresponding source list (`dir_bookmarks`,
-    /// `recent_dirs`, `history`) that match the current search. Re-derived
-    /// whenever the search text or the source list changes via the
+    /// `dir_bookmarks` indices in the order the Bookmarks panel lists them,
+    /// per [State::bookmark_sort]. A bookmark's place in this is the number
+    /// the panel shows for it, which `bm <n>` and `del bm <n>` take.
+    /// Re-derived with `bookmarks_filter`.
+    pub bookmarks_sorted: Vec<usize>,
+    /// Indices into the corresponding source list (`recent_dirs`, `history`;
+    /// for bookmarks, `bookmarks_sorted`) that match the current search.
+    /// Re-derived whenever the search text or the source list changes via the
     /// `refresh_*_filter` helpers, so the render loop can just iterate these
     /// indices without re-running the filter every frame.
     pub bookmarks_filter: Vec<usize>,
@@ -261,6 +266,7 @@ impl Default for StateUi {
             recent_dirs_search: String::new(),
             history_search: String::new(),
             cwd_history_search: String::new(),
+            bookmarks_sorted: Vec::new(),
             bookmarks_filter: Vec::new(),
             recent_dirs_filter: Vec::new(),
             history_filter: Vec::new(),
@@ -419,6 +425,12 @@ pub struct State {
     /// path lengths.
     pub bookmark_names: bool,
     pub recent_dir_names: bool,
+    /// How the Bookmarks panel orders its rows, picked at its top. Persisted.
+    pub bookmark_sort: BookmarkSort,
+    /// The order the user dragged the bookmarks into, for
+    /// [BookmarkSort::Custom]; see [BookmarkView::order]. Empty until the
+    /// first drag. Persisted.
+    pub bookmark_order: Vec<PathBuf>,
     /// Whether each Cmd history row shows the "In <dir>" button that re-runs
     /// it where it was first run. Off by default; persisted.
     pub cmd_history_show_dir: bool,
@@ -482,6 +494,8 @@ impl Default for State {
             recent_dir_label_len: ui::dirs::DEFAULT_DIR_LABEL_LEN,
             bookmark_names: true,
             recent_dir_names: true,
+            bookmark_sort: ui::dirs::DEFAULT_BOOKMARK_SORT,
+            bookmark_order: Vec::new(),
             cmd_history_show_dir: false,
             dark_mode: None,
             file_viewers: FileViewers::default(),
@@ -1167,6 +1181,10 @@ impl State {
                 bookmark_names: Some(self.bookmark_names),
                 recent_dir_names: Some(self.recent_dir_names),
             },
+            &BookmarkView {
+                sort: Some(self.bookmark_sort),
+                order: self.bookmark_order.clone(),
+            },
             self.ui.panel_widths,
             FilesPanelPrefs {
                 show_hidden: Some(self.ui.show_hidden_attr),
@@ -1321,6 +1339,11 @@ impl State {
             recent_dir_label_len: dir_label_len(loaded.dir_label_lens.recent_dirs),
             bookmark_names: loaded.dir_label_lens.bookmark_names.unwrap_or(true),
             recent_dir_names: loaded.dir_label_lens.recent_dir_names.unwrap_or(true),
+            bookmark_sort: loaded
+                .bookmark_view
+                .sort
+                .unwrap_or(ui::dirs::DEFAULT_BOOKMARK_SORT),
+            bookmark_order: loaded.bookmark_view.order,
             cmd_history_show_dir: loaded.cmd_history.show_dir.unwrap_or(false),
             dark_mode: loaded.appearance.dark_mode,
             file_viewers: FileViewers::default(),
@@ -1525,20 +1548,66 @@ impl State {
             .collect();
     }
 
-    /// Case-insensitive substring match against each bookmark's full
-    /// rendered path. Empty search matches everything.
+    /// Put the bookmarks in the Bookmarks panel's order (see
+    /// [ui::dirs::sort_bookmarks]), then narrow them by case-insensitive
+    /// substring match against each one's full rendered path. Empty search
+    /// matches everything.
     pub fn refresh_bookmarks_filter(&mut self) {
+        // A removed bookmark leaves the custom order too, so adding it again
+        // puts it last, as for any new one.
+        let bookmarks = &self.dir_bookmarks;
+        self.bookmark_order.retain(|p| bookmarks.contains(p));
+
+        self.ui.bookmarks_sorted =
+            ui::dirs::sort_bookmarks(bookmarks, self.bookmark_sort, &self.bookmark_order);
+
         let needle = self.ui.bookmarks_search.to_lowercase();
 
         self.ui.bookmarks_filter = self
-            .dir_bookmarks
+            .ui
+            .bookmarks_sorted
             .iter()
             .enumerate()
-            .filter(|(_, p)| {
-                needle.is_empty() || p.display().to_string().to_lowercase().contains(&needle)
+            .filter(|&(_, &i)| {
+                let path = bookmarks[i].display().to_string();
+                needle.is_empty() || path.to_lowercase().contains(&needle)
             })
-            .map(|(i, _)| i)
+            .map(|(pos, _)| pos)
             .collect();
+    }
+
+    /// The `dir_bookmarks` index of the bookmark the Bookmarks panel shows as
+    /// number `n`.
+    pub fn bookmark_at(&self, n: usize) -> Option<usize> {
+        self.ui.bookmarks_sorted.get(n).copied()
+    }
+
+    /// Order the Bookmarks panel by `sort`, and persist it.
+    pub fn set_bookmark_sort(&mut self, sort: BookmarkSort) {
+        self.bookmark_sort = sort;
+        self.refresh_bookmarks_filter();
+        let _ = self.save();
+    }
+
+    /// Move the bookmark the Bookmarks panel shows as number `from` to `to`,
+    /// as dragging it there in Custom order does, and persist the new order.
+    pub fn move_bookmark(&mut self, from: usize, to: usize) {
+        let mut order: Vec<PathBuf> = self
+            .ui
+            .bookmarks_sorted
+            .iter()
+            .map(|&i| self.dir_bookmarks[i].clone())
+            .collect();
+        if from >= order.len() || to >= order.len() || from == to {
+            return;
+        }
+
+        let path = order.remove(from);
+        order.insert(to, path);
+        self.bookmark_order = order;
+
+        self.refresh_bookmarks_filter();
+        let _ = self.save();
     }
 
     pub fn refresh_recent_dirs_filter(&mut self) {

@@ -41,10 +41,6 @@ pub const WINDOW_HEIGHT: f32 = 900.;
 const RIGHT_COL_WIDTH: f32 = 180.;
 const CWD_HIST_COL_WIDTH: f32 = 220.;
 const BROWSER_COL_WIDTH: f32 = 200.;
-/// The Files list splits into as many columns as fit at least this many
-/// monospace characters each (so the threshold follows the GUI font size).
-/// See [file_browser] and [list_columns].
-const FILES_COL_MIN_CHARS: f32 = 26.;
 /// Likewise for the Cmd history and Cmds this dir lists, in button-text
 /// characters. Long commands wrap within their column.
 const CMD_COL_MIN_CHARS: f32 = 30.;
@@ -61,43 +57,10 @@ pub const MIN_CENTRAL_WIDTH: f32 = 400.;
 /// [scale_panel_fonts].)
 const PANEL_FONT_REDUCTION: f32 = 2.;
 
-/// Width of every tab in the top strip, its `x` included. Longer labels are
-/// cut off at the edge (no ellipsis). See [tabs::tab_button].
-const TAB_WIDTH: f32 = 120.;
-
-/// Gap either side of the separator between tabs in the top strip, and the
-/// separator's own width. See [tabs::tabs_bar].
-const TAB_GAP: f32 = 2.;
-
-/// The active tab's fill and label colour: purple, so it can't be mistaken
-/// for the blue "on" state of the panel toggles below. See [tabs::tab_button].
-const TAB_ACTIVE_FILL: Color32 = Color32::from_rgb(128, 64, 208);
-const TAB_ACTIVE_TEXT: Color32 = Color32::WHITE;
-
-/// Background of the tab section of the top strip (the tabs and `+ tab`),
-/// setting it apart from the controls beside it and the panel-toggle row
-/// beneath. A deep violet or a light lavender, per theme. See [tabs::tabs_bar].
-const TAB_BAR_FILL_DARK: Color32 = Color32::from_rgb(36, 28, 66);
-const TAB_BAR_FILL_LIGHT: Color32 = Color32::from_rgb(226, 220, 248);
-/// Padding between that background's edge and the tabs, and its rounding.
-const TAB_SECTION_MARGIN: egui::Margin = egui::Margin::symmetric(6, 3);
-const TAB_SECTION_ROUNDING: u8 = 4;
-
-/// Width of the line marking where a dragged tab will land. See [tabs::tabs_bar].
-const TAB_DROP_MARKER_WIDTH: f32 = 2.;
-
-const COLOR_PROMPT: Color32 = Color32::from_rgb(220, 220, 90);
-const COLOR_STDOUT: Color32 = Color32::from_rgb(210, 210, 210);
-const COLOR_STDERR: Color32 = Color32::from_rgb(240, 110, 110);
-// Amber: stderr from a command that succeeded (warnings, progress), so red
-// is reserved for failures.
-const COLOR_STDERR_OK: Color32 = Color32::from_rgb(240, 180, 70);
 // Light green to match the CLI's `his N` highlight.
 const COLOR_HIS: Color32 = Color32::from_rgb(120, 240, 120);
 // Magenta to match the CLI's branch-indicator highlight (`\x1b[95m`).
 const COLOR_BRANCH: Color32 = Color32::from_rgb(255, 130, 255);
-// Executable-file colour in the file-browser column.
-const COLOR_EXECUTABLE: Color32 = Color32::from_rgb(120, 220, 120);
 
 /// Default font size (points) for the terminal input/output panes, used when
 /// the state file has no saved `FONT_SIZE`. Matches egui's default monospace
@@ -208,6 +171,9 @@ enum ListAction {
     /// double-click does in Explorer / a Linux file manager.
     OpenFile(PathBuf),
     RemoveBookmark(usize),
+    /// Move the bookmark the Bookmarks panel shows as the first number to
+    /// the second, as dragging it there does. See [State::move_bookmark].
+    MoveBookmark(usize, usize),
     /// Drop a path from Recent dirs (the dir itself is untouched).
     RemoveRecentDir(PathBuf),
     FillInput(String),
@@ -442,6 +408,7 @@ fn apply_action(state: &mut State, action: Option<ListAction>) {
                 let _ = state.save();
             }
         }
+        Some(ListAction::MoveBookmark(from, to)) => state.move_bookmark(from, to),
         Some(ListAction::RemoveRecentDir(p)) => {
             state.remove_from_dir_list(&p, DirList::RecentDirs);
         }
@@ -478,24 +445,6 @@ fn apply_action(state: &mut State, action: Option<ListAction>) {
 /// `n` and the noun for it, e.g. `1 file`, `3 files`.
 fn plural(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
-}
-
-/// Append `text` to `job` in the `plain` format, except for its byte
-/// `ranges` (in order, not overlapping), which get `hl`.
-fn append_highlighted(
-    job: &mut LayoutJob,
-    text: &str,
-    ranges: &[std::ops::Range<usize>],
-    plain: &TextFormat,
-    hl: &TextFormat,
-) {
-    let mut at = 0;
-    for r in ranges {
-        job.append(&text[at..r.start], 0.0, plain.clone());
-        job.append(&text[r.clone()], 0.0, hl.clone());
-        at = r.end;
-    }
-    job.append(&text[at..], 0.0, plain.clone());
 }
 
 /// One "Label  value" line of the Files details pane, wrapping when the
@@ -773,9 +722,12 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
 
     // After that command, which runs in the tab it was typed in, and before
     // any widget, so the input box never sees these keys. Not while a remote
-    // full-screen program has the keyboard: Ctrl+W is vim's, and nano's.
+    // full-screen program has the keyboard: Ctrl+W is vim's, and nano's,
+    // Ctrl+B is tmux's, and Alt + a digit is irssi's and weechat's.
     if !remote_grid::has_focus(ui.ctx()) {
         tab_keys::handle(state, ui.ctx());
+        terminal::toggle_bookmark_key(state, ui.ctx());
+        terminal::bookmark_number_keys(state, ui.ctx());
     }
 
     // Bring in output from shell commands running in the background, and

@@ -70,6 +70,7 @@ fn app_icon() -> Arc<egui::IconData> {
         let png = include_bytes!("../resources/icon.png");
         Arc::new(eframe::icon_data::from_png_bytes(png).expect("resources/icon.png is a valid PNG"))
     });
+
     Arc::clone(&ICON)
 }
 
@@ -201,6 +202,7 @@ pub fn run_command(state: &mut State, input: &str, ctx: &egui::Context) {
         dir: state.cwd().to_path_buf(),
         dt: Utc::now(),
     });
+
     state.refresh_history_filter();
     state.refresh_cwd_history_filter();
     state.refresh_cmd_colors();
@@ -211,6 +213,7 @@ pub fn run_command(state: &mut State, input: &str, ctx: &egui::Context) {
         let cwd = state.cwd().to_path_buf();
         state.record_recent_dir(&cwd);
     }
+
     if let Err(e) = state.save() {
         state.push_out(
             format!("warning: failed to save state: {e}"),

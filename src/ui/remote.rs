@@ -8,7 +8,7 @@ use crate::{
     remote::Remote,
     state::State,
     ui,
-    ui::{COLOR_EXECUTABLE, COLOR_STDERR_OK, ListAction},
+    ui::{ListAction, file_browser::COLOR_EXECUTABLE, terminal::COLOR_STDERR_OK},
 };
 
 /// Saved SSH remotes. Lists each `user@host:port` with Connect / Edit / delete
@@ -76,6 +76,7 @@ pub fn remote_terminals(state: &mut State, ui: &mut Ui) {
                 ui.label(RichText::new("(no saved remotes)").italics());
                 return;
             }
+
             for (i, rt) in state.remote_terminals.iter().enumerate() {
                 ui.label(format!("{i}: {}@{}:{}", rt.username, rt.host, rt.port));
                 ui.horizontal(|ui| {
@@ -85,6 +86,7 @@ pub fn remote_terminals(state: &mut State, ui: &mut Ui) {
                     if ui.small_button("Edit").clicked() {
                         action = Some(ListAction::EditRemote(i));
                     }
+
                     if ui
                         .small_button("x")
                         .on_hover_text("Delete remote")
@@ -93,6 +95,7 @@ pub fn remote_terminals(state: &mut State, ui: &mut Ui) {
                         action = Some(ListAction::RemoveRemote(i));
                     }
                 });
+
                 ui.separator();
             }
         });

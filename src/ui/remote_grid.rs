@@ -11,8 +11,7 @@ use egui::{
 };
 use shell::ssh::keys::{TermKey, TermMods, encode_key, encode_paste};
 
-use super::COLOR_STDOUT;
-use crate::{ansi, remote::LiveRemote};
+use crate::{ansi, remote::LiveRemote, ui::terminal::COLOR_STDOUT};
 
 /// The screen widget's id, so other code can tell when it has focus.
 pub fn grid_id() -> Id {
