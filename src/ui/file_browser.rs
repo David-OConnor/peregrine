@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use egui::{Align, Area, Button, Color32, DragAndDrop, Event, Frame, Id, Key, Layout, Modal, Modifiers, Panel, Response, RichText, ScrollArea, Sense, Stroke, StrokeKind, TextStyle, Ui};
 
 use crate::{
-    OutType, clipboard,
+    OutType, clipboard, drag_out,
     files::{self, FileSort, SortKey},
     path_color, render_with_tilde,
     state::State,
@@ -54,7 +54,9 @@ use crate::{
 /// Delete (or the red trash button) confirms before moving the selected
 /// files and folders to the OS's Recycle Bin / Trash.
 /// Dragging rows onto a folder (or onto ⬆ or a shortcut button) moves them
-/// there, or copies them with Ctrl held (see [drop_target]).
+/// there, or copies them with Ctrl held (see [drop_target]). Dragged out of
+/// the window, they can be dropped on other programs, as Explorer's can (see
+/// [drag_out()]).
 ///
 /// +📁 (or Ctrl+Shift+N) and +🗋 make a new folder or empty file in this
 /// dir, as `mkdir` and `touch` do: it's named in an edit box above the
@@ -600,6 +602,7 @@ pub(crate) fn file_browser(state: &mut State, ui: &mut Ui) {
     }
 
     drag_preview(ui);
+    drag_out(state, ui);
 }
 
 fn delete_button(label: &str) -> Button<'_> {
@@ -1052,7 +1055,11 @@ fn drag_preview(ui: &Ui) {
         return;
     };
 
-    let Some(pos) = ctx.pointer_latest_pos() else {
+    // Out of the window, where [drag_out] hands them to the OS.
+    let Some(pos) = ctx
+        .pointer_latest_pos()
+        .filter(|p| ctx.viewport_rect().contains(*p))
+    else {
         return;
     };
 
@@ -1092,6 +1099,67 @@ fn drag_preview(ui: &Ui) {
                 ui.label(text);
             });
         });
+}
+
+/// Hand Files rows dragged out of the window to the OS, so they can be
+/// dropped on other programs (see `crate::drag_out`). That's the frame after
+/// the pointer leaves with them, so the window, which doesn't repaint while
+/// the OS has the drag, isn't left showing [drag_preview]'s note. Should the
+/// pointer come back, the drag carries on here.
+///
+/// Once they're dropped elsewhere, the listing is read again then and a
+/// second later: the program they went to may have moved them away, and
+/// Explorer finishes doing that after the drop.
+fn drag_out(state: &mut State, ui: &Ui) {
+    let ctx = ui.ctx();
+    let refresh_id = Id::new("files_drag_out_refresh");
+    if let Some(at) = ctx.data(|d| d.get_temp::<f64>(refresh_id)) {
+        let now = ctx.input(|i| i.time);
+        if now >= at {
+            ctx.data_mut(|d| d.remove_temp::<f64>(refresh_id));
+            state.refresh_browser_files();
+        } else {
+            ctx.request_repaint_after_secs((at - now) as f32);
+        }
+    }
+
+    let pending_id = Id::new("files_drag_out_pending");
+    let drag = DragAndDrop::payload::<FileDrag>(ctx);
+    let out = ctx.input(|i| {
+        i.pointer.primary_down()
+            && i.pointer
+                .latest_pos()
+                .is_none_or(|p| !i.viewport_rect().contains(p))
+    });
+    let (Some(window), Some(drag), true) = (state.main_window, drag, out) else {
+        ctx.data_mut(|d| d.remove_temp::<bool>(pending_id));
+        return;
+    };
+    if !ctx
+        .data_mut(|d| d.remove_temp::<bool>(pending_id))
+        .unwrap_or(false)
+    {
+        ctx.data_mut(|d| d.insert_temp(pending_id, true));
+        ctx.request_repaint();
+        return;
+    }
+
+    match drag_out::start(window, &drag.0) {
+        Ok(drag_out::Outcome::Returned) => {}
+        Ok(drag_out::Outcome::Ended { dropped }) => {
+            DragAndDrop::clear_payload(ctx);
+            if dropped {
+                state.refresh_browser_files();
+                let at = ctx.input(|i| i.time) + 1.0;
+                ctx.data_mut(|d| d.insert_temp(refresh_id, at));
+            }
+        }
+        Err(e) => {
+            DragAndDrop::clear_payload(ctx);
+            state.push_out(e, OutType::StdErr);
+        }
+    }
+    ctx.request_repaint();
 }
 
 /// Scroll a Files list's `ui` (a [ScrollArea]'s contents) while rows are

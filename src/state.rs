@@ -21,6 +21,7 @@ use crate::{
     cmd_color::CmdColors,
     completion,
     deep_search::{self, DeepSearch},
+    drag_out,
     files::{Delete, FileDetails, FileSort, SelectionSummary, sort_browser_files},
     path_color,
     project::Project,
@@ -429,6 +430,9 @@ pub struct State {
     /// For background work (an SSH connection) to wake the UI with. Set by
     /// the first frame.
     pub egui_ctx: Option<egui::Context>,
+    /// The main window, for handing Files rows dragged out of it to the OS
+    /// (see [crate::drag_out]). Set by the first frame, where that's done.
+    pub main_window: Option<drag_out::Window>,
 }
 
 /// A saved Bookmarks / Recent dirs path length, or the default when none was
@@ -479,6 +483,7 @@ impl Default for State {
             file_viewers: FileViewers::default(),
             path_panel: PathPanel::default(),
             egui_ctx: None,
+            main_window: None,
         };
         s.refresh_all_filters();
         s.refresh_cmd_colors();
@@ -1317,6 +1322,7 @@ impl State {
             file_viewers: FileViewers::default(),
             path_panel: PathPanel::default(),
             egui_ctx: None,
+            main_window: None,
         };
         s.refresh_all_filters();
         s.refresh_cmd_colors();
@@ -2330,7 +2336,10 @@ pub fn theme(dark: bool) -> egui::Theme {
 }
 
 impl eframe::App for State {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        if self.main_window.is_none() {
+            self.main_window = drag_out::Window::of(frame);
+        }
         // Track the current window size each frame so `save` (which runs on
         // every command) and `on_exit` persist whatever size the user has
         // dragged the window to. `inner_rect` is the content area in logical

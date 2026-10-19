@@ -63,19 +63,33 @@ trash = "5.2.9"
 # the User and System `Path` registry values, broadcasts the change as
 # Windows' own dialog does, and runs itself elevated (`ShellExecuteExW`
 # "runas") to write the System one. Shell commands (see `src/running.rs`) run
-# in a job object, so Stop ends everything they started.
+# in a job object, so Stop ends everything they started. Files rows dragged
+# out of the window go to other programs through the shell's drag and drop
+# (`SHDoDragDrop`, with the data object Explorer drags; see
+# `src/drag_out.rs`).
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
+    "Win32_Graphics_Gdi",
     "Win32_Security",
     "Win32_Storage_FileSystem",
+    "Win32_System_Com",
     "Win32_System_Diagnostics_Debug",
     "Win32_System_JobObjects",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
     "Win32_System_Registry",
+    "Win32_System_SystemServices",
     "Win32_System_Threading",
     "Win32_System_WindowsProgramming",
+    "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+# The main window's `HWND`, from eframe, for dragging files out of it (see
+# `src/drag_out.rs`). Already built for eframe and winit.
+raw-window-handle = "0.6"
 
 # Files panel Cut / Copy / Paste (see `src/clipboard.rs`): file lists on the
 # clipboard, plus Explorer's "Preferred DropEffect" marking a cut. Already

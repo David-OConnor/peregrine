@@ -9,6 +9,7 @@ mod clipboard;
 mod cmd_color;
 mod completion;
 mod deep_search;
+mod drag_out;
 mod files;
 mod markdown;
 mod path_color;
