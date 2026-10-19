@@ -55,6 +55,11 @@ ignore = "0.4.33"
 # Files-panel Delete: use each OS's recoverable Recycle Bin / Trash.
 trash = "5.2.9"
 
+# The main window's handle (its `HWND`, X11 window, or Wayland display and
+# surface), from eframe, for dragging files out of it (see
+# `src/drag_out.rs`). Already built for eframe and winit.
+raw-window-handle = "0.6"
+
 # Files panel (see `src/files.rs`): `ShellExecuteW` opens a file with its default
 # program, as an Explorer double-click does; `SHGetFileInfoW` gives Explorer's
 # type name ("Text Document") for the details pane; the drive functions list
@@ -87,10 +92,6 @@ windows-sys = { version = "0.61", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
-# The main window's `HWND`, from eframe, for dragging files out of it (see
-# `src/drag_out.rs`). Already built for eframe and winit.
-raw-window-handle = "0.6"
-
 # Files panel Cut / Copy / Paste (see `src/clipboard.rs`): file lists on the
 # clipboard, plus Explorer's "Preferred DropEffect" marking a cut. Already
 # built for egui's own clipboard (via arboard).
@@ -100,6 +101,20 @@ clipboard-win = { version = "5.4", features = ["std"] }
 # egui's clipboard already builds it.
 [target.'cfg(not(windows))'.dependencies]
 arboard = { version = "3.6", default-features = false }
+
+# Files rows dragged out of the window, on Linux (see `src/drag_out.rs`): on
+# X11 with the XDND protocol, over an x11rb connection of our own; on Wayland
+# with our own objects on winit's connection, through libwayland (`system`,
+# for `Backend::from_foreign_display`), with `rustix` to wait on its socket.
+# All already built for winit, with these features.
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb = { version = "0.13", default-features = false }
+wayland-client = { version = "0.31", default-features = false, features = ["system"] }
+rustix = { version = "1", features = ["event"] }
+
+# The X11 drag's test presses the mouse button with the XTEST extension.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+x11rb = { version = "0.13", default-features = false, features = ["xtest"] }
 
 [build-dependencies]
 # Embeds `resources/icon.ico` in the Windows `.exe` (see `build.rs`).

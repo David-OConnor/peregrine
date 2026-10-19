@@ -23,7 +23,10 @@ pub fn handle_cmd(state: &mut State, cmd: &str, input: &str, args: &str, ctx: &e
         match cmd {
             "disconnect" | "quit" | "exit" => state.disconnect_remote(),
             _ => {
-                let msg = format!("ssh: still connecting to {}; `disconnect` cancels", c.label());
+                let msg = format!(
+                    "ssh: still connecting to {}; `disconnect` cancels",
+                    c.label()
+                );
                 state.push_out(msg, OutType::StdErr);
             }
         }

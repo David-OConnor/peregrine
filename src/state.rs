@@ -8,9 +8,9 @@ use std::{
 use chrono::Utc;
 use shell::{
     Appearance, BrowserFile, CmdHistoryPrefs, DirLabelLens, DirList, FilesPanelPrefs, FontSizes,
-    HistoryItem, NavState, OpenTabs, PaneSplits, PanelVis, PanelWidths, RecentDir,
-    RemoteTerminal, WindowSize, apply_completion, current_branch, dir_missing, get_home,
-    read_browser_files, remove_missing_recent_dirs, remove_saved_dir, save_data,
+    HistoryItem, NavState, OpenTabs, PaneSplits, PanelVis, PanelWidths, RecentDir, RemoteTerminal,
+    WindowSize, apply_completion, current_branch, dir_missing, get_home, read_browser_files,
+    remove_missing_recent_dirs, remove_saved_dir, save_data,
     ssh::{self, ConnectError, ConnectRequest, secrets},
     stale_dir_list, truncate_branch,
 };
@@ -148,6 +148,9 @@ pub struct StateUi {
     /// How many columns the Files listing was last laid out in, for the
     /// arrow keys to move across.
     pub files_columns: usize,
+    /// Files rows dragged out of the window, while the OS has them on a
+    /// thread of its own (Linux; see [crate::drag_out]). Not persisted.
+    pub files_drag_out: Option<drag_out::Drag>,
     /// The fraction of the Files panel's height its details pane takes, and
     /// likewise for the PATH window's; see [ui::Divider]. Persisted.
     pub files_details_split: f32,
@@ -282,6 +285,7 @@ impl Default for StateUi {
             files_activating_press: false,
             files_copy_pending: None,
             files_columns: 1,
+            files_drag_out: None,
             files_details_split: ui::DEFAULT_DETAILS_SPLIT,
             path_details_split: ui::DEFAULT_DETAILS_SPLIT,
             deep_search: String::new(),
@@ -2103,7 +2107,9 @@ impl State {
                             self.remote[i] = Some(Remote::Live(Box::new(LiveRemote::new(session))));
                             self.push_out_to(
                                 i,
-                                format!("Connected to {label}. Commands run there now; `exit` logs out."),
+                                format!(
+                                    "Connected to {label}. Commands run there now; `exit` logs out."
+                                ),
                                 OutType::StdOut,
                             );
                             self.record_remote(&host, port, &user);
@@ -2356,6 +2362,12 @@ impl eframe::App for State {
         ui::draw(self, ui);
     }
 
+    /// For Files rows dragged out of the window on Wayland (see
+    /// [crate::drag_out]).
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        drag_out::raw_input_hook(self.main_window, ctx, raw_input);
+    }
+
     /// Persist on close so a resize made without running any command (which
     /// would otherwise be the only thing that triggers a save) still sticks.
     /// Disambiguated to the inherent `save` — `eframe::App` also has a `save`.
@@ -2375,17 +2387,28 @@ mod memory_tests {
 
     #[test]
     fn closed_tabs_keep_navigation_while_old_output_obeys_a_shared_budget() {
-        let mut tabs: Vec<_> = (0..4).map(|i| DetachedTab::new(i, PathBuf::from("."))).collect();
+        let mut tabs: Vec<_> = (0..4)
+            .map(|i| DetachedTab::new(i, PathBuf::from(".")))
+            .collect();
         let text = "x".repeat(terminal::MAX_LINE_BYTES);
         for tab in &mut tabs {
             tab.nav_back.push(PathBuf::from("previous"));
-            for _ in 0..260 { tab.out.push(&text, OutType::StdOut); }
+            for _ in 0..260 {
+                tab.out.push(&text, OutType::StdOut);
+            }
         }
-        assert!(tabs.iter().map(|t| t.out.retained_bytes()).sum::<usize>() > terminal::CLOSED_BYTES);
+        assert!(
+            tabs.iter().map(|t| t.out.retained_bytes()).sum::<usize>() > terminal::CLOSED_BYTES
+        );
         trim_closed_output(&mut tabs);
-        assert!(tabs.iter().map(|t| t.out.retained_bytes()).sum::<usize>() <= terminal::CLOSED_BYTES);
+        assert!(
+            tabs.iter().map(|t| t.out.retained_bytes()).sum::<usize>() <= terminal::CLOSED_BYTES
+        );
         assert!(tabs[0].out.lines.is_empty());
         assert!(!tabs.last().unwrap().out.lines.is_empty());
-        assert!(tabs.iter().all(|t| t.nav_back == [PathBuf::from("previous")]));
+        assert!(
+            tabs.iter()
+                .all(|t| t.nav_back == [PathBuf::from("previous")])
+        );
     }
 }

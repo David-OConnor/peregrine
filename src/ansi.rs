@@ -389,8 +389,8 @@ mod tests {
 
     #[test]
     fn line_controls_come_out_and_other_sequences_are_dropped() {
-        let pieces = Parser::default()
-            .feed("a\rb\x08\x1b[2K\x1b[5G\x1b(Bc\x1b[?25l\x07\x1bP1$r\x1b\\d");
+        let pieces =
+            Parser::default().feed("a\rb\x08\x1b[2K\x1b[5G\x1b(Bc\x1b[?25l\x07\x1bP1$r\x1b\\d");
         let got: Vec<String> = pieces
             .into_iter()
             .map(|p| match p {
@@ -400,7 +400,15 @@ mod tests {
             .collect();
         assert_eq!(
             got,
-            ["a", "Cr", "b", "Backspace", "EraseLine(2)", "Column(4)", "cd"]
+            [
+                "a",
+                "Cr",
+                "b",
+                "Backspace",
+                "EraseLine(2)",
+                "Column(4)",
+                "cd"
+            ]
         );
     }
 }

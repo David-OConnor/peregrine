@@ -12,20 +12,57 @@
 //! the pointer back over the window, the button still held, hands the drag
 //! back to egui, so they can still be dropped on a folder here.
 //!
+//! On Linux it's the drag and drop file managers use there: XDND on X11
+//! (see `x11`), the compositor's own on Wayland (see `wayland`), offering
+//! the files as a list of `file://` URIs, which Nautilus, Dolphin, browsers,
+//! editors and terminals all take. There the drag goes on on a thread of
+//! its own, as the window must keep drawing, and [Drag] is asked after it
+//! each frame. On X11 the pointer coming back hands it back to egui, as on
+//! Windows; on Wayland, where the compositor keeps a drag till it's over,
+//! the window takes it like any other program, giving egui the pointer's
+//! moves over it ([raw_input_hook]), so it can still be dropped on a folder
+//! here.
+//!
 //! Elsewhere they can only be dropped inside the window, for now.
 
 /// What became of a drag handed to the OS.
+#[derive(Debug)]
 pub enum Outcome {
     /// It's over: dropped on another program (`dropped`), or called off,
     /// with Escape or by letting go where nothing takes files.
     Ended { dropped: bool },
     /// The pointer came back over the window, so the drag carries on there.
     /// If the button was let go of meanwhile, egui is told, so it's dropped
-    /// where the pointer is.
+    /// where the pointer is. (On Wayland: it was dropped on the window, and
+    /// egui has it.)
     Returned,
 }
 
-pub use os::{Window, start};
+pub use os::{Drag, Window, start};
+
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+use linux as os;
+#[cfg(any(target_os = "linux", test))]
+mod protocol;
+#[cfg(target_os = "linux")]
+mod wayland;
+#[cfg(target_os = "linux")]
+mod x11;
+
+/// Before each frame, with its input (see [eframe::App::raw_input_hook]):
+/// on Wayland, our part of winit's connection is looked after, and egui is
+/// given the pointer's moves over the window while the compositor has a
+/// drag. Nothing elsewhere.
+pub fn raw_input_hook(window: Option<Window>, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+    #[cfg(target_os = "linux")]
+    if let Some(window) = window {
+        os::raw_input_hook(window, ctx, raw_input);
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = (window, ctx, raw_input);
+}
 
 #[cfg(windows)]
 mod os {
@@ -95,8 +132,31 @@ mod os {
     /// Drag `paths` with the shell's drag and drop, from where the pointer
     /// is, until they're dropped or the pointer comes back over `window`.
     /// Blocks until then: Windows runs the drag in a loop of its own, while
-    /// winit holds on to the window's events (see [Outcome]).
-    pub fn start(window: Window, paths: &[PathBuf]) -> Result<Outcome, String> {
+    /// winit holds on to the window's events (see [Outcome]). So the
+    /// [Drag] returned is already over.
+    pub fn start(window: Window, paths: &[PathBuf], _ctx: &egui::Context) -> Drag {
+        Drag(Some(run(window, paths)))
+    }
+
+    /// A drag handed to the shell (see [start]), over by the time it's had.
+    pub struct Drag(Option<Result<Outcome, String>>);
+
+    impl Drag {
+        /// How it ended (and then nothing).
+        pub fn poll(&mut self) -> Option<Result<Outcome, String>> {
+            self.0.take()
+        }
+
+        /// Nothing to call off: it's over.
+        pub fn cancel(&self) {}
+
+        /// The shell shows its own.
+        pub fn cursor(&self) -> Option<egui::CursorIcon> {
+            None
+        }
+    }
+
+    fn run(window: Window, paths: &[PathBuf]) -> Result<Outcome, String> {
         let hwnd = window.hwnd();
         // Let go of already, where we didn't see it (in another window):
         // there's no drag left to hand over.
@@ -490,7 +550,7 @@ mod os {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 mod os {
     use std::{convert::Infallible, path::PathBuf};
 
@@ -506,7 +566,24 @@ mod os {
         }
     }
 
-    pub fn start(window: Window, _paths: &[PathBuf]) -> Result<Outcome, String> {
+    /// Never made either.
+    pub struct Drag(Infallible);
+
+    impl Drag {
+        pub fn poll(&mut self) -> Option<Result<Outcome, String>> {
+            match self.0 {}
+        }
+
+        pub fn cancel(&self) {
+            match self.0 {}
+        }
+
+        pub fn cursor(&self) -> Option<egui::CursorIcon> {
+            match self.0 {}
+        }
+    }
+
+    pub fn start(window: Window, _paths: &[PathBuf], _ctx: &egui::Context) -> Drag {
         match window.0 {}
     }
 }

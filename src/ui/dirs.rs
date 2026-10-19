@@ -7,8 +7,14 @@ use eframe::epaint::{Color32, FontId, text::LayoutJob};
 use egui::{Button, DragValue, Modal, RichText, ScrollArea, TextFormat, TextStyle, Ui};
 use shell::DirList;
 
+use crate::ui::search;
 use crate::{
-    OutType, path_color, path_color::Part, render_with_tilde, state::State, ui, ui::ListAction,
+    OutType, path_color,
+    path_color::Part,
+    render_with_tilde,
+    state::State,
+    ui,
+    ui::ListAction,
 };
 
 /// Default max displayed length (in characters) of a Bookmarks / Recent dirs
@@ -349,7 +355,7 @@ pub(super) fn dir_bookmarks(state: &mut State, ui: &mut Ui) {
         }
     });
 
-    if ui::search_box(ui, &mut state.ui.bookmarks_search, "bookmarks_search") {
+    if search::search_box(ui, &mut state.ui.bookmarks_search, "bookmarks_search") {
         state.refresh_bookmarks_filter();
     }
     ui.separator();
@@ -413,7 +419,7 @@ pub(super) fn dir_history(state: &mut State, ui: &mut Ui) {
         let _ = state.save();
     }
 
-    if ui::search_box(ui, &mut state.ui.recent_dirs_search, "recent_dirs_search") {
+    if search::search_box(ui, &mut state.ui.recent_dirs_search, "recent_dirs_search") {
         state.refresh_recent_dirs_filter();
     }
     ui.separator();

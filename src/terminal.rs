@@ -260,7 +260,9 @@ impl Output {
             self.append(id, text, style);
             return;
         };
-        let i = self.index(id).expect("line created or checked before writing");
+        let i = self
+            .index(id)
+            .expect("line created or checked before writing");
         let len = self.lines[i].text.chars().count();
         if c >= len {
             if c > len {
@@ -499,11 +501,19 @@ mod tests {
         let mut out = Output::default();
         let mut stream = Stream::default();
         for pct in [10, 55, 100] {
-            out.write(&format!("\r\x1b[Kprogress {pct}%"), OutType::StdOut, &mut stream);
+            out.write(
+                &format!("\r\x1b[Kprogress {pct}%"),
+                OutType::StdOut,
+                &mut stream,
+            );
         }
         out.write("\r\n", OutType::StdOut, &mut stream);
         out.write("abcdef\rXY\n", OutType::StdOut, &mut stream);
-        out.write("\x1b[32mgreen\x1b[0m\x08\x08\x08EE\n", OutType::StdOut, &mut stream);
+        out.write(
+            "\x1b[32mgreen\x1b[0m\x08\x08\x08EE\n",
+            OutType::StdOut,
+            &mut stream,
+        );
         out.write("tab\x1b[8Gx\n", OutType::StdOut, &mut stream);
         let texts: Vec<_> = out.lines.iter().map(|l| l.text.as_str()).collect();
         assert_eq!(texts, ["progress 100%", "XYcdef", "grEEn", "tab    x"]);
