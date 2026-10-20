@@ -9,8 +9,9 @@ use chrono::Utc;
 use shell::{
     Appearance, BookmarkSort, BookmarkView, BrowserFile, CmdHistoryPrefs, DirLabelLens, DirList,
     FilesPanelPrefs, FontSizes, HistoryItem, NavState, OpenTabs, PaneSplits, PanelVis, PanelWidths,
-    RecentDir, RemoteTerminal, WindowSize, apply_completion, current_branch, dir_missing, get_home,
-    read_browser_files, remove_missing_recent_dirs, remove_saved_dir, save_data,
+    RecentDir, RemoteTerminal, ScratchpadPrefs, WindowSize, apply_completion, current_branch,
+    dir_missing, get_home, read_browser_files, remove_missing_recent_dirs, remove_saved_dir,
+    save_data,
     ssh::{self, ConnectError, ConnectRequest, secrets},
     stale_dir_list, truncate_branch,
 };
@@ -1222,6 +1223,9 @@ impl State {
             },
             &self.ui.clipboard.history.entries,
             &self.ui.scratchpad.text,
+            ScratchpadPrefs {
+                tab: Some(self.ui.scratchpad.tab),
+            },
             &panes::order_keys(&self.ui.pane_order),
             &self.state_path,
         )
@@ -1324,6 +1328,7 @@ impl State {
         ui.nav_forward = (0..n).map(|_| Vec::new()).collect();
         ui.clipboard.history = clipboard::History::from_saved(loaded.clipboard);
         ui.scratchpad.text = loaded.scratchpad;
+        ui.scratchpad.tab = loaded.scratchpad_prefs.tab.unwrap_or_default();
         // The OS clipboard most likely still holds the newest entry. Saying
         // so means the watcher's first look doesn't record it again with a
         // new time; if it holds something else, the watcher corrects this.

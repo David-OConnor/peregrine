@@ -414,14 +414,15 @@ fn input_id() -> Id {
 /// Tab, from anywhere in the window, empties the CLI input and moves the
 /// keyboard to it, in place of egui's moving focus to the next widget. Not
 /// in the input itself, where Tab autocompletes, in the Scratchpad, where it
-/// indents, or while a popup is up, where it moves between the popup's
-/// buttons. While a full-screen program
+/// indents unless set not to (see [scratchpad::Scratchpad::keeps_tab]), or
+/// while a popup is up, where it moves between the popup's buttons. While a
+/// full-screen program
 /// runs on the remote, its screen stands in for the input, so Tab moves the
 /// keyboard there instead. Either way, a hidden terminal is shown.
 pub fn focus_input_key(state: &mut State, ctx: &Context) {
     if ctx.memory(|m| {
         m.has_focus(input_id())
-            || m.has_focus(scratchpad::edit_id())
+            || (m.has_focus(scratchpad::edit_id()) && state.ui.scratchpad.keeps_tab())
             || m.top_modal_layer().is_some()
     }) {
         return;

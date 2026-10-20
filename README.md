@@ -1,22 +1,24 @@
 # Peregrine
 
 
-An integrated terminal and file browser. For Linux, Windows, and MacOS. I built this for my own file-system and CLI workflows. Wherever I notice a friction point, I update this program to address it. For example, when using a `cd` command to navigate in a terminal, I've made it trivial to access ones I've used before, or to find the right directory using the final dir's name (or first few chars) without typing its full path. Another example is moving files and folders between projects without managing a collection of tabs, or repeatedly typing full paths.
+An integrated terminal and file browser. For Linux, Windows, and MacOS. I built this for my own file-system and CLI workflows. Wherever I notice a friction point, I update this program to address it. For example, when using a `cd` command to navigate in a terminal, I've made it trivial to access ones I've used before, or to find the right directory using a few characters from dir's name. It also smooths over miscellaneous OS-level functionality which I've encountered pain points in.
 
 The initial inspiration: I do not enjoy manually navigating directories (In a terminal with `cd` commands, nor my OS's file browser). In the case of ones I use frequent, there is no reason I must!
 
-One description: an **Integrate File Environment or IFE**: like an IDE, but a general tool for files. Of course, most IDEs (Like Jetbrains') include functionality this program has (Plus a lot more!) - the differentiator is this is light, and is designed to work across the whole system instead of a project.
+One description: an **Integrate File Environment or IFE**: like an IDE, but a general tool for files. Of course, most IDEs (Like Jetbrains') include functionality this program has - I still use this because it's light, and is designed to work across the whole system instead of a project.
 
 It's based on the abstraction that navigating a filesystem in a GUI, and executing commands in a terminal are complementary operations that should interact. It also integrates a clipboard manager with history, a system PATH viewer/editor, and lightweight viewers for text and image files. (Misc system-level functionality I want to improve over OS defaults)
 
-This application takes its CLI component and shortcuts from [Shell](https://github.com/david-oconnor/shell), and shares its relevant systems including directory and command history and bookmarks. For information on terminal commands,see [its Readme](https://github.com/David-OConnor/shell/blob/main/README.md).
+This application takes its CLI component and shortcuts from [Shell](https://github.com/david-oconnor/shell), and shares its relevant systems including directory and command history and bookmarks. If you are looking for a smoother terminal without a GUI, use that instead.
 
 
 ![Demo of the Peregrine UI](/screenshots/demo_0.png)
 
 ## Install
+This application is distributed as a portable executable.
+
 - [Download and unzip](https://github.com/David-OConnor/peregrine/releases)
-- Launch the application, or run the *setup* script to add a shortcut to your OS's launcher.
+- Launch the application, or run the *setup* script to copy it to an appropriate application directory, and add a shortcut to your OS's launcher.
 
 
 ## Who this is for, and its purpose
@@ -28,9 +30,9 @@ If you are navigating to a regularly-used directory via CLI and are doing too mu
 ## Who this is not for
 If you use a fully CLI workflow, or if your terminal program must be available when you are using an arbitrary computer or via SSH, this is not what you're looking for. If you perform all file operations in a terminal, or all in a GUI, this is not for you - it's for workflows that use both. This is not a shell scripting language, and its CLI functionality runs on top of your OS's native terminal.
 
+
 ## Hotkeys of immediate interest
-**Tab**: Clears and focuses the CLI input. This is useful for, e.g. immediately navigating to a directory
-you know, regardless of which UI item you're using. E.g. to go to a bookmark or recent directory named `molchanica`:
+**Tab**: Clears and focuses the CLI input. This is useful for, for example, immediately navigating to a directory you know, from anywhere in the UI. E.g. to go to a bookmark or recent directory named `molchanica`:
 
 - Press **Tab**
 - Type `cd mol`
@@ -38,28 +40,34 @@ you know, regardless of which UI item you're using. E.g. to go to a bookmark or 
 
 
 ## Everything is searchable
-You can search in every GUI panel: bookmarks, recent directories, recent commands, clipboard etc. The file browser has a quick filter, and full Ripgrep search for file names or contents.
+You can search in every GUI panel: bookmarks, recent directories, recent commands, clipboard etc. The file browser has a quick filter, and full Ripgrep search for file names or contents. 
 
 ![Demo of the Peregrine UI showing the file viewer and a markdown file](/screenshots/demo_1.png)
 
 
-## Directory bookmarks
-(Description todo)
+## UI overview
+The UI is divided into *panels*, most of which are organized horizontally in the main window. A few are separate windows. Panes can be hidden and shown using their buttons in the toolbar above them. They each have an "X" button to close them as well. Below is a description of each.
+
+### Bookmarks
+Bookmarked directories. Add the current directory with the **Ctrl + B** hotkey, or with the *Bookmark* star-icon buttons on the *Bookmarks* or *Files* panes. These are listed, and have priority for CLI autocomplete.
 
 
-## Recent directories
-(Description todo)
+### Recent directories
+A list of directories you recently performed a command in. Ones you passed through transiently are not added. These are listed, and have priority for CLI autocomplete (Behind bookmarks)
 
 
-## File browser
+### File browser
+A reasonably full-featured file browser, similar to your OS's. Party tricks include integrated [ripgrep](https://github.com/burntsushi/ripgrep) search, and integration with the rest of *Peregrine*.
+
 You can rename a file by selecting it, then clicking its name again. Double-clicking a file opens it in its default file handler. Broadly, the UX for selection, moving, and file operations follow conventions.
 
 Drag files and folders onto a folder (or the ⬆ and shortcut buttons) to move them there; hold Ctrl to copy. Drag them out of the window to drop them on Explorer or Nautilus, the desktop, a web page's upload box, or any other program that takes files from a file manager (Windows, and Linux on X11 or Wayland).
 
-Opening most popular text-based file formats (.txt, Markdown, TOML, most code files) or image (.png, .jpg, .bmp) file in the browser will open an integrated viewer; you can then open in your OS's default handler from there. In the image viewer, Ctrl+scroll zooms and dragging pans. 
+Opening most popular text-based file formats (.txt, Markdown, TOML, most code files) or image (.png, .jpg, .bmp) file in the browser will open an integrated viewer; you can then open in your OS's default handler from there. In the image viewer, Ctrl+scroll zooms and dragging pans.
 
 
-## CLI / terminal
+### Terminal / CLI
+The [Shell](https://github.com/david-oconnor/shell) terminal: It wraps your OS's native (e.g. *Bash* or *Powershell*), and has convenient autocomplete, bookmarks, shortcut commands, color-coding etc.
 
 Most CLI commands from *Shell* work here, but this version includes more functionality, enabled by the GUI.
 
@@ -68,22 +76,31 @@ Autocomplate works from a mixture of bookmarks, recent commands, and files in th
 Type `shelp` in the CLI input to list every command and key shortcut.
 
 
-## Command history
-(Description todo)
+### Recent commands
+A list of recently executed CLI commands, in any directory.
+
+
+### Recent commands, this directory
+A list of recently executed CLI commands, in the current directory.
+
+
+### Clipboard
+An advanced clipboard, which stores multiple items. Its top item is synchronized with your OS's clipboard.
+
+
+### Scratchpad
+A quick and dirty text editor for one-off notes. Can be saved to file.
 
 
 ## System path editor
-(Description todo)
+A convenient interface to edit items in your OS's system *PATH* environment variable. On Linux, this updates .bashrc, so it persists through reboots.
 
 
-## SSH / remote capability
+### SSH / Remote terminal
 `ssh [user@]host [port]`, or a saved remote's button in the tab strip or Remote panel, connects the current tab. Connecting happens in the background, so an unreachable host never freezes the window. Once connected, commands typed in that tab run in your remote login shell, which keeps its working directory and environment between them. Full-screen programs (`vim`, `nano`, `top`, `less`) take over the output pane while they run, with the keyboard going to them; lines typed while any other remote command runs go to it as input, and Ctrl+C interrupts it. `exit` logs out; `disconnect` closes the connection.
 
 Logging in uses your SSH keys (from an SSH agent, or `~/.ssh/id_*` without a passphrase), or a password saved in the OS keyring via the Remote panel. When a password is needed, the Remote panel's form opens for it.
 
-
-## Clipboard
-Peregrine includes an advanced clipboard, which stores multiple items. Its history is kept between runs, in the state file (`shell_state.ss`).
 
 
 ## Shortcuts and integrations

@@ -3,8 +3,8 @@
 //!
 //! The panel is a toolbar over one text box, which fills the rest of it.
 //! Shell's line-editing keys (see [line_edit]) work in it, as in the CLI
-//! input, where they make sense for several lines; Tab indents rather than
-//! going to the CLI input.
+//! input, where they make sense for several lines. Tab inserts a tab or 4
+//! spaces, or goes to the CLI input as elsewhere, as picked at the top.
 
 use std::{
     fs,
@@ -16,6 +16,7 @@ use egui::{
     Button, Color32, Context, Event, Id, Key, KeyboardShortcut, Modal, Modifiers, RichText,
     ScrollArea, TextEdit, TextStyle, Ui, ViewportCommand, os::OperatingSystem,
 };
+use shell::ScratchpadTab;
 
 use super::{
     line_edit::{self, Edit, LineKey},
@@ -36,6 +37,21 @@ const DEFAULT_NAME: &str = "scratchpad";
 /// The file formats the Save popup offers, by extension.
 const FORMATS: [&str; 2] = ["txt", "md"];
 
+/// What Tab inserts, set to [ScratchpadTab::Spaces]. (Shift+Tab, which egui
+/// handles, takes as many off the start of the line.)
+const INDENT: &str = "    ";
+
+/// What Tab can do in the text, with each button's label and hover text.
+const TAB_MODES: [(ScratchpadTab, &str, &str); 3] = [
+    (ScratchpadTab::Tab, "Tab", "Tab inserts a tab character"),
+    (ScratchpadTab::Spaces, "4 spaces", "Tab inserts 4 spaces"),
+    (
+        ScratchpadTab::FocusTerm,
+        "Focus term",
+        "Tab moves the keyboard to the terminal's input, as it does elsewhere",
+    ),
+];
+
 /// The text box's.
 pub(super) fn edit_id() -> Id {
     Id::new("scratchpad_text")
@@ -44,6 +60,8 @@ pub(super) fn edit_id() -> Id {
 #[derive(Default)]
 pub struct Scratchpad {
     pub text: String,
+    /// What Tab does in the text, picked at the panel's top. Persisted.
+    pub tab: ScratchpadTab,
     /// When `text` last changed, until it's saved to the state file.
     changed: Option<Instant>,
     /// Clear was clicked: waiting on its confirmation.
@@ -73,6 +91,12 @@ impl Scratchpad {
 
     fn mark_changed(&mut self) {
         self.changed = Some(Instant::now());
+    }
+
+    /// Whether Tab in the text box stays there, rather than going to the CLI
+    /// input as it does elsewhere.
+    pub(super) fn keeps_tab(&self) -> bool {
+        self.tab != ScratchpadTab::FocusTerm
     }
 }
 
@@ -109,6 +133,14 @@ pub(super) fn draw(state: &mut State, ui: &mut Ui) {
 
     let ctx = ui.ctx().clone();
     let id = edit_id();
+
+    if let Some(tab) = tab_mode_control(ui, state.ui.scratchpad.tab) {
+        state.ui.scratchpad.tab = tab;
+        let _ = state.save();
+        // Back to the text, from the button.
+        ctx.memory_mut(|m| m.request_focus(id));
+    }
+
     let pad = &mut state.ui.scratchpad;
 
     let selection = TextEdit::load_state(&ctx, id)
@@ -161,7 +193,22 @@ pub(super) fn draw(state: &mut State, ui: &mut Ui) {
     // Before the box is drawn, so it shows their result.
     if ctx.memory(|m| m.has_focus(id)) {
         let mac = ctx.os() == OperatingSystem::Mac;
+        let spaces = pad.tab == ScratchpadTab::Spaces;
         let keys = ui.input_mut(|i| {
+            // Tab as typed text, which the box puts in at the caret. (Set to
+            // Focus term, Tab is gone by now; see
+            // `terminal::focus_input_key`.)
+            if spaces {
+                for event in &mut i.events {
+                    if matches!(
+                        event,
+                        Event::Key { key: Key::Tab, pressed: true, modifiers, .. }
+                            if modifiers.is_none()
+                    ) {
+                        *event = Event::Text(INDENT.to_owned());
+                    }
+                }
+            }
             let keys = line_edit::take_keys(&mut i.events, mac);
             // Ctrl+P / Ctrl+N are Up / Down, as in Emacs.
             for key in &keys {
@@ -203,6 +250,23 @@ pub(super) fn draw(state: &mut State, ui: &mut Ui) {
     });
 }
 
+/// The `Tab key: Tab | 4 spaces | Focus term` selector at the top of the
+/// panel (see [TAB_MODES]), wrapping when the panel is narrow. Returns the
+/// mode picked, if it changed.
+fn tab_mode_control(ui: &mut Ui, current: ScratchpadTab) -> Option<ScratchpadTab> {
+    let mut tab = current;
+
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Tab key:");
+        for (mode, label, hover) in TAB_MODES {
+            ui.selectable_value(&mut tab, mode, label)
+                .on_hover_text(hover);
+        }
+    });
+
+    (tab != current).then_some(tab)
+}
+
 /// The row of buttons above the text. `has_text` and `has_selection` enable
 /// those that need them.
 fn toolbar(ui: &mut Ui, has_text: bool, has_selection: bool) -> Option<Action> {
@@ -213,7 +277,7 @@ fn toolbar(ui: &mut Ui, has_text: bool, has_selection: bool) -> Option<Action> {
     let (cut_key, copy_key, paste_key) = (shortcut(Key::X), shortcut(Key::C), shortcut(Key::V));
 
     let mut action = None;
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         if ui
             .button("Save")
             .on_hover_text("Save the text to a .txt or .md file")
@@ -282,10 +346,10 @@ fn clear_popup(state: &mut State, ctx: &Context) {
                     .fill(Color32::from_rgb(180, 45, 45)),
             );
             let keep = ui.button("Cancel");
-            // Keep keyboard focus in the modal, starting on Cancel, so Enter
-            // doesn't throw the text away.
+            // Keep keyboard focus in the modal, starting on Clear, so Enter
+            // confirms.
             if !clear.has_focus() && !keep.has_focus() {
-                keep.request_focus();
+                clear.request_focus();
             }
             confirm = clear.clicked();
             cancel = keep.clicked();
