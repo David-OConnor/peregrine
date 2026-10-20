@@ -113,7 +113,9 @@ pub(super) fn show(state: &mut State, ctx: &Context) {
     let mut open = true;
     Window::new("About")
         .open(&mut open)
-        .default_width(480.)
+        // Clamped to the screen, and shrunk to the contents if they're
+        // shorter. Its width follows the shortcut columns.
+        .default_height(900.)
         .resizable(true)
         .show(ctx, |ui| {
             super::scale_panel_fonts(ui, state.gui_font_size);
@@ -192,27 +194,61 @@ fn shortcut_groups(mac: bool) -> Vec<(&'static str, Shortcuts)> {
         ("Ctrl + Shift + V".into(), "Show or hide the clipboard pane"),
     ];
 
+    // Ctrl + N, T and W are tab shortcuts, except on Mac, where those use Cmd.
+    let history_keys = if mac {
+        "Up / Down or Ctrl + P / N"
+    } else {
+        "Up / Down or Ctrl + P"
+    };
     let cli = vec![
         ("Enter".into(), "Run the input"),
         ("Tab".into(), "Autocomplete the input"),
-        ("Up / Down".into(), "Walk command history"),
+        (history_keys.into(), "Walk command history"),
         (
             "Left / Right".into(),
             "Walk recent directories, while the input is empty",
         ),
         (
-            "Right / End".into(),
+            "Right / End / Ctrl + E".into(),
             "Accept the dimmed suggestion, with the caret at the end",
         ),
         (
             format!("{cmd} + C"),
-            "Stop the running command, when no text is selected",
+            "Stop the running command, or else clear the input, when no text is selected",
         ),
         (
             "Ctrl + D".into(),
-            "End a remote program's input, on an empty line",
+            "Delete the character under the caret. On an empty line, end a running \
+            program's input, or `exit`",
         ),
+        ("Ctrl + L".into(), "Clear the output"),
     ];
+
+    let mut line_editing = vec![
+        ("Ctrl + A / Home".into(), "Move to the start of the line"),
+        ("Ctrl + E / End".into(), "Move to the end of the line"),
+        ("Ctrl + Left / Right".into(), "Move back / forward a word"),
+        (
+            if mac { "Ctrl + W" } else { "Ctrl + Backspace" }.into(),
+            "Delete the word before the caret",
+        ),
+        (format!("{alt} + D"), "Delete the word after the caret"),
+        ("Ctrl + K".into(), "Delete to the end of the line"),
+        ("Ctrl + U".into(), "Delete to the start of the line"),
+        ("Ctrl + Y".into(), "Paste the last deleted text"),
+        (format!("{alt} + T"), "Swap the words around the caret"),
+        (
+            format!("{alt} + C / U / L"),
+            "Capitalize / uppercase / lowercase the word at the caret",
+        ),
+        (format!("Ctrl + _ or {cmd} + Z"), "Undo"),
+    ];
+    if mac {
+        line_editing.insert(
+            8,
+            ("Ctrl + T".into(), "Swap the characters around the caret"),
+        );
+    }
 
     let mut tabs = vec![
         (
@@ -280,39 +316,63 @@ fn shortcut_groups(mac: bool) -> Vec<(&'static str, Shortcuts)> {
     vec![
         ("Anywhere", anywhere),
         ("CLI input", cli),
+        ("Line editing", line_editing),
         ("Tabs", tabs),
         ("Files panel", files),
         ("File viewer", viewer),
     ]
 }
 
-/// [shortcut_groups], each under a header that folds it away. Scrolls,
-/// so the window stays a reasonable height.
+/// Where to split [shortcut_groups] into two columns, so the taller column is
+/// as short as it can be. Each group's header counts as a row.
+fn column_split(groups: &[(&'static str, Shortcuts)]) -> usize {
+    let height = |groups: &[(&'static str, Shortcuts)]| {
+        groups.iter().map(|(_, rows)| rows.len() + 1).sum::<usize>()
+    };
+    (0..=groups.len())
+        .min_by_key(|&i| height(&groups[..i]).max(height(&groups[i..])))
+        .unwrap_or(0)
+}
+
+/// One group of shortcuts, under a header that folds it away.
+fn shortcut_group(ui: &mut Ui, title: &'static str, rows: Shortcuts) {
+    CollapsingHeader::new(title)
+        .default_open(true)
+        .show(ui, |ui| {
+            Grid::new(("about_shortcuts", title))
+                .num_columns(2)
+                .spacing([12., 4.])
+                .striped(true)
+                .show(ui, |ui| {
+                    for (keys, what) in rows {
+                        ui.label(RichText::new(keys).monospace());
+                        ui.label(what);
+                        ui.end_row();
+                    }
+                });
+        });
+}
+
+/// [shortcut_groups], in two columns. Scrolls when the window is shorter than
+/// them.
 fn shortcuts_section(ui: &mut Ui) {
     ui.strong("Keyboard shortcuts");
 
     let mac = ui.ctx().os() == OperatingSystem::Mac;
+    let mut left = shortcut_groups(mac);
+    let right = left.split_off(column_split(&left));
+
     ScrollArea::vertical()
         .id_salt("about_shortcuts")
-        .max_height(320.)
         .auto_shrink([false, true])
         .show(ui, |ui| {
-            for (title, rows) in shortcut_groups(mac) {
-                CollapsingHeader::new(title)
-                    .default_open(true)
-                    .show(ui, |ui| {
-                        Grid::new(("about_shortcuts", title))
-                            .num_columns(2)
-                            .spacing([12., 4.])
-                            .striped(true)
-                            .show(ui, |ui| {
-                                for (keys, what) in rows {
-                                    ui.label(RichText::new(keys).monospace());
-                                    ui.label(what);
-                                    ui.end_row();
-                                }
-                            });
-                    });
-            }
+            ui.columns_const(|[left_col, right_col]| {
+                for (title, rows) in left {
+                    shortcut_group(left_col, title, rows);
+                }
+                for (title, rows) in right {
+                    shortcut_group(right_col, title, rows);
+                }
+            });
         });
 }

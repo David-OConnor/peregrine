@@ -5,9 +5,8 @@ use std::{
 };
 
 use egui::{
-    Align, CentralPanel, Color32, DragValue, FontData, FontDefinitions, FontFamily, FontId, Frame,
-    Layout, Panel, Rect, RichText, ScrollArea, TextFormat, TextStyle, TextWrapMode, Ui, WidgetText,
-    text::LayoutJob,
+    Align, Color32, DragValue, FontData, FontDefinitions, FontFamily, FontId, Layout, Panel, Rect,
+    RichText, ScrollArea, TextFormat, TextStyle, TextWrapMode, Ui, WidgetText, text::LayoutJob,
 };
 use shell::DirList;
 
@@ -16,10 +15,13 @@ pub mod clipboard;
 mod cmd_history;
 pub mod dirs;
 mod file_browser;
+pub mod line_edit;
+pub mod panes;
 pub mod path_panel;
 mod project_bar;
 mod remote;
 mod remote_grid;
+pub mod scratchpad;
 mod search;
 mod settings;
 mod tab_keys;
@@ -57,6 +59,10 @@ pub const MIN_CENTRAL_WIDTH: f32 = 400.;
 /// (The side panels follow the "GUI font size" instead; see
 /// [scale_panel_fonts].)
 const PANEL_FONT_REDUCTION: f32 = 2.;
+
+/// Space between the panes' show/hide toggles and the PATH window's, which
+/// sits apart from them. See [panel_toggles].
+const PATH_TOGGLE_GAP: f32 = 60.;
 
 // Light green to match the CLI's `his N` highlight.
 const COLOR_HIS: Color32 = Color32::from_rgb(120, 240, 120);
@@ -417,6 +423,8 @@ fn apply_action(state: &mut State, action: Option<ListAction>) {
             let i = state.ui.active_tab;
             state.ui.cli_input[i] = s;
             state.ui.focus_input = true;
+            // Into the input box, so it's no use hidden.
+            state.ui.panel_vis.terminal = true;
         }
         Some(ListAction::RunInNewTab(s)) => {
             state.add_tab();
@@ -593,24 +601,24 @@ fn selection_details(s: &SelectionSummary, home: Option<&Path>, ui: &mut Ui) {
         });
 }
 
-/// Row of show/hide toggles for the optional side panels. Lives in the
+/// Row of show/hide toggles for the panes (see [panes]), in their order, so
+/// each sits where its pane does, then the PATH window's. Lives in the
 /// top tabs panel (rendered next to the tab strip) so that even when
-/// every side panel is hidden, the user still has a way to bring one
+/// every pane is hidden, the user still has a way to bring one
 /// back. Each toggle reads from / writes back to [PanelVis] on the
 /// active StateUi.
 fn panel_toggles(state: &mut State, ui: &mut Ui) {
     ui.horizontal(|ui| {
         let v = &mut state.ui.panel_vis;
-        ui.toggle_value(&mut v.bookmarks, "Bookmarks");
-        ui.toggle_value(&mut v.recent_dirs, "Recent dirs");
-        ui.toggle_value(&mut v.file_browser, "Files");
-        ui.toggle_value(&mut v.remote_terminals, "Remote");
-        ui.toggle_value(&mut v.recent_cmds_in_dir, "Cmds this dir");
-        ui.toggle_value(&mut v.recent_cmds, "Recent cmds");
-        // Opens a window of its own rather than a side panel.
+        for pane in state.ui.pane_order {
+            let r = ui.toggle_value(pane.visible_mut(v), pane.title());
+            if pane == panes::Pane::Clipboard {
+                r.on_hover_text("Toggle clipboard history (Ctrl+Shift+V)");
+            }
+        }
+        // Opens a window of its own rather than a pane, so it's set apart.
+        ui.add_space(PATH_TOGGLE_GAP);
         ui.toggle_value(&mut v.path_editor, "PATH");
-        ui.toggle_value(&mut v.clipboard, "Clipboard")
-            .on_hover_text("Toggle clipboard history (Ctrl+Shift+V)");
     });
 }
 
@@ -625,6 +633,8 @@ fn panel_vis_eq(a: &shell::PanelVis, b: &shell::PanelVis) -> bool {
         && a.file_browser == b.file_browser
         && a.path_editor == b.path_editor
         && a.clipboard == b.clipboard
+        && a.scratchpad == b.scratchpad
+        && a.terminal == b.terminal
 }
 
 /// Returns the requested change in font size, or zero when unchanged.
@@ -734,104 +744,10 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
         panel_toggles(state, ui);
     });
 
-    // The side panels' text follows the "GUI font size" control.
-    let gui_font_size = state.gui_font_size;
-
     // Each side panel opens at its saved width (falling back to its default)
     // and records the width it was drawn at, so `save` persists drags.
     let prev = state.ui.panel_widths;
-
-    if state.ui.panel_vis.bookmarks {
-        let max = central_reserve(ui, f32::INFINITY);
-        let r = Panel::left("bookmarks_panel")
-            .resizable(true)
-            .default_size(prev.bookmarks.unwrap_or(dirs::BOOKMARK_COL_WIDTH))
-            .max_size(max)
-            .show(ui, |ui| {
-                scale_panel_fonts(ui, gui_font_size);
-                dirs::dir_bookmarks(state, ui);
-            });
-        state.ui.panel_widths.bookmarks = Some(r.response.rect.width());
-    }
-
-    if state.ui.panel_vis.recent_dirs {
-        let max = central_reserve(ui, f32::INFINITY);
-        let r = Panel::left("recent_dirs_panel")
-            .resizable(true)
-            .default_size(prev.recent_dirs.unwrap_or(dirs::RECENT_DIRS_COL_WIDTH))
-            .max_size(max)
-            .show(ui, |ui| {
-                scale_panel_fonts(ui, gui_font_size);
-                dirs::dir_history(state, ui);
-            });
-        state.ui.panel_widths.recent_dirs = Some(r.response.rect.width());
-    }
-
-    if state.ui.panel_vis.file_browser {
-        let max = central_reserve(ui, f32::INFINITY);
-        let r = Panel::left("file_browser_panel")
-            .resizable(true)
-            .default_size(prev.file_browser.unwrap_or(BROWSER_COL_WIDTH))
-            .max_size(max)
-            .show(ui, |ui| {
-                scale_panel_fonts(ui, gui_font_size);
-                file_browser::file_browser(state, ui);
-            });
-        state.ui.panel_widths.file_browser = Some(r.response.rect.width());
-    }
-
-    if state.ui.panel_vis.clipboard {
-        let max = central_reserve(ui, f32::INFINITY);
-        Panel::right("clipboard_panel")
-            .resizable(true)
-            .default_size(260.0)
-            .max_size(max)
-            .show(ui, |ui| {
-                scale_panel_fonts(ui, gui_font_size);
-                clipboard::draw(state, ui);
-            });
-    }
-
-    if state.ui.panel_vis.remote_terminals {
-        let max = central_reserve(ui, f32::INFINITY);
-        let r = Panel::left("remote_terminals_panel")
-            .resizable(true)
-            .default_size(prev.remote_terminals.unwrap_or(REMOTE_COL_WIDTH))
-            .max_size(max)
-            .show(ui, |ui| {
-                scale_panel_fonts(ui, gui_font_size);
-                remote::remote_terminals(state, ui);
-            });
-        state.ui.panel_widths.remote_terminals = Some(r.response.rect.width());
-    }
-
-    if state.ui.panel_vis.recent_cmds {
-        // Long commands wrap inside the panel (see [cmd_history]) rather
-        // than widening it, so it stays at whatever width it's dragged to.
-        let max = central_reserve(ui, f32::INFINITY);
-        let r = Panel::right("cmd_history_panel")
-            .resizable(true)
-            .default_size(prev.recent_cmds.unwrap_or(RIGHT_COL_WIDTH))
-            .max_size(max)
-            .show(ui, |ui| {
-                scale_panel_fonts(ui, gui_font_size);
-                cmd_history::cmd_history(state, ui);
-            });
-        state.ui.panel_widths.recent_cmds = Some(r.response.rect.width());
-    }
-
-    if state.ui.panel_vis.recent_cmds_in_dir {
-        let max = central_reserve(ui, f32::INFINITY);
-        let r = Panel::right("cwd_cmd_history_panel")
-            .resizable(true)
-            .default_size(prev.recent_cmds_in_dir.unwrap_or(CWD_HIST_COL_WIDTH))
-            .max_size(max)
-            .show(ui, |ui| {
-                scale_panel_fonts(ui, gui_font_size);
-                cmd_history::cwd_cmd_history(state, ui);
-            });
-        state.ui.panel_widths.recent_cmds_in_dir = Some(r.response.rect.width());
-    }
+    panes::draw(state, ui);
 
     // A width that changed while the pointer is held is a drag on a panel
     // edge. Saved once released (below) rather than every frame of the drag.
@@ -841,30 +757,6 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
     if pointer_down && state.ui.panel_widths != prev {
         state.ui.panel_widths_unsaved = true;
     }
-
-    // Black backgrounds on the terminal panes so they read as a terminal,
-    // not as a regular widget area.
-    let term_frame = Frame::default()
-        .fill(Color32::BLACK)
-        .inner_margin(egui::Margin::same(6));
-
-    // The terminal panes look the same in either theme: always the light
-    // visuals, whose white input box stands out against the black fill (the
-    // dark theme's near-black one would vanish into it).
-    // Pin the input row to the bottom of the central area, with the
-    // scrolling output pane filling the remaining space above it.
-    Panel::bottom("term_in_panel")
-        .resizable(false)
-        .frame(term_frame)
-        .show(ui, |ui| {
-            *ui.visuals_mut() = egui::Visuals::light();
-            terminal::term_in(state, ui);
-        });
-
-    CentralPanel::default().frame(term_frame).show(ui, |ui| {
-        *ui.visuals_mut() = egui::Visuals::light();
-        terminal::term_out(state, ui);
-    });
 
     // File viewer windows are child viewports: they only stay open while
     // the main window's pass keeps showing them.
@@ -877,6 +769,7 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
     settings::show(state, ui.ctx());
     dirs::stale_dir_popup(state, ui.ctx());
     file_browser::delete_popup(state, ui.ctx());
+    scratchpad::popups(state, ui.ctx());
 
     // A command was submitted this frame: paint its echo, then come straight
     // back to run it.
@@ -884,11 +777,16 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
         ui.ctx().request_repaint();
     }
 
-    // Persist on any change so the layout and clipboard history survive
-    // restart.
+    // Persist on any change so the layout, clipboard history and scratchpad
+    // survive restart.
     let drag_done = state.ui.panel_widths_unsaved && !pointer_down;
     let clipboard_changed = std::mem::take(&mut state.ui.clipboard.history.unsaved);
-    if drag_done || clipboard_changed || !panel_vis_eq(&vis_before, &state.ui.panel_vis) {
+    let scratchpad_due = state.ui.scratchpad.save_due(ui.ctx());
+    if drag_done
+        || clipboard_changed
+        || scratchpad_due
+        || !panel_vis_eq(&vis_before, &state.ui.panel_vis)
+    {
         state.ui.panel_widths_unsaved = false;
         let _ = state.save();
     }

@@ -348,7 +348,7 @@ const TAB_WIDTH: f32 = 120.;
 const TAB_GAP: f32 = 2.;
 /// The active tab's fill and label colour: purple, so it can't be mistaken
 /// for the blue "on" state of the panel toggles below. See [tab_button].
-const TAB_ACTIVE_FILL: Color32 = Color32::from_rgb(128, 64, 208);
+pub(super) const TAB_ACTIVE_FILL: Color32 = Color32::from_rgb(128, 64, 208);
 const TAB_ACTIVE_TEXT: Color32 = Color32::WHITE;
 /// Background of the tab section of the top strip (the tabs and `+ tab`),
 /// setting it apart from the controls beside it and the panel-toggle row
@@ -359,4 +359,4 @@ const TAB_BAR_FILL_LIGHT: Color32 = Color32::from_rgb(226, 220, 248);
 const TAB_SECTION_MARGIN: egui::Margin = egui::Margin::symmetric(6, 3);
 const TAB_SECTION_ROUNDING: u8 = 4;
 /// Width of the line marking where a dragged tab will land. See [tabs_bar].
-const TAB_DROP_MARKER_WIDTH: f32 = 2.;
+pub(super) const TAB_DROP_MARKER_WIDTH: f32 = 2.;

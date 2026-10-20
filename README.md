@@ -30,7 +30,7 @@ If you use a fully CLI workflow, or if your terminal program must be available w
 
 ## Hotkeys of immediate interest
 **Tab**: Clears and focuses the CLI input. This is useful for, e.g. immediately navigating to a directory
-you know, regardless of which UI item you're using. E.g. to go to a bookmark named `molchanica`:
+you know, regardless of which UI item you're using. E.g. to go to a bookmark or recent directory named `molchanica`:
 
 - Press **Tab**
 - Type `cd mol`
@@ -114,6 +114,7 @@ Shortcuts to reduce typing:
 - Middle clicking a directory or command in a panel opens that directory or launches that command in a new tab
 - Middle click a tab to close it
 - Drag a tab left or right to reorder it
+- Drag a panel, or the terminal, by the dotted strip across its top to move it left or right. The toggles above follow the order. With the terminal hidden, the panel beside it fills the middle.
 - Select CLI output text and right-click to copy it to the system clipboard and clipboard history (Supplements *Ctrl + C*)
 - Numerical settings can be changed by clicking and dragging the mouse (or by typing)
 
@@ -154,6 +155,32 @@ On Mac, use **Cmd** in place of **Ctrl**, except for the **Ctrl + Tab** and **Ct
 - **Ctrl + Shift + Tab** or **Ctrl + PageUp**: Previous tab. On Mac, also **Cmd + Option + Left**
 - **Ctrl + 1** to **Ctrl + 8**: Jump to that tab, counting from the left
 - **Ctrl + 9**: Jump to the last tab
+
+
+### Terminal
+This section is mostly a copy+paste from [Shell's readme](https://github.com/david-oconnor/shell/README.md), as we use the same shortcuts here.
+
+On Windows and Linux, **Ctrl + W**, **Ctrl + T**, and **Ctrl + N** stay tab shortcuts (see above). Use **Ctrl + Backspace** to delete the word before the cursor, and **↓** for the next history entry. On Mac, where tabs use **Cmd**, all of these work, and the **Alt** shortcuts are **Cmd + Option**, since Option + a letter types a symbol.
+
+- **Tab**: while using with cd, autocompletes, including to bookmarks.
+- **Ctrl + A** / **Home**: Move the cursor to the start of the line.
+- **Ctrl + E** / **End**: Move the cursor to the end of the line. With the cursor already there, accepts the dimmed history suggestion.
+- **Ctrl + ←** / **Ctrl +** →: Move the cursor back / forward one word.
+- **Ctrl + W**: Delete the word before the cursor. (Mac)
+- **Alt + D**: Delete the word after the cursor.
+- **Ctrl + K**: Delete from the cursor to the end of the line.
+- **Ctrl + U**: Delete from the cursor to the start of the line.
+- **Ctrl + Y**: Paste the last deleted text. Deletions made one after another paste back together.
+- **Ctrl + T**: Swap the two characters around the cursor. (Mac) **Alt + T** swaps words.
+- **Alt + C** / **Alt + U** / **Alt + L**: Capitalize / uppercase / lowercase the word at the cursor.
+- **Ctrl + _**: Undo. **Ctrl + Z** does too.
+- **Ctrl + L**: Clear the screen.
+- **Ctrl + N** / **Ctrl + P**: Next / previous history entry, as ↓ / ↑. (**Ctrl + N** on Mac)
+- **Ctrl + C**: Cancel the current input. Stops the running command instead, if there is one, and copies if text is selected.
+- **Ctrl + D**: Delete the character under the cursor. On an empty line, ends a running program's input; with nothing running, it's `exit`.
+
+### Scratchpad
+Notes kept between runs, in a side panel (the **Scratchpad** toggle). The Terminal keys above work in it too, on the cursor's line: **Ctrl + A** / **Ctrl + E** go to its start / end, **Ctrl + K** / **Ctrl + U** delete to them (**Ctrl + K** at a line's end joins the next line on), and **Ctrl + P** / **Ctrl + N** move up / down a line. As in the CLI input, **Ctrl + W**, **Ctrl + T** and **Ctrl + N** stay tab shortcuts on Windows and Linux. **Tab** indents, rather than going to the CLI input.
 
 ### Bookmarks
 - **Alt + 0** to **Alt + 9**: Go to that bookmark, by its number in the Bookmarks panel. (Same as `bm 1` etc in the CLI.) On Mac, **Cmd + Option + 0** to **9**

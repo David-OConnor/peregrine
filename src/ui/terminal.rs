@@ -13,7 +13,11 @@ use egui::{
 };
 use shell::DirList;
 
-use super::{COLOR_BRANCH, COLOR_HIS, clipboard, remote_grid};
+use super::{
+    COLOR_BRANCH, COLOR_HIS, clipboard,
+    line_edit::{self, Edit, LineKey},
+    remote_grid, scratchpad,
+};
 use crate::{
     OutType, path_color,
     path_color::Part,
@@ -409,12 +413,17 @@ fn input_id() -> Id {
 
 /// Tab, from anywhere in the window, empties the CLI input and moves the
 /// keyboard to it, in place of egui's moving focus to the next widget. Not
-/// in the input itself, where Tab autocompletes, or while a popup is up,
-/// where it moves between the popup's buttons. While a full-screen program
+/// in the input itself, where Tab autocompletes, in the Scratchpad, where it
+/// indents, or while a popup is up, where it moves between the popup's
+/// buttons. While a full-screen program
 /// runs on the remote, its screen stands in for the input, so Tab moves the
-/// keyboard there instead.
+/// keyboard there instead. Either way, a hidden terminal is shown.
 pub fn focus_input_key(state: &mut State, ctx: &Context) {
-    if ctx.memory(|m| m.has_focus(input_id()) || m.top_modal_layer().is_some()) {
+    if ctx.memory(|m| {
+        m.has_focus(input_id())
+            || m.has_focus(scratchpad::edit_id())
+            || m.top_modal_layer().is_some()
+    }) {
         return;
     }
 
@@ -441,6 +450,7 @@ pub fn focus_input_key(state: &mut State, ctx: &Context) {
     // egui already read the Tab, at the start of the frame, as a move to
     // the next widget.
     ctx.memory_mut(|m| m.move_focus(egui::FocusDirection::None));
+    state.ui.panel_vis.terminal = true;
 
     if state.live_here().is_some_and(|l| l.grid_mode()) {
         ctx.memory_mut(|m| m.request_focus(remote_grid::grid_id()));
@@ -570,8 +580,17 @@ pub fn term_in(state: &mut State, ui: &mut Ui) {
 
     let submitted = consume(ui, Key::Enter);
     let tab = consume(ui, Key::Tab);
-    let up = !tab && consume(ui, Key::ArrowUp);
-    let down = !tab && consume(ui, Key::ArrowDown);
+    // Shell's line-editing keys (see [line_edit]). Ctrl+P / Ctrl+N are Up /
+    // Down's, and Ctrl+E and End accept the suggestion as → does.
+    let mac = ui.ctx().os() == OperatingSystem::Mac;
+    let line_keys = if focused {
+        ui.input_mut(|i| line_edit::take_keys(&mut i.events, mac))
+    } else {
+        Vec::new()
+    };
+    let history_key = |up| line_keys.contains(&LineKey::History { up });
+    let up = !tab && (consume(ui, Key::ArrowUp) || history_key(true));
+    let down = !tab && (consume(ui, Key::ArrowDown) || history_key(false));
     let cd_active = cd_cursor.is_some() || state.ui.cli_input[active].is_empty();
     let left = !tab && !up && !down && cd_active && consume(ui, Key::ArrowLeft);
     let right = !tab && !up && !down && !left && cd_active && consume(ui, Key::ArrowRight);
@@ -597,14 +616,13 @@ pub fn term_in(state: &mut State, ui: &mut Ui) {
         && !down
         && !left
         && !right
-        && (consume(ui, Key::ArrowRight) || consume(ui, Key::End));
+        && (consume(ui, Key::ArrowRight) || line_keys.contains(&LineKey::Edit(Edit::End)));
 
-    // Ctrl+C stops a running command, as in a terminal, unless there's text
-    // selected for it to copy (egui sends it as a Copy event, not a key).
-    if running.is_some()
-        && focused
-        && ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy)))
-    {
+    // Ctrl+C stops a running command, as in a terminal, or else cancels the
+    // input, unless there's text selected for it to copy (egui sends it as a
+    // Copy event, not a key).
+    let mut cancel_input = false;
+    if focused && ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy))) {
         let input_selected = TextEdit::load_state(ui.ctx(), input_id)
             .and_then(|s| s.cursor.char_range())
             .is_some_and(|r| !r.is_empty());
@@ -612,10 +630,20 @@ pub fn term_in(state: &mut State, ui: &mut Ui) {
             .ctx()
             .with_plugin(|s: &mut egui::text_selection::LabelSelectionState| s.has_selection())
             .unwrap_or(false);
-        stop |= !input_selected && !label_selected;
+        if !input_selected && !label_selected {
+            if running.is_some() {
+                stop = true;
+            } else {
+                cancel_input = true;
+            }
+        }
     }
     if cancel {
         state.disconnect_remote();
+    }
+    if cancel_input {
+        state.ui.cli_input[active].clear();
+        state.reset_history_nav();
     }
     if stop {
         if remote_busy.is_some() {
@@ -624,16 +652,6 @@ pub fn term_in(state: &mut State, ui: &mut Ui) {
             state.stop_running();
         }
         state.ui.focus_input = true;
-    }
-    // Ctrl+D on an empty line ends a remote program's input (`cat`, a REPL).
-    if remote_busy.is_some()
-        && focused
-        && state.ui.cli_input[active].is_empty()
-        && ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, Key::D))
-    {
-        if let Some(live) = state.live_here() {
-            live.session.send(&[0x04]);
-        }
     }
 
     // A full-screen remote program has the keyboard, and the pane.
@@ -644,6 +662,33 @@ pub fn term_in(state: &mut State, ui: &mut Ui) {
                 .small(),
         );
         return;
+    }
+
+    // Before the box is drawn, so it shows their result.
+    for key in line_keys {
+        match key {
+            // Handled with Up / Down, and with the suggestion, above.
+            LineKey::History { .. } => {}
+            LineKey::Edit(Edit::End) if accept_hint => {}
+            LineKey::Edit(edit) => edit_input(state, ui.ctx(), edit),
+            LineKey::ClearScreen => state.clear_out(),
+            LineKey::Eof if !state.ui.cli_input[active].is_empty() => {
+                edit_input(state, ui.ctx(), Edit::DeleteChar);
+            }
+            // On an empty line, Ctrl+D ends a running program's input (`cat`,
+            // a REPL), as in a terminal. With nothing running, it's `exit`.
+            LineKey::Eof => {
+                if remote_busy.is_some() {
+                    if let Some(live) = state.live_here() {
+                        live.session.send(&[0x04]);
+                    }
+                } else if running.is_some() {
+                    state.end_running_input();
+                } else {
+                    submit_command(state, "exit");
+                }
+            }
+        }
     }
 
     // Input box sits on its own row, directly beneath the prompt line above.
@@ -736,6 +781,13 @@ pub fn term_in(state: &mut State, ui: &mut Ui) {
         }
         state.ui.focus_input = true;
     }
+}
+
+/// Apply `edit` to the active tab's input, moving the input box's caret to
+/// match.
+fn edit_input(state: &mut State, ctx: &Context, edit: Edit) {
+    let line = &mut state.ui.cli_input[state.ui.active_tab];
+    line_edit::apply_in_box(ctx, input_id(), line, edit, &mut state.ui.kill_ring);
 }
 
 /// The "terminal" output pane: scrolls, sticks to the bottom so the latest

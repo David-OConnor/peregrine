@@ -294,6 +294,12 @@ impl RunningCmd {
         }
     }
 
+    /// Close the command's stdin, so it reads the end of its input. Lines
+    /// typed after are ignored, as in [Self::send_line].
+    pub fn close_stdin(&mut self) {
+        self.stdin = None;
+    }
+
     /// End the command and everything it started, as Ctrl+C in a terminal
     /// would (though without giving it the chance to clean up that a Ctrl+C
     /// does). Its exit then arrives through [Self::poll] as usual.

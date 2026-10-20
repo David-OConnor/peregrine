@@ -133,9 +133,8 @@ fn groups(state: &mut State, ui: &mut Ui) {
             if cmd_button(ui, idle, "Black", black_hover) {
                 line = Some(Ok(project::python_black(&dir).to_owned()));
             }
-            let run_hover = "Django's `manage.py runserver`, or else run.py, main.py or app.py \
-                             from this folder, src, or the package folder. With uv when it's on \
-                             PATH and there's a pyproject.toml, else the venv's python.";
+            let run_hover =
+                "Run this Python application. Uses `uv` and/or the included venv, if available.";
             if run_button(ui, idle, run_hover, &mut stop) {
                 line = Some(project::python_run(&dir));
             }

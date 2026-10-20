@@ -28,7 +28,11 @@ use crate::{
     remote::{LiveRemote, Remote},
     running::RunningCmd,
     terminal::{self, Output},
-    ui::{self, path_panel::PathPanel},
+    ui::{
+        self,
+        panes::{self, Pane},
+        path_panel::PathPanel,
+    },
     viewer::{FileViewers, ImagePreview},
 };
 
@@ -64,6 +68,11 @@ pub struct StateUi {
     /// The input at a Tab whose completion was ambiguous and added nothing.
     /// A second Tab on the same input lists the candidates, as the CLI does.
     pub tab_list_pending: Option<String>,
+    /// Text deleted from the CLI input with Shell's line-editing keys, for
+    /// Ctrl+Y to paste back. One for all tabs, as the CLI's line editor has.
+    pub kill_ring: ui::line_edit::KillRing,
+    /// The Scratchpad window's notes. Its text is saved in the state file.
+    pub scratchpad: ui::scratchpad::Scratchpad,
 
     /// Search text for each sidebar panel. Empty = "show everything". Updated
     /// in-place by the panel's TextEdit.
@@ -93,6 +102,8 @@ pub struct StateUi {
     /// walks `recent_dirs`. See [NavState].
     pub history_nav: Vec<NavState>,
     pub panel_vis: PanelVis,
+    /// The panes, left to right. See [ui::panes].
+    pub pane_order: [Pane; 9],
     /// Each side panel's width as drawn last frame (`None` until it's first
     /// shown, when nothing was saved). Persisted so the panels reopen at the
     /// widths the user dragged them to; the saved value seeds the panel's
@@ -266,6 +277,8 @@ impl Default for StateUi {
             focus_input: true,
             pending_cmd: None,
             tab_list_pending: None,
+            kill_ring: Default::default(),
+            scratchpad: Default::default(),
             bookmarks_search: String::new(),
             recent_dirs_search: String::new(),
             history_search: String::new(),
@@ -277,6 +290,7 @@ impl Default for StateUi {
             cwd_history_filter: Vec::new(),
             history_nav: vec![NavState::new()],
             panel_vis: PanelVis::default(),
+            pane_order: Pane::DEFAULT_ORDER,
             panel_widths: PanelWidths::default(),
             panel_widths_unsaved: false,
             nav_back: vec![Vec::new()],
@@ -1207,6 +1221,8 @@ impl State {
                 dir_color_depth: Some(path_color::depth_levels()),
             },
             &self.ui.clipboard.history.entries,
+            &self.ui.scratchpad.text,
+            &panes::order_keys(&self.ui.pane_order),
             &self.state_path,
         )
     }
@@ -1289,6 +1305,7 @@ impl State {
 
         let mut ui = StateUi::default();
         ui.panel_vis = loaded.panel_vis;
+        ui.pane_order = panes::order_from_keys(&loaded.pane_order);
         ui.panel_widths = loaded.panel_widths;
         let prefs = loaded.files_panel;
         ui.show_hidden_attr = prefs.show_hidden.unwrap_or(ui.show_hidden_attr);
@@ -1306,6 +1323,7 @@ impl State {
         ui.nav_back = (0..n).map(|_| Vec::new()).collect();
         ui.nav_forward = (0..n).map(|_| Vec::new()).collect();
         ui.clipboard.history = clipboard::History::from_saved(loaded.clipboard);
+        ui.scratchpad.text = loaded.scratchpad;
         // The OS clipboard most likely still holds the newest entry. Saying
         // so means the watcher's first look doesn't record it again with a
         // new time; if it holds something else, the watcher corrects this.
@@ -1986,6 +2004,14 @@ impl State {
     pub fn stop_running(&mut self) {
         if let Some(cmd) = self.running[self.ui.active_tab].as_mut() {
             cmd.stop();
+        }
+    }
+
+    /// End the input of the command running in the active tab, as Ctrl+D on
+    /// an empty line does in a terminal.
+    pub fn end_running_input(&mut self) {
+        if let Some(cmd) = self.running[self.ui.active_tab].as_mut() {
+            cmd.close_stdin();
         }
     }
 
