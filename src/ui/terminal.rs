@@ -4,8 +4,8 @@
 use std::sync::Arc;
 
 use egui::{
-    Color32, Context, CursorIcon, Event, FontId, Galley, Key, KeyboardShortcut, Modifiers, Rect,
-    RichText, ScrollArea, Sense, TextEdit, TextStyle, Ui,
+    Color32, Context, CursorIcon, Event, FontId, Galley, Id, Key, KeyboardShortcut, Modifiers,
+    Rect, RichText, ScrollArea, Sense, TextEdit, TextStyle, Ui,
     os::OperatingSystem,
     text::CCursor,
     text_selection::{CCursorRange, TextCursorState, visuals::paint_text_selection},
@@ -402,6 +402,56 @@ pub fn bookmark_number_keys(state: &mut State, ctx: &Context) {
     }
 }
 
+/// The CLI input box's id, so [focus_input_key] can tell when it has focus.
+fn input_id() -> Id {
+    Id::new("cli_input")
+}
+
+/// Tab, from anywhere in the window, empties the CLI input and moves the
+/// keyboard to it, in place of egui's moving focus to the next widget. Not
+/// in the input itself, where Tab autocompletes, or while a popup is up,
+/// where it moves between the popup's buttons. While a full-screen program
+/// runs on the remote, its screen stands in for the input, so Tab moves the
+/// keyboard there instead.
+pub fn focus_input_key(state: &mut State, ctx: &Context) {
+    if ctx.memory(|m| m.has_focus(input_id()) || m.top_modal_layer().is_some()) {
+        return;
+    }
+
+    let pressed = ctx.input_mut(|i| {
+        let mut pressed = false;
+        i.events.retain(|event| match event {
+            Event::Key {
+                key: Key::Tab,
+                pressed: true,
+                modifiers,
+                ..
+            } if modifiers.is_none() => {
+                pressed = true;
+                false
+            }
+            _ => true,
+        });
+        pressed
+    });
+    if !pressed {
+        return;
+    }
+
+    // egui already read the Tab, at the start of the frame, as a move to
+    // the next widget.
+    ctx.memory_mut(|m| m.move_focus(egui::FocusDirection::None));
+
+    if state.live_here().is_some_and(|l| l.grid_mode()) {
+        ctx.memory_mut(|m| m.request_focus(remote_grid::grid_id()));
+        return;
+    }
+    let i = state.ui.active_tab;
+    state.ui.cli_input[i].clear();
+    state.reset_history_nav();
+    state.ui.focus_input = true;
+}
+
 /// The input row: prompt line on top, with an edit beneath it that wraps long
 /// input onto extra rows. Enter submits. When the user is recalling a history entry via Up/Down or
 /// a recent dir via Left/Right, a green ` his N` / ` cd N` label is
@@ -513,7 +563,7 @@ pub fn term_in(state: &mut State, ui: &mut Ui) {
     // moving between wrapped rows. Left/Right only steal the keystroke when
     // the buffer is empty or a cd recall is already active — otherwise they
     // stay as normal caret movement.
-    let input_id = ui.make_persistent_id("cli_input");
+    let input_id = input_id();
     let focused = ui.memory(|m| m.has_focus(input_id));
     let consume =
         |ui: &mut Ui, key| focused && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, key));

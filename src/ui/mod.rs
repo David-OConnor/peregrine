@@ -710,6 +710,7 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
         tab_keys::handle(state, ui.ctx());
         terminal::toggle_bookmark_key(state, ui.ctx());
         terminal::bookmark_number_keys(state, ui.ctx());
+        terminal::focus_input_key(state, ui.ctx());
     }
 
     // Bring in output from shell commands running in the background, and

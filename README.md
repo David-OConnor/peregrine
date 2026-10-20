@@ -28,6 +28,14 @@ If you are navigating to a regularly-used directory via CLI and are doing too mu
 ## Who this is not for
 If you use a fully CLI workflow, or if your terminal program must be available when you are using an arbitrary computer or via SSH, this is not what you're looking for. If you perform all file operations in a terminal, or all in a GUI, this is not for you - it's for workflows that use both. This is not a shell scripting language, and its CLI functionality runs on top of your OS's native terminal.
 
+## Hotkeys of immediate interest
+**Tab**: Clears and focuses the CLI input. This is useful for, e.g. immediately navigating to a directory
+you know, regardless of which UI item you're using. E.g. to go to a bookmark named `molchanica`:
+
+- Press **Tab**
+- Type `cd mol`
+- Press **Enter***
+
 
 ## Everything is searchable
 You can search in every GUI panel: bookmarks, recent directories, recent commands, clipboard etc. The file browser has a quick filter, and full Ripgrep search for file names or contents.
@@ -111,6 +119,9 @@ Shortcuts to reduce typing:
 
 
 ## Keyboard shortcuts
+The About window lists these too.
+
+- **Tab**: Focus the CLI input, and clear it. Works anywhere in the window; in the CLI input itself, Tab autocompletes instead
 - **Ctrl + V**, **Ctrl + C**, **Ctrl + X** paste, copy, and cut using the native advanced clipboard, and/or system one
 - **Ctrl + Shift + V**: Toggle the clipboard pane
 
@@ -119,6 +130,8 @@ Shortcuts to reduce typing:
 - **Shift or Ctrl + arrow keys** extend the selection
 - **Ctrl + A** selects everything shown
 - **Escape** clears selections
+- **Delete** moves the selected items to the Recycle Bin (Trash on Mac and Linux), after confirming
+- **Ctrl + Shift + N** creates a new folder. On Mac, **Cmd + Shift + N**
 
 ### File viewer
 On Mac, use **Cmd** in place of **Ctrl**.

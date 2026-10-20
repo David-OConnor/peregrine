@@ -3,7 +3,10 @@
 
 use std::{path::Path, time::Duration};
 
-use egui::{Context, ProgressBar, RichText, Ui, ViewportCommand, Window};
+use egui::{
+    CollapsingHeader, Context, Grid, ProgressBar, RichText, ScrollArea, Ui, ViewportCommand,
+    Window, os::OperatingSystem,
+};
 use software_manager::{Application, UpdateStatus};
 
 use crate::{VERSION, files::open_with_default_app, render_with_tilde, state::State};
@@ -155,6 +158,161 @@ pub(super) fn show(state: &mut State, ctx: &Context) {
                         .small(),
                 );
             }
+
+            ui.add_space(8.);
+            ui.separator();
+            shortcuts_section(ui);
         });
     state.ui.about = open;
+}
+
+/// A list of keys and what they do.
+type Shortcuts = Vec<(String, &'static str)>;
+
+/// Every keyboard shortcut, grouped by where it works, with this OS's keys.
+fn shortcut_groups(mac: bool) -> Vec<(&'static str, Shortcuts)> {
+    let cmd = if mac { "Cmd" } else { "Ctrl" };
+    // Option + a digit or letter types a symbol on Mac.
+    let alt = if mac { "Cmd + Option" } else { "Alt" };
+
+    let anywhere = vec![
+        ("Tab".into(), "Focus the CLI input, and clear it"),
+        (
+            format!("{cmd} + B"),
+            "Bookmark the current directory, or remove its bookmark",
+        ),
+        (
+            format!("{alt} + 0 to 9"),
+            "Go to that bookmark, by its number in the Bookmarks panel",
+        ),
+        (
+            format!("{cmd} + C / X / V"),
+            "Copy, cut, and paste, with clipboard history",
+        ),
+        ("Ctrl + Shift + V".into(), "Show or hide the clipboard pane"),
+    ];
+
+    let cli = vec![
+        ("Enter".into(), "Run the input"),
+        ("Tab".into(), "Autocomplete the input"),
+        ("Up / Down".into(), "Walk command history"),
+        (
+            "Left / Right".into(),
+            "Walk recent directories, while the input is empty",
+        ),
+        (
+            "Right / End".into(),
+            "Accept the dimmed suggestion, with the caret at the end",
+        ),
+        (
+            format!("{cmd} + C"),
+            "Stop the running command, when no text is selected",
+        ),
+        (
+            "Ctrl + D".into(),
+            "End a remote program's input, on an empty line",
+        ),
+    ];
+
+    let mut tabs = vec![
+        (
+            format!("{cmd} + T or {cmd} + N"),
+            "New tab, in the current tab's directory",
+        ),
+        (format!("{cmd} + W"), "Close the current tab"),
+        (format!("{cmd} + Shift + T"), "Reopen the last closed tab"),
+        ("Ctrl + Tab or Ctrl + PageDown".into(), "Next tab"),
+        ("Ctrl + Shift + Tab or Ctrl + PageUp".into(), "Previous tab"),
+        (
+            format!("{cmd} + 1 to 8"),
+            "Jump to that tab, counting from the left",
+        ),
+        (format!("{cmd} + 9"), "Jump to the last tab"),
+    ];
+    if mac {
+        tabs.insert(
+            5,
+            ("Cmd + Option + Right / Left".into(), "Next / previous tab"),
+        );
+    }
+
+    let files = vec![
+        ("Enter".into(), "Open the selected file"),
+        ("Arrow keys".into(), "Move the selection"),
+        ("Shift + arrow keys".into(), "Extend the selection"),
+        (format!("{cmd} + A"), "Select everything shown"),
+        ("Escape".into(), "Clear the selection"),
+        (
+            "Delete".into(),
+            if cfg!(windows) {
+                "Move the selection to the Recycle Bin, after confirming"
+            } else {
+                "Move the selection to the Trash, after confirming"
+            },
+        ),
+        (format!("{cmd} + Shift + N"), "New folder"),
+        (
+            format!("{cmd} + C / X / V"),
+            "Copy, cut, and paste the selected files",
+        ),
+    ];
+
+    let viewer = vec![
+        (format!("{cmd} + F"), "Find"),
+        (
+            "Enter / Shift + Enter".into(),
+            "Next / previous match, in the find box",
+        ),
+        ("F3 / Shift + F3".into(), "Next / previous match"),
+        (
+            format!("{cmd} + G / {cmd} + Shift + G"),
+            "Next / previous match",
+        ),
+        (format!("{alt} + C"), "Toggle match case"),
+        ("Escape".into(), "Clear the search, in the find box"),
+        ("F5".into(), "Reload the file"),
+        (
+            "Left / Right".into(),
+            "Previous / next image in the directory",
+        ),
+    ];
+
+    vec![
+        ("Anywhere", anywhere),
+        ("CLI input", cli),
+        ("Tabs", tabs),
+        ("Files panel", files),
+        ("File viewer", viewer),
+    ]
+}
+
+/// [shortcut_groups], each under a header that folds it away. Scrolls,
+/// so the window stays a reasonable height.
+fn shortcuts_section(ui: &mut Ui) {
+    ui.strong("Keyboard shortcuts");
+
+    let mac = ui.ctx().os() == OperatingSystem::Mac;
+    ScrollArea::vertical()
+        .id_salt("about_shortcuts")
+        .max_height(320.)
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            for (title, rows) in shortcut_groups(mac) {
+                CollapsingHeader::new(title)
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        Grid::new(("about_shortcuts", title))
+                            .num_columns(2)
+                            .spacing([12., 4.])
+                            .striped(true)
+                            .show(ui, |ui| {
+                                for (keys, what) in rows {
+                                    ui.label(RichText::new(keys).monospace());
+                                    ui.label(what);
+                                    ui.end_row();
+                                }
+                            });
+                    });
+            }
+        });
 }
