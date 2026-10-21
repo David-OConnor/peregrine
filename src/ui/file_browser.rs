@@ -785,7 +785,7 @@ fn file_list(state: &mut State, ui: &mut Ui, search_changed: bool, arrow_moved: 
                     if bookmarked && !dark {
                         rich = rich.color(BOOKMARKED_TEXT);
                     }
-                    // Same colour this folder has in any path shown elsewhere.
+                    // Same color this folder has in any path shown elsewhere.
                     let path = render_with_tilde(&f.path, home.as_deref());
                     if let Some(c) = path_color::last_color(&path, Some("~"), dark) {
                         rich = rich.color(c);
@@ -1331,7 +1331,7 @@ fn name_box(
     .inner
 }
 
-// Executable-file colour in the file-browser column.
+// Executable-file color in the file-browser column.
 pub const COLOR_EXECUTABLE: Color32 = Color32::from_rgb(120, 220, 120);
 /// The Files list splits into as many columns as fit at least this many
 /// monospace characters each (so the threshold follows the GUI font size).

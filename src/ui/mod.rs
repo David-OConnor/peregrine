@@ -198,15 +198,15 @@ enum ListAction {
     RemoveRemote(usize),
 }
 
-/// `path` as `~/...`, colour-coded by directory (see [path_color]) with its
-/// final part bold, in the body font. Uncoloured runs take the label's own
-/// text colour.
+/// `path` as `~/...`, color-coded by directory (see [path_color]) with its
+/// final part bold, in the body font. Uncolored runs take the label's own
+/// text color.
 fn path_job(ui: &Ui, path: &Path, home: Option<&Path>) -> LayoutJob {
     path_job_on(ui, path, home, ui.visuals().dark_mode, Color32::PLACEHOLDER)
 }
 
-/// [path_job] in the colours for a `dark` or light background (see
-/// [path_color::depth_color]), with uncoloured runs in `text_color`.
+/// [path_job] in the colors for a `dark` or light background (see
+/// [path_color::depth_color]), with uncolored runs in `text_color`.
 fn path_job_on(
     ui: &Ui,
     path: &Path,
@@ -221,8 +221,8 @@ fn path_job_on(
 }
 
 /// A Cmd history / In this dir button label: `"<i>: "`, then the command
-/// `text` with its base command bold and colour-coded (see [CmdColors]).
-/// Uncoloured runs take the button's own text colour.
+/// `text` with its base command bold and color-coded (see [CmdColors]).
+/// Uncolored runs take the button's own text color.
 fn cmd_label(ui: &Ui, colors: &CmdColors, i: usize, text: &str) -> LayoutJob {
     let font = TextStyle::Button.resolve(ui.style());
     let bold = FontId::new(font.size, bold_family());
@@ -236,7 +236,7 @@ fn cmd_label(ui: &Ui, colors: &CmdColors, i: usize, text: &str) -> LayoutJob {
         job.append(text, 0.0, format);
     };
     append(&format!("{i}: "), font.clone(), Color32::PLACEHOLDER);
-    // The only coloured run is the base command.
+    // The only colored run is the base command.
     for p in colors.parts(text, ui.visuals().dark_mode) {
         match p.color {
             Some(c) => append(&p.text, bold.clone(), c),
@@ -612,8 +612,14 @@ fn panel_toggles(state: &mut State, ui: &mut Ui) {
         let v = &mut state.ui.panel_vis;
         for pane in state.ui.pane_order {
             let r = ui.toggle_value(pane.visible_mut(v), pane.title());
-            if pane == panes::Pane::Clipboard {
-                r.on_hover_text("Toggle clipboard history (Ctrl+Shift+V)");
+            match pane {
+                panes::Pane::Clipboard => {
+                    r.on_hover_text("Toggle clipboard history (Ctrl+Shift+V)");
+                }
+                panes::Pane::Terminal => {
+                    r.on_hover_text("Toggle the terminal (Alt+F12)");
+                }
+                _ => {}
             }
         }
         // Opens a window of its own rather than a pane, so it's set apart.
@@ -711,6 +717,10 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
         run_command(state, &input, &ctx);
     }
+
+    // Even while a full-screen program has the keyboard, so it can be hidden
+    // from there too.
+    terminal::toggle_terminal_key(state, ui.ctx());
 
     // After that command, which runs in the tab it was typed in, and before
     // any widget, so the input box never sees these keys. Not while a

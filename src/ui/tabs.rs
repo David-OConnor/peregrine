@@ -55,8 +55,8 @@ pub fn tab_button(
         Button::selectable(selected, WidgetText::from(galley)).min_size(egui::vec2(TAB_WIDTH, 0.));
 
     // Left-align the label; horizontal layouts centre button text. A selected
-    // button takes its fill and text colour from the selection visuals, so
-    // swap in the tab colours for just this button.
+    // button takes its fill and text color from the selection visuals, so
+    // swap in the tab colors for just this button.
     let layout = ui.layout().with_main_align(Align::Min);
     let mut tab = ui
         .with_layout(layout, |ui| {
@@ -75,7 +75,7 @@ pub fn tab_button(
         let close_rect =
             Rect::from_min_max(egui::pos2(rect.right() - close_width, rect.top()), rect.max);
 
-        // Only the active tab is closable, so match its label colour.
+        // Only the active tab is closable, so match its label color.
         let x = RichText::new("x").color(TAB_ACTIVE_TEXT);
         let shortcut = format!(
             "{} or middle click",
@@ -346,7 +346,7 @@ const TAB_WIDTH: f32 = 120.;
 /// Gap either side of the separator between tabs in the top strip, and the
 /// separator's own width. See [tabs_bar].
 const TAB_GAP: f32 = 2.;
-/// The active tab's fill and label colour: purple, so it can't be mistaken
+/// The active tab's fill and label color: purple, so it can't be mistaken
 /// for the blue "on" state of the panel toggles below. See [tab_button].
 pub(super) const TAB_ACTIVE_FILL: Color32 = Color32::from_rgb(128, 64, 208);
 const TAB_ACTIVE_TEXT: Color32 = Color32::WHITE;

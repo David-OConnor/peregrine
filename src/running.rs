@@ -5,7 +5,7 @@
 //!
 //! Each runs in a pseudo terminal of its own (see [crate::pty]), so it sees a
 //! terminal, as it would in a terminal window: Python starts its REPL, Vim
-//! draws its screen, and output comes in colour. What it writes streams into
+//! draws its screen, and output comes in color. What it writes streams into
 //! the tab's pane as it arrives (see [Term]), or, while a full-screen program
 //! has the terminal, the pane shows its screen. Lines typed meanwhile go to
 //! it as typed input, Ctrl+C interrupts it, and Stop ends it.

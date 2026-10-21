@@ -2,7 +2,7 @@
 //! elsewhere. A program run in one sees a terminal, as it would in a
 //! terminal window, rather than the pipes it would otherwise get: Python
 //! starts its REPL, Vim draws its screen, a password prompt can turn echo
-//! off, and output comes in colour. What it writes comes back as the bytes a
+//! off, and output comes in color. What it writes comes back as the bytes a
 //! terminal would be sent, escape sequences and all, for [crate::term] to
 //! emulate. Its stdout and stderr are the same terminal, so they arrive
 //! together, as in a terminal window.

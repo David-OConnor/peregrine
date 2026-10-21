@@ -47,8 +47,8 @@ pub(super) const RECENT_DIRS_COL_WIDTH: f32 = 170.;
 /// so it doesn't stand out from the rest of the window.
 const BOOKMARKED_FILL_LIGHT: Color32 = Color32::from_rgb(220, 240, 220);
 const BOOKMARKED_FILL_DARK: Color32 = Color32::from_rgb(40, 90, 50);
-/// Uncoloured text (the index, separators) on a bookmarked row in light mode.
-/// In dark mode the row keeps the theme's own text colour.
+/// Uncolored text (the index, separators) on a bookmarked row in light mode.
+/// In dark mode the row keeps the theme's own text color.
 pub(super) const BOOKMARKED_TEXT: Color32 = Color32::from_gray(30);
 
 /// The background of a bookmarked row (see [BOOKMARKED_FILL_LIGHT]).
@@ -72,16 +72,16 @@ struct DirLabelOpts<'a> {
     max_len: usize,
     /// Show just each dir's final name ("Names"), not its path ("Paths").
     names: bool,
-    /// With `names`, colour each name as its parent dir rather than as
+    /// With `names`, color each name as its parent dir rather than as
     /// itself, so dirs that share a parent read as a group.
     parent_color: bool,
 }
 
 /// What a Bookmarks / Recent dirs row shows of `path`: all of it as `~/...`,
-/// colour-coded by directory (see [path_color]), or with `opts.names`, just
+/// color-coded by directory (see [path_color]), or with `opts.names`, just
 /// its final directory, e.g. `molchanica` for `~/code/Bio/molchanica`, in
-/// its own colour or its parent's (see [DirLabelOpts::parent_color]). `dark`
-/// picks the colours for the background it will be drawn on.
+/// its own color or its parent's (see [DirLabelOpts::parent_color]). `dark`
+/// picks the colors for the background it will be drawn on.
 fn dir_parts(path: &Path, opts: DirLabelOpts, dark: bool) -> Vec<Part> {
     let mut parts = path_color::parts(&render_with_tilde(path, opts.home), Some("~"), dark);
     if opts.names
@@ -89,7 +89,7 @@ fn dir_parts(path: &Path, opts: DirLabelOpts, dark: bool) -> Vec<Part> {
     {
         let parent = parts[..last].iter().rev().find_map(|p| p.color);
         parts.drain(..last);
-        // A dir with no parent (e.g. `~`) keeps its own colour.
+        // A dir with no parent (e.g. `~`) keeps its own color.
         if opts.parent_color && parent.is_some() {
             parts[0].color = parent;
         }
@@ -104,7 +104,7 @@ fn parts_len(parts: &[Part]) -> usize {
 
 /// A Bookmarks / Recent dirs button label: `prefix` (the index), then `parts`
 /// (see [dir_parts]) with the final directory bold, and truncated from the
-/// front to `max_len` chars so the column stays narrow. Uncoloured runs are
+/// front to `max_len` chars so the column stays narrow. Uncolored runs are
 /// `text_color`.
 fn dir_label(
     ui: &Ui,
@@ -526,7 +526,7 @@ pub(super) fn dir_bookmarks(state: &mut State, ui: &mut Ui) {
 /// the Files panel (see [State::touch_recent_dir]), as a clickable list, in
 /// columns when the panel is wide enough. Newest first. Dirs that are
 /// also bookmarked have a green background (see [bookmarked_fill]). In
-/// "Names" mode each name takes its parent dir's colour, so siblings group
+/// "Names" mode each name takes its parent dir's color, so siblings group
 /// visually. Clicking a row cd's there, and middle-clicking opens it in a new
 /// tab. The ★ adds the row's dir to Bookmarks or removes it (see
 /// [bookmark_star]), the `x` removes a row from the list, and "Cleanup

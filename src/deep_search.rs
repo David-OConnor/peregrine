@@ -1,10 +1,4 @@
-//! The Files panel's Deep search: the contents of every file under the
-//! listed dir, searched the way `rg <query>` would — or with
-//! [Options::file_names], the names of every file and folder, like
-//! `rg --files` filtered by the query (but with folders too). Uses ripgrep's
-//! own library crates — `ignore` for its parallel, .gitignore-aware
-//! directory walk, `grep-searcher` and `grep-regex` for the search itself —
-//! on background threads, so the panel keeps drawing while results come in.
+//! The Files panel's Deep search: a RipGrep interface.
 
 use std::{
     ops::Range,

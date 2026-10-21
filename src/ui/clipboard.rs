@@ -1,15 +1,14 @@
-//! Clipboard history, kept between runs. Ordinary paste always uses the OS
-//! clipboard; history actions explicitly choose older content, without
-//! changing focus or inserting text until requested.
+//! An advanced clipboard. Includes the system clipboard item, and a history of
+//! ones previously cut or copied from within this program. Statys in sync with the
+//! system clipboard.
+
 use std::{
     borrow::Cow,
     path::{MAIN_SEPARATOR, Path, PathBuf},
 };
 
 use chrono::{DateTime, Local, Utc};
-use egui::{
-    Align, Button, Color32, Frame, Layout, RichText, ScrollArea, Stroke, TextEdit, TextWrapMode, Ui,
-};
+use egui::{Align, Button, Color32, Event, Frame, Layout, RichText, ScrollArea, Stroke, TextEdit, TextWrapMode, Ui};
 
 use crate::{
     OutType,
@@ -67,7 +66,7 @@ fn text_paths(text: &str) -> Option<Vec<&Path>> {
 }
 
 /// An entry's first row: "Text 14:05 · 12 characters", with `sys` (its
-/// colour) at the right if it's on the system clipboard.
+/// color) at the right if it's on the system clipboard.
 fn title_row(ui: &mut Ui, kind: &str, detail: &str, added: &DateTime<Utc>, sys: Option<Color32>) {
     let added = added.with_timezone(&Local);
     ui.horizontal_wrapped(|ui| {
@@ -101,19 +100,19 @@ impl ClipboardPane {
     /// `visible` is the pane's [shell::PanelVis] flag, toggled by it.
     fn shortcut(
         &mut self,
-        events: &mut Vec<egui::Event>,
+        events: &mut Vec<Event>,
         modifiers: egui::Modifiers,
         visible: &mut bool,
     ) {
         events.retain(|event| match event {
-            egui::Event::Paste(_) if modifiers.ctrl && modifiers.shift => {
+            Event::Paste(_) if modifiers.ctrl && modifiers.shift => {
                 if !self.shortcut_down {
                     *visible = !*visible;
                     self.shortcut_down = true;
                 }
                 false
             }
-            egui::Event::Key {
+            Event::Key {
                 key: egui::Key::V,
                 pressed,
                 modifiers,
@@ -125,7 +124,7 @@ impl ClipboardPane {
                 self.shortcut_down = *pressed;
                 false
             }
-            egui::Event::WindowFocused(false) => {
+            Event::WindowFocused(false) => {
                 self.shortcut_down = false;
                 true
             }
@@ -159,7 +158,7 @@ impl egui::plugin::Plugin for OutputCopy {
         }
         input.events.retain_mut(|event| {
             match event {
-                egui::Event::PointerButton {
+                Event::PointerButton {
                     pos,
                     button,
                     pressed,
@@ -186,11 +185,11 @@ impl egui::plugin::Plugin for OutputCopy {
                         }
                     }
                 }
-                egui::Event::Copy if self.has_selection && self.selection_in_output => {
+                Event::Copy if self.has_selection && self.selection_in_output => {
                     self.copy_requested = true;
                     return false;
                 }
-                egui::Event::WindowFocused(false) => self.copying = false,
+                Event::WindowFocused(false) => self.copying = false,
                 _ => {}
             }
             true
@@ -220,6 +219,7 @@ pub fn capture(state: &mut State, ctx: &egui::Context) {
             &mut state.ui.panel_vis.clipboard,
         )
     });
+
     ctx.add_plugin(TextCapture::default());
     let pending = ctx
         .with_plugin(|p: &mut TextCapture| std::mem::take(&mut p.pending.entries))
@@ -237,9 +237,11 @@ pub fn capture(state: &mut State, ctx: &egui::Context) {
     if let Some(newest) = pending.first() {
         state.ui.clipboard.sys.set(newest.content.clone());
     }
+
     for entry in pending.into_iter().rev() {
         state.ui.clipboard.history.record(entry.content);
     }
+
     // What other apps copied, as the watcher found it. These came after
     // Peregrine's own copies above, which the OS got at the end of last
     // frame, so the newest is what's on the clipboard now.
@@ -247,16 +249,18 @@ pub fn capture(state: &mut State, ctx: &egui::Context) {
     if let Some(newest) = found.last() {
         state.ui.clipboard.sys.set(newest.clone());
     }
+
     for content in found {
         state.ui.clipboard.history.record(content);
     }
+
     // Text pasted from another app before the watcher has seen it. Text it
     // already knows keeps its entry's time.
     for text in ctx.input(|i| {
         i.events
             .iter()
             .filter_map(|e| match e {
-                egui::Event::Paste(text) => Some(text.clone()),
+                Event::Paste(text) => Some(text.clone()),
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -357,6 +361,7 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
                     } else {
                         Color32::TRANSPARENT
                     };
+
                     Frame::new()
                         .stroke(Stroke::new(2.0, outline))
                         .corner_radius(4)

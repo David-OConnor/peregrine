@@ -1,5 +1,5 @@
 //! The Settings window, opened from the gear button on the tab strip: path
-//! colour depth, and how many characters of each Bookmarks / Recent dirs path
+//! color depth, and how many characters of each Bookmarks / Recent dirs path
 //! to show.
 
 use egui::{Context, DragValue, Grid, Ui, Window};
@@ -71,7 +71,7 @@ pub(super) fn show(state: &mut State, ctx: &Context) {
                 .num_columns(2)
                 .spacing([12., 6.])
                 .show(ui, |ui| {
-                    // How deep a directory is when its colour reaches yellow
+                    // How deep a directory is when its color reaches yellow
                     // (see [path_color::depth_levels]).
                     ui.label("Dir color depth:");
                     dir_depth_delta = dir_depth_control(ui);

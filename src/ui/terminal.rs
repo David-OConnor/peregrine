@@ -312,7 +312,41 @@ pub const TOGGLE_BOOKMARK: KeyboardShortcut = KeyboardShortcut::new(Modifiers::C
 ///
 /// [tab_keys]: super::tab_keys
 pub fn toggle_bookmark_key(state: &mut State, ctx: &Context) {
-    let pressed = ctx.input_mut(|i| {
+    if take_shortcut(ctx, TOGGLE_BOOKMARK) {
+        let msg = state.toggle_bookmark_cwd();
+        state.push_out(msg, OutType::StdOut);
+    }
+}
+
+/// Shows or hides the terminal pane from anywhere in the window, as in
+/// JetBrains IDEs.
+pub const TOGGLE_TERMINAL: KeyboardShortcut = KeyboardShortcut::new(Modifiers::ALT, Key::F12);
+
+/// Act on [TOGGLE_TERMINAL] if it was pressed this frame, and remove its key
+/// events, as for [toggle_bookmark_key]. Showing the terminal moves the
+/// keyboard to it: to the input box, or to a full-screen program's screen
+/// while one runs.
+pub fn toggle_terminal_key(state: &mut State, ctx: &Context) {
+    if !take_shortcut(ctx, TOGGLE_TERMINAL) {
+        return;
+    }
+    let shown = &mut state.ui.panel_vis.terminal;
+    *shown = !*shown;
+    if !*shown {
+        return;
+    }
+
+    if state.grid_here() {
+        ctx.memory_mut(|m| m.request_focus(grid::grid_id()));
+    } else {
+        state.ui.focus_input = true;
+    }
+}
+
+/// Whether `shortcut` was pressed this frame, after removing its key events.
+/// A held key counts once.
+fn take_shortcut(ctx: &Context, shortcut: KeyboardShortcut) -> bool {
+    ctx.input_mut(|i| {
         let mut pressed = false;
         i.events.retain(|event| match event {
             Event::Key {
@@ -321,21 +355,14 @@ pub fn toggle_bookmark_key(state: &mut State, ctx: &Context) {
                 repeat,
                 modifiers,
                 ..
-            } if *key == TOGGLE_BOOKMARK.logical_key
-                && modifiers.matches_exact(TOGGLE_BOOKMARK.modifiers) =>
-            {
+            } if *key == shortcut.logical_key && modifiers.matches_exact(shortcut.modifiers) => {
                 pressed |= !repeat;
                 false
             }
             _ => true,
         });
         pressed
-    });
-
-    if pressed {
-        let msg = state.toggle_bookmark_cwd();
-        state.push_out(msg, OutType::StdOut);
-    }
+    })
 }
 
 /// Alt + these cd the active tab to the bookmark the Bookmarks panel numbers
@@ -472,8 +499,8 @@ pub fn term_in(state: &mut State, ui: &mut Ui) {
     set_mono_size(ui, state.font_size);
     let active = state.ui.active_tab;
     let (his_cursor, cd_cursor) = state.active_nav_cursors();
-    // Locally, the cwd's directories are colour-coded (see [path_color]), with
-    // the `*` and separators left in the prompt colour.
+    // Locally, the cwd's directories are color-coded (see [path_color]), with
+    // the `*` and separators left in the prompt color.
     let cwd_parts = if state.is_remote() {
         vec![Part::plain(state.cwd_display())]
     } else {
@@ -796,7 +823,7 @@ fn edit_input(state: &mut State, ctx: &Context, edit: Edit) {
 }
 
 /// The "terminal" output pane: scrolls, sticks to the bottom so the latest
-/// line stays in view, and colours rows by stream kind. While a full-screen
+/// line stays in view, and colors rows by stream kind. While a full-screen
 /// program runs in the tab, locally or on its remote, its screen instead.
 pub fn term_out(state: &mut State, ui: &mut Ui) {
     set_mono_size(ui, state.font_size);

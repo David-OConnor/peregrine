@@ -39,7 +39,7 @@ const DEEP_SEARCH_DELAY: f64 = 0.3;
 /// The Files list while a Deep search is set: a status line, then each file
 /// (or in file-name mode, folder) found, by its path relative to the
 /// searched dir. In file-name mode the matches in its name are highlighted,
-/// and folders are marked and coloured as in the listing, on pale green when
+/// and folders are marked and colored as in the listing, on pale green when
 /// they're among `bookmarks` (see [dirs::bookmarked_fill]); otherwise it
 /// shows how many lines matched, and those lines follow it, numbered, with
 /// the matches highlighted. `name_filter` (the panel's Search box) narrows
@@ -207,7 +207,7 @@ pub fn deep_search_results(
                             }
 
                             if hit.is_folder {
-                                // Same colour this folder has in any path
+                                // Same color this folder has in any path
                                 // shown elsewhere.
                                 job.append("📁 ", 0.0, base.clone());
                                 let tilde = render_with_tilde(&hit.path, home);

@@ -1,14 +1,9 @@
-//! Color-coding for commands in the Cmd history and In this dir panels,
+//! Color-coding for commands in the Cmd history panels,
 //! so runs of the same program are easy to spot down the list.
 //!
 //! Only the base command (the first word, split the way `run_command` does)
 //! is colored; its arguments keep the default color. Every `cd` on screen is
 //! one color, every `cargo` another, and so on.
-//!
-//! Hashing alone can't keep the commands on screen apart: with 8 colors, 6
-//! commands all differ only ~8% of the time. So [CmdColors] hands colors out
-//! to the [PALETTE_LEN] most recently used commands, which never share one,
-//! and only commands older than those fall back to their hashed color.
 
 use std::collections::HashMap;
 
@@ -16,7 +11,7 @@ use egui::Color32;
 
 use crate::path_color::Part;
 
-/// Hues spread around the colour wheel so any two read as different at a
+/// Hues spread around the color wheel so any two read as different at a
 /// glance. Kept short on purpose: more entries means near-identical pairs.
 type Palette = [Color32; PALETTE_LEN];
 const PALETTE_LEN: usize = 8;
@@ -51,7 +46,7 @@ fn palette(dark: bool) -> &'static Palette {
 }
 
 /// 64-bit FNV-1a. Hand-rolled rather than `DefaultHasher` so a command keeps
-/// its colour across Rust versions.
+/// its color across Rust versions.
 fn fnv1a(s: &str) -> u64 {
     s.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| {
         (h ^ b as u64).wrapping_mul(0x0100_0000_01b3)
@@ -82,7 +77,7 @@ fn split(text: &str) -> (&str, &str, &str) {
     (lead, &trimmed[..end], &trimmed[end..])
 }
 
-/// The key a base command's colour is looked up by. Program names are
+/// The key a base command's color is looked up by. Program names are
 /// case-insensitive on Windows, so `Cargo` and `cargo` match there.
 fn key(cmd: &str) -> String {
     if cfg!(windows) {
@@ -94,8 +89,8 @@ fn key(cmd: &str) -> String {
 
 /// Palette index for each of the [PALETTE_LEN] most recently used base
 /// commands, all different. Rebuilt whenever the history changes (see
-/// `State::refresh_cmd_colors`), so a command's colour can shift when another
-/// one is run; keeping each command on its [preferred] colour where possible
+/// `State::refresh_cmd_colors`), so a command's color can shift when another
+/// one is run; keeping each command on its [preferred] color where possible
 /// keeps that rare.
 #[derive(Default)]
 pub struct CmdColors {
@@ -104,8 +99,8 @@ pub struct CmdColors {
 
 impl CmdColors {
     /// Walk the history newest first. Each new command takes its preferred
-    /// colour if no more recent command has it, or else the next free one,
-    /// until every colour is taken.
+    /// color if no more recent command has it, or else the next free one,
+    /// until every color is taken.
     pub fn new<'a>(newest_first: impl IntoIterator<Item = &'a str>) -> Self {
         let mut taken = [false; PALETTE_LEN];
         let mut recent = HashMap::new();
@@ -133,9 +128,9 @@ impl CmdColors {
         Self { recent }
     }
 
-    /// Split the command line `text` into coloured runs: any leading
-    /// whitespace, then the base command in its colour, then the rest
-    /// uncoloured. `dark` picks the palette for the background it will be
+    /// Split the command line `text` into colored runs: any leading
+    /// whitespace, then the base command in its color, then the rest
+    /// uncolored. `dark` picks the palette for the background it will be
     /// drawn on.
     pub fn parts(&self, text: &str, dark: bool) -> Vec<Part> {
         let (lead, cmd, rest) = split(text);

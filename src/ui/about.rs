@@ -192,6 +192,10 @@ fn shortcut_groups(mac: bool) -> Vec<(&'static str, Shortcuts)> {
             "Copy, cut, and paste, with clipboard history",
         ),
         ("Ctrl + Shift + V".into(), "Show or hide the clipboard pane"),
+        (
+            if mac { "Option + F12" } else { "Alt + F12" }.into(),
+            "Show or hide the terminal pane",
+        ),
     ];
 
     // Ctrl + N, T and W are tab shortcuts, except on Mac, where those use Cmd.

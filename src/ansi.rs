@@ -1,6 +1,6 @@
 //! An ANSI escape-sequence parser for line-oriented output.
 //!
-//! Shells like PowerShell emit sequences such as `ESC[32;1m` to colour their
+//! Shells like PowerShell emit sequences such as `ESC[32;1m` to color their
 //! output. We parse those into styled segments so the GUI can render. Output
 //! from a remote terminal also moves the cursor within a line to redraw it
 //! (progress bars, spinners); those few controls come out as [Ctl]s for the
@@ -30,7 +30,7 @@ impl Style {
         }
     }
 
-    /// Text in these colours (`None` for the default) and attributes.
+    /// Text in these colors (`None` for the default) and attributes.
     pub const fn with(
         fg: Option<Color32>,
         bg: Option<Color32>,
@@ -119,7 +119,7 @@ impl Segment {
     }
 }
 
-/// Standard 16-colour ANSI palette, tuned to read well on a black background.
+/// Standard 16-color ANSI palette, tuned to read well on a black background.
 fn ansi_color(code: u32, bright: bool) -> Option<Color32> {
     let (r, g, b) = match (code, bright) {
         (0, false) => (40, 40, 40),
@@ -143,7 +143,7 @@ fn ansi_color(code: u32, bright: bool) -> Option<Color32> {
     Some(Color32::from_rgb(r, g, b))
 }
 
-/// xterm 256-colour palette lookup.
+/// xterm 256-color palette lookup.
 pub fn xterm256(n: u8) -> Color32 {
     if n < 16 {
         let bright = n >= 8;

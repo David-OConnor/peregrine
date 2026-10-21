@@ -21,7 +21,7 @@ const CARGO_BUTTONS: [(&str, &str); 6] = [
 const BUSY: &str = "A command is already running in this tab: stop it first (Ctrl+C)";
 
 /// The green of Run's "play" triangle and the red of Stop's square (see
-/// [run_button]), in light and dark mode, as IDEs colour them.
+/// [run_button]), in light and dark mode, as IDEs color them.
 const PLAY_LIGHT: Color32 = Color32::from_rgb(40, 140, 50);
 const PLAY_DARK: Color32 = Color32::from_rgb(110, 200, 110);
 const STOP_LIGHT: Color32 = Color32::from_rgb(205, 50, 50);
@@ -33,7 +33,7 @@ struct Tint {
     dark: Color32,
 }
 
-// Each keeps its brand colour's hue, with the saturation and brightness cut
+// Each keeps its brand color's hue, with the saturation and brightness cut
 // so text reads on it as well as on the bare panel: a pale tint in light
 // mode, and in dark mode a muted one, darker than the theme's buttons so they
 // still stand out.
@@ -92,7 +92,7 @@ fn tinted_group(ui: &mut Ui, tint: Tint, add_contents: impl FnOnce(&mut Ui)) {
 
 /// Right-aligned in the rest of `ui`'s row: Git while the dir's in a repo (as
 /// the prompt's branch shows), Cargo, Python, each on a band of its brand's
-/// colour (see [tinted_group]). Each button runs its line as if typed, so
+/// color (see [tinted_group]). Each button runs its line as if typed, so
 /// it's echoed, kept in history, and runs in the background like any other,
 /// with `python` the venv's. Not while connected over SSH, where typed lines
 /// go to the remote, and disabled while a command's already running in this

@@ -141,11 +141,12 @@ Shortcuts to reduce typing:
 
 
 ## Keyboard shortcuts
-The About window lists these too.
+The About window lists these too. Most are inspired by other programs - especially JetBrains IDEs.
 
 - **Tab**: Focus the CLI input, and clear it. Works anywhere in the window; in the CLI input itself, Tab autocompletes instead
 - **Ctrl + V**, **Ctrl + C**, **Ctrl + X** paste, copy, and cut using the native advanced clipboard, and/or system one
 - **Ctrl + Shift + V**: Toggle the clipboard pane
+- **Alt + F12**: Toggle the Terminal pane
 
 ### File browser
 - **Enter** opens a file. (Same as double-clicking) Native viewer for text, markdown, code, and image files. OS-default otherwise.
@@ -154,6 +155,7 @@ The About window lists these too.
 - **Escape** clears selections
 - **Delete** moves the selected items to the Recycle Bin (Trash on Mac and Linux), after confirming
 - **Ctrl + Shift + N** creates a new folder. On Mac, **Cmd + Shift + N**
+
 
 ### File viewer
 On Mac, use **Cmd** in place of **Ctrl**.

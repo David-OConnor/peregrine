@@ -25,7 +25,7 @@ pub const MAX_DEPTH_LEVELS: u8 = 32;
 /// it applies to every path drawn, from all over the UI.
 static DEPTH_LEVELS: AtomicU8 = AtomicU8::new(DEFAULT_DEPTH_LEVELS);
 
-/// How many levels below a root (or `~`) a directory is when its colour
+/// How many levels below a root (or `~`) a directory is when its color
 /// reaches the yellow end of the scale. Set by the tab strip's "Dir depth"
 /// control (see `State::adjust_dir_color_depth`) and persisted with the theme.
 pub fn depth_levels() -> u8 {
@@ -62,7 +62,7 @@ const VIRIDIS_DARK: [Color32; 11] = [
 /// [VIRIDIS_DARK] for the light-mode panels: lightness 0.34 to 0.53 up to the
 /// teal, then only to 0.55 for the green-to-gold end, so the yellow end
 /// darkens to olive gold and every stop keeps about 4.5:1 contrast on the
-/// panels; and chroma tripled (as far as sRGB allows). Dark colours look alike
+/// panels; and chroma tripled (as far as sRGB allows). Dark colors look alike
 /// on a light background unless they're vivid, so without the boost the
 /// purple, blue and teal end all read as near-black.
 const VIRIDIS_LIGHT: [Color32; 11] = [
@@ -79,7 +79,7 @@ const VIRIDIS_LIGHT: [Color32; 11] = [
     Color32::from_rgb(0x82, 0x72, 0x00),
 ];
 
-/// The colour of a directory `depth` levels below a root (or `~`), for a
+/// The color of a directory `depth` levels below a root (or `~`), for a
 /// `dark` or light background: interpolated along the Viridis stops, and
 /// yellow from [depth_levels] down.
 pub fn depth_color(depth: usize, dark: bool) -> Color32 {
@@ -113,11 +113,11 @@ fn is_sep(c: char) -> bool {
     c == '/' || c == '\\'
 }
 
-/// Split `display` (a path as shown to the user) into coloured runs.
+/// Split `display` (a path as shown to the user) into colored runs.
 /// `home` is how the home directory is spelled in `display` — `"~"` for a
 /// [crate::render_with_tilde] string, or the full home path for an absolute
-/// one — and is coloured as a single run, as a root. `dark` picks the
-/// colours for the background it will be drawn on.
+/// one — and is colored as a single run, as a root. `dark` picks the
+/// colors for the background it will be drawn on.
 pub fn parts(display: &str, home: Option<&str>, dark: bool) -> Vec<Part> {
     let mut out = Vec::new();
     // Depth of the next directory.
@@ -212,7 +212,7 @@ pub fn truncate_start(parts: Vec<Part>, max: usize) -> Vec<Part> {
 /// Lay `parts` out for a label or button. `default` colors the uncolored
 /// runs; pass [Color32::PLACEHOLDER] to use the widget's own text color
 /// (which follows hover / selection). If `last_font` is given, the last
-/// coloured run (the path's final directory) is drawn in it, e.g. to bold it.
+/// colored run (the path's final directory) is drawn in it, e.g. to bold it.
 pub fn layout_job(
     parts: &[Part],
     font: FontId,
@@ -239,7 +239,7 @@ pub fn layout_job(
     job
 }
 
-/// `parts` as text with ANSI truecolour escapes, for strings that go through
+/// `parts` as text with ANSI truecolor escapes, for strings that go through
 /// the output pane's ANSI parser (see `crate::ansi`). Uncolored runs reset to
 /// the line's default color.
 pub fn to_ansi(parts: &[Part]) -> String {

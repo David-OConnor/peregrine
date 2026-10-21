@@ -368,7 +368,7 @@ pub struct State {
     /// Cached.
     pub home: Option<PathBuf>,
     pub history: Vec<HistoryItem>,
-    /// Colours for the base commands in the history panels. Rebuilt from
+    /// colors for the base commands in the history panels. Rebuilt from
     /// `history` by [Self::refresh_cmd_colors].
     pub cmd_colors: CmdColors,
     /// This initializes to env::current_dir, but is then managed from within
@@ -532,7 +532,7 @@ impl Default for State {
 impl State {
     /// Just the `{star}{cwd}` portion of the prompt, used by the live
     /// input row which renders the branch + nav indicators as separately
-    /// coloured labels (see `ui::term_in`).
+    /// colored labels (see `ui::term_in`).
     pub fn cwd_display(&self) -> String {
         // When the active tab is connected, show the remote location instead of
         // the local cwd so the user knows commands are running remotely.
@@ -557,7 +557,7 @@ impl State {
         }
     }
 
-    /// The active tab's local cwd, split into colour-coded runs (see
+    /// The active tab's local cwd, split into color-coded runs (see
     /// [path_color]) for drawing on the black terminal panes.
     pub fn cwd_color_parts(&self) -> Vec<path_color::Part> {
         let home = self.home.as_ref().map(|h| h.display().to_string());
@@ -573,7 +573,7 @@ impl State {
 
     /// Full prompt prefix used when echoing a command into the output
     /// pane. Embeds ANSI escapes around the cwd's directories and the branch
-    /// slot so the output pane's ANSI parser colours them the same as the
+    /// slot so the output pane's ANSI parser colors them the same as the
     /// live input row does. `nav` adds a ` his N` / ` cd N` indicator
     /// after the branch when a recall is active (see [NavState]).
     pub fn prompt(&self, nav: &NavState) -> String {
@@ -588,8 +588,8 @@ impl State {
                 .map(|b| format!(" \x1b[95mbr: {}\x1b[0m", truncate_branch(b, 10)))
                 .unwrap_or_default()
         };
-        // Locally, colour-code the cwd like the input row does; the output
-        // pane's ANSI parser turns the escapes back into colours.
+        // Locally, color-code the cwd like the input row does; the output
+        // pane's ANSI parser turns the escapes back into colors.
         let cwd_part = if self.is_remote() {
             self.cwd_display()
         } else {
@@ -1251,7 +1251,7 @@ impl State {
         }
     }
 
-    /// Step how many directory levels the path colours take to go from
+    /// Step how many directory levels the path colors take to go from
     /// purple to yellow (see [path_color::depth_levels]) by `delta`, and
     /// persist the change. Wired to the "Dir color depth" control in the
     /// Settings window.
@@ -1676,7 +1676,7 @@ impl State {
         let _ = self.save();
     }
 
-    /// Re-assign the history panels' command colours after `history`
+    /// Re-assign the history panels' command colors after `history`
     /// changes. See [CmdColors].
     pub fn refresh_cmd_colors(&mut self) {
         self.cmd_colors = CmdColors::new(self.history.iter().rev().map(|h| h.text.as_str()));
