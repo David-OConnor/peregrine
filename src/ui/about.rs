@@ -196,6 +196,10 @@ fn shortcut_groups(mac: bool) -> Vec<(&'static str, Shortcuts)> {
             if mac { "Option + F12" } else { "Alt + F12" }.into(),
             "Show or hide the terminal pane",
         ),
+        (
+            "Shift + F10".into(),
+            "Run the project, as the project bar's Run button does. Cargo's, if Python's is shown too",
+        ),
     ];
 
     // Ctrl + N, T and W are tab shortcuts, except on Mac, where those use Cmd.

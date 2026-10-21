@@ -18,6 +18,7 @@ mod file_browser;
 mod grid;
 pub mod line_edit;
 pub mod panes;
+mod path_bar;
 pub mod path_panel;
 mod project_bar;
 mod remote;

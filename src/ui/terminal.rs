@@ -345,7 +345,7 @@ pub fn toggle_terminal_key(state: &mut State, ctx: &Context) {
 
 /// Whether `shortcut` was pressed this frame, after removing its key events.
 /// A held key counts once.
-fn take_shortcut(ctx: &Context, shortcut: KeyboardShortcut) -> bool {
+pub(super) fn take_shortcut(ctx: &Context, shortcut: KeyboardShortcut) -> bool {
     ctx.input_mut(|i| {
         let mut pressed = false;
         i.events.retain(|event| match event {

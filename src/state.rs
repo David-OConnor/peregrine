@@ -152,6 +152,8 @@ pub struct StateUi {
     pub rename_pending: Option<(PathBuf, f64)>,
     /// The new Files-panel folder or file being named, if any.
     pub create: Option<FileCreate>,
+    /// The path being typed into the Files panel's path bar, if any.
+    pub path_edit: Option<PathEdit>,
     /// Snapshot of the selected paths awaiting the delete confirmation.
     pub delete_pending: Option<Vec<PathBuf>>,
     /// Set while the last click was in the Files panel, so Ctrl+C / X / V
@@ -305,6 +307,7 @@ impl Default for StateUi {
             rename: None,
             rename_pending: None,
             create: None,
+            path_edit: None,
             delete_pending: None,
             files_active: false,
             files_activating_press: false,
@@ -361,6 +364,33 @@ pub struct FileCreate {
     pub name: String,
     /// Set once the edit box has taken focus, the first frame it's drawn.
     pub focused: bool,
+}
+
+/// The Files panel's path bar while a path is being typed into it, in place
+/// of its breadcrumbs (see `ui::path_bar`).
+pub struct PathEdit {
+    /// The dir it was opened on. It's dropped should the listing move off
+    /// it meanwhile, e.g. for a `cd` in the terminal, or another tab.
+    pub dir: PathBuf,
+    /// The path as typed so far.
+    pub text: String,
+    /// Set once the edit box has taken focus with the path selected, which
+    /// happens the first frame it's drawn.
+    pub focused: bool,
+    /// Why the path last entered couldn't be gone to, shown under the box
+    /// until it's edited.
+    pub error: Option<String>,
+    /// The folders a Tab could complete the path to, when they have too
+    /// little in common for it to add anything. Shown under the box until
+    /// it's edited.
+    pub matches: Vec<String>,
+}
+
+/// Whether the Files listing shows `f`, with entries that have the Windows
+/// Hidden attribute shown if `attr`, and those named `.*` if `dot`.
+pub fn listing_shows(f: &BrowserFile, attr: bool, dot: bool) -> bool {
+    let is_dot = f.disp_name.starts_with('.');
+    (!f.hidden_attr && !is_dot) || (attr && f.hidden_attr) || (dot && is_dot)
 }
 
 pub struct State {
@@ -637,10 +667,7 @@ impl State {
         self.project = Project::detect(&cwd);
         self.browser_dir = cwd;
         let (attr, dot) = (self.ui.show_hidden_attr, self.ui.show_dotfiles);
-        self.browser_files.retain(|f| {
-            let is_dot = f.disp_name.starts_with('.');
-            (!f.hidden_attr && !is_dot) || (attr && f.hidden_attr) || (dot && is_dot)
-        });
+        self.browser_files.retain(|f| listing_shows(f, attr, dot));
         sort_browser_files(&mut self.browser_files, self.ui.files_sort);
         self.refresh_browser_files_filter();
     }
@@ -1801,17 +1828,8 @@ impl State {
     /// stacks. Returns `true` if the cwd actually changed. Pushes a
     /// diagnostic on failure.
     fn navigate_to(&mut self, target: PathBuf) -> bool {
-        let before = self.cwd().to_path_buf();
-        match env::set_current_dir(&target) {
-            Ok(_) => {
-                let new_cwd = env::current_dir().unwrap_or(target);
-                let i = self.ui.active_tab;
-                self.cwd[i] = new_cwd;
-                self.refresh_cwd_history_filter();
-                self.refresh_branch();
-                self.refresh_browser_files();
-                self.cwd() != before
-            }
+        match self.try_navigate_to(target) {
+            Ok(changed) => changed,
             Err(e) => {
                 self.push_out(format!("cd: {e}"), OutType::StdErr);
                 false
@@ -1819,17 +1837,41 @@ impl State {
         }
     }
 
+    /// [Self::navigate_to], returning why `target` couldn't be entered
+    /// rather than reporting it.
+    fn try_navigate_to(&mut self, target: PathBuf) -> io::Result<bool> {
+        let before = self.cwd().to_path_buf();
+        env::set_current_dir(&target)?;
+        let new_cwd = env::current_dir().unwrap_or(target);
+        let i = self.ui.active_tab;
+        self.cwd[i] = new_cwd;
+        self.refresh_cwd_history_filter();
+        self.refresh_branch();
+        self.refresh_browser_files();
+        Ok(self.cwd() != before)
+    }
+
     /// `cd` to `target` and update the active tab's cwd. This is the "normal"
     /// navigation path (typed `cd`, clicking a bookmark/recent dir/folder,
     /// the Up button): on success it records the previous dir on the Back
     /// stack and clears the Forward stack, just like a web/file browser.
     pub fn change_dir(&mut self, target: PathBuf) {
+        if let Err(e) = self.try_change_dir(target) {
+            self.push_out(format!("cd: {e}"), OutType::StdErr);
+        }
+    }
+
+    /// [Self::change_dir], returning why `target` couldn't be entered
+    /// rather than reporting it in the output pane, as the Files panel's
+    /// path bar shows it by the path typed instead.
+    pub fn try_change_dir(&mut self, target: PathBuf) -> io::Result<()> {
         let before = self.cwd().to_path_buf();
-        if self.navigate_to(target) {
+        if self.try_navigate_to(target)? {
             let i = self.ui.active_tab;
             self.ui.nav_back[i].push(before);
             self.ui.nav_forward[i].clear();
         }
+        Ok(())
     }
 
     /// [Self::change_dir] to a dir picked from `from`: a Recent dirs or

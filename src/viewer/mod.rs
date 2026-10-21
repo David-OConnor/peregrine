@@ -852,9 +852,14 @@ fn toolbar(doc: &mut Doc, ui: &mut Ui, window: ViewportId) {
             .on_hover_text("Open with the default program for this file type")
             .clicked()
         {
-            doc.notice = open_with_default_app(&doc.path)
-                .err()
-                .map(|e| format!("Couldn't open: {e}"));
+            match open_with_default_app(&doc.path) {
+                Ok(()) => {
+                    // The main window's pass is what drops a closed window.
+                    doc.open = false;
+                    ui.ctx().request_repaint_of(ViewportId::ROOT);
+                }
+                Err(e) => doc.notice = Some(format!("Couldn't open: {e}")),
+            }
         }
         if let Ok(Content::Image(picture)) = &doc.content {
             zoom_controls(ui, picture, &mut doc.zoom);

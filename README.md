@@ -59,6 +59,8 @@ A list of directories you recently performed a command in. Ones you passed throu
 ### File browser
 A reasonably full-featured file browser, similar to your OS's. Party tricks include integrated [ripgrep](https://github.com/burntsushi/ripgrep) search, and integration with the rest of *Peregrine*.
 
+The path bar at the top works like Explorer's: click any directory in the path to go there, or the `›` after it to pick one of the folders inside it. Middle-click a directory to open it in a new tab, or drop files on one to move them there. Click the empty part of the bar to type or paste a path (Tab completes folder names; a file's path selects it). If the path doesn't exist, it says which part is missing, and keeps what you typed so you can fix it.
+
 You can rename a file by selecting it, then clicking its name again. Double-clicking a file opens it in its default file handler. Broadly, the UX for selection, moving, and file operations follow conventions.
 
 Drag files and folders onto a folder (or the ⬆ and shortcut buttons) to move them there; hold Ctrl to copy. Drag them out of the window to drop them on Explorer or Nautilus, the desktop, a web page's upload box, or any other program that takes files from a file manager (Windows, and Linux on X11 or Wayland).
@@ -116,6 +118,7 @@ Shortcuts to reduce typing:
 - `clone`: `git clone`
 - `push`: `git push`
 - `checkout: `git checkout`
+- `stash`: `git stash`
 - `sync "message"`: `git add .` -> `git commit -am "message"` -> `git push`
 
 ### Python
@@ -147,6 +150,7 @@ The About window lists these too. Most are inspired by other programs - especial
 - **Ctrl + V**, **Ctrl + C**, **Ctrl + X** paste, copy, and cut using the native advanced clipboard, and/or system one
 - **Ctrl + Shift + V**: Toggle the clipboard pane
 - **Alt + F12**: Toggle the Terminal pane
+- **Shift + F10**: Run the project, as the project bar's **Run** button does (`cargo run`, or the Python application). If both a Cargo and Python project, runs `cargo run`
 
 ### File browser
 - **Enter** opens a file. (Same as double-clicking) Native viewer for text, markdown, code, and image files. OS-default otherwise.
@@ -155,6 +159,7 @@ The About window lists these too. Most are inspired by other programs - especial
 - **Escape** clears selections
 - **Delete** moves the selected items to the Recycle Bin (Trash on Mac and Linux), after confirming
 - **Ctrl + Shift + N** creates a new folder. On Mac, **Cmd + Shift + N**
+- **Ctrl + L** or **Alt + D** edits the path bar. **Enter** goes to the path typed; **Escape** cancels. On Mac, **Cmd + L**
 
 
 ### File viewer

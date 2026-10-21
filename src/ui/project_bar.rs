@@ -2,10 +2,15 @@
 //! for each kind of project the active tab's dir is (see [project::Project]).
 
 use egui::{
-    Align, Button, Color32, Frame, Id, IntoAtoms, Key, Layout, RichText, TextEdit, TextStyle, Ui,
+    Align, Button, Color32, Frame, Id, IntoAtoms, Key, KeyboardShortcut, Layout, Modifiers,
+    RichText, TextEdit, TextStyle, Ui,
 };
 
-use crate::{OutType, project, state::State, submit_command, ui};
+use crate::{OutType, project, state::State, submit_command, ui, ui::terminal};
+
+/// Clicks the Run button (see [run_button]) from anywhere in the window, as
+/// in JetBrains IDEs. Cargo's, if Python's is shown too.
+pub const RUN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::SHIFT, Key::F10);
 
 /// The Cargo group's buttons after Run (see [run_button]), and the line each
 /// runs.
@@ -135,7 +140,7 @@ fn groups(state: &mut State, ui: &mut Ui) {
             }
             let run_hover =
                 "Run this Python application. Uses `uv` and/or the included venv, if available.";
-            if run_button(ui, idle, run_hover, &mut stop) {
+            if run_button(ui, idle, run_hover, !proj.cargo, &mut stop) {
                 line = Some(project::python_run(&dir));
             }
             ui.strong("Python:");
@@ -149,9 +154,11 @@ fn groups(state: &mut State, ui: &mut Ui) {
                     line = Some(Ok(cmd.to_owned()));
                 }
             }
-            if run_button(ui, idle, "cargo run", &mut stop) {
+
+            if run_button(ui, idle, "cargo run", true, &mut stop) {
                 line = Some(Ok("cargo run".to_owned()));
             }
+
             ui.strong("Cargo:");
         });
     }
@@ -207,15 +214,22 @@ fn groups(state: &mut State, ui: &mut Ui) {
     }
 }
 
-/// A Run button, with the green "play" triangle IDEs put on one. While a
+/// While a
 /// command's running in this tab, a Stop button with their red square
 /// instead, ending it as the Stop by the input line does: that sets `stop`.
-/// Returns whether Run was clicked.
-fn run_button(ui: &mut Ui, idle: bool, hover: &str, stop: &mut bool) -> bool {
+/// Returns whether Run was clicked, or, if `shortcut`, [RUN] pressed. [RUN]
+/// is left alone while a command's running, for the program to get.
+fn run_button(ui: &mut Ui, idle: bool, hover: &str, shortcut: bool, stop: &mut bool) -> bool {
     let dark = ui.visuals().dark_mode;
     if idle {
         let play = RichText::new("⏵").color(if dark { PLAY_DARK } else { PLAY_LIGHT });
-        cmd_button(ui, idle, (play, "Run"), hover)
+        let pressed = shortcut && terminal::take_shortcut(ui.ctx(), RUN);
+        let hover = if shortcut {
+            format!("{hover} ({})", ui.ctx().format_shortcut(&RUN))
+        } else {
+            hover.to_owned()
+        };
+        cmd_button(ui, idle, (play, "Run"), &hover) || pressed
     } else {
         let square = RichText::new("⏹").color(if dark { STOP_DARK } else { STOP_LIGHT });
         *stop |= ui

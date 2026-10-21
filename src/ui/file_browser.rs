@@ -16,13 +16,13 @@ use crate::{
     ui::{
         ListAction,
         dirs::{BOOKMARKED_TEXT, bookmarked_fill},
-        search,
+        path_bar, search,
     },
     viewer,
 };
 
 /// Primary component for the file browser pane.
-pub(super) fn file_browser(state: &mut State, ui: &mut Ui) {
+pub(super) fn draw(state: &mut State, ui: &mut Ui) {
     // Measured before anything is laid out, so the details pane's share is
     // of the whole panel rather than of what's left under the header.
     let split = &mut state.ui.files_details_split;
@@ -47,8 +47,12 @@ pub(super) fn file_browser(state: &mut State, ui: &mut Ui) {
 
     let focused = ui.memory(|m| m.focused());
     let search_has_keys = !modal_open && state.ui.rename.is_none() && focused == Some(search_id);
+    // Not while a path's typed in the path bar either: egui has already
+    // taken the keyboard from its box for an Escape, which is the box's to
+    // close it.
     let list_has_keys = !modal_open
         && state.ui.rename.is_none()
+        && state.ui.path_edit.is_none()
         && state.ui.files_active
         && !ui.ctx().text_edit_focused();
 
@@ -102,6 +106,12 @@ pub(super) fn file_browser(state: &mut State, ui: &mut Ui) {
         state.ui.rename_pending = None;
     }
 
+    // Explorer's shortcuts for typing a path into the path bar.
+    let edit_path = list_has_keys
+        && ui.input_mut(|i| {
+            i.consume_key(Modifiers::COMMAND, Key::L) || i.consume_key(Modifiers::ALT, Key::D)
+        });
+
     // Escape selects nothing, as Unselect does. egui has already taken the
     // keyboard from a text box for it, so from the quick filter one press does
     // both; a rename box keeps it, to cancel the rename, and an open menu, to
@@ -120,38 +130,25 @@ pub(super) fn file_browser(state: &mut State, ui: &mut Ui) {
 
     let bookmarked = state.dir_bookmarks.iter().any(|p| p == state.cwd());
     let home = state.home.clone();
-    let dark = ui.visuals().dark_mode;
-    let cwd_job = if bookmarked && !dark {
-        ui::path_job_on(ui, state.cwd(), home.as_deref(), false, BOOKMARKED_TEXT)
-    } else {
-        ui::path_job(ui, state.cwd(), home.as_deref())
-    };
 
     let mut open_clicked = false;
     let mut star_clicked = false;
+    let mut path_selected = false;
 
     ui.horizontal(|ui| {
         ui.with_layout(Layout::right_to_left(Align::TOP), |ui| {
             if ui
                 .button("📂")
-                .on_hover_text("Open this folder in the system file manager")
+                .on_hover_text("Open this directory in the system file manager")
                 .clicked()
             {
                 open_clicked = true;
             }
             star_clicked = ui::dirs::bookmark_star(ui, bookmarked, false).clicked();
+
             // Left-aligned in whatever width the buttons leave.
             ui.with_layout(Layout::left_to_right(Align::TOP), |ui| {
-                let label = egui::Label::new(cwd_job).wrap();
-                if bookmarked {
-                    Frame::new()
-                        .fill(bookmarked_fill(dark))
-                        .corner_radius(ui.visuals().widgets.inactive.corner_radius)
-                        .inner_margin(egui::Margin::symmetric(4, 1))
-                        .show(ui, |ui| ui.add(label));
-                } else {
-                    ui.add(label);
-                }
+                path_selected = path_bar::draw(state, ui, bookmarked, edit_path);
             });
         });
     });
@@ -578,8 +575,14 @@ pub(super) fn file_browser(state: &mut State, ui: &mut Ui) {
         );
         apply_row_action(state, ui, action);
     } else {
-        // A new entry is scrolled into view, as the arrow keys' are.
-        file_list(state, ui, search_changed, arrow_moved || created);
+        // A new entry is scrolled into view, as the arrow keys' are, and so
+        // is a file whose path was typed.
+        file_list(
+            state,
+            ui,
+            search_changed,
+            arrow_moved || created || path_selected,
+        );
     }
 
     // After the list, so the divider is on top of it for the pointer.
@@ -706,7 +709,7 @@ fn arrow_target(key: Key, from: Option<usize>, len: usize, columns: usize) -> Op
 }
 
 /// The Files panel's listing of its dir: one row per entry, in columns when
-/// they fit (see [file_browser]). `search_changed` and `arrow_moved` say
+/// they fit (see [draw]). `search_changed` and `arrow_moved` say
 /// the selection just moved, to be scrolled into view.
 fn file_list(state: &mut State, ui: &mut Ui, search_changed: bool, arrow_moved: bool) {
     let home = state.home.clone();

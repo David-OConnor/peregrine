@@ -300,7 +300,7 @@ fn contents(state: &mut State, ui: &mut Ui, pane: Pane) {
     match pane {
         Pane::Bookmarks => dirs::dir_bookmarks(state, ui),
         Pane::RecentDirs => dirs::dir_history(state, ui),
-        Pane::Files => file_browser::file_browser(state, ui),
+        Pane::Files => file_browser::draw(state, ui),
         Pane::Remote => remote::remote_terminals(state, ui),
         Pane::CmdsThisDir => cmd_history::cwd_cmd_history(state, ui),
         Pane::RecentCmds => cmd_history::cmd_history(state, ui),
