@@ -1,13 +1,19 @@
 //! Commands handed to the system shell, run in the background so the window
-//! stays live while they do. Their output streams into the tab's pane as it
-//! arrives, lines typed meanwhile go to their stdin, and Stop (or Ctrl+C)
-//! ends them. A server, a watcher, or anything else that runs until it's
-//! stopped would otherwise hold the UI thread, and the whole window, forever.
+//! stays live while they do. A server, a watcher, or anything else that runs
+//! until it's stopped would otherwise hold the UI thread, and the whole
+//! window, forever.
+//!
+//! Each runs in a pseudo terminal of its own (see [crate::pty]), so it sees a
+//! terminal, as it would in a terminal window: Python starts its REPL, Vim
+//! draws its screen, and output comes in colour. What it writes streams into
+//! the tab's pane as it arrives (see [Term]), or, while a full-screen program
+//! has the terminal, the pane shows its screen. Lines typed meanwhile go to
+//! it as typed input, Ctrl+C interrupts it, and Stop ends it.
 
 use std::{
-    io::{Read, Write},
+    io::{self, Read},
     path::Path,
-    process::{ChildStdin, ExitStatus, Stdio},
+    process::ExitStatus,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -17,34 +23,27 @@ use std::{
     time::{Duration, Instant},
 };
 
-use shell::quiet_command;
-
 use crate::{
     OutType,
-    terminal::{Output, Stream as OutputStream},
+    pty::{self, Pty, Spawned},
+    term::Term,
+    terminal::Output,
 };
 
 /// How long to keep reading output once the shell has exited. Output it wrote
-/// just before exiting may still be in the pipe; but a program it started and
-/// left running (`notepad`, `code .`) holds the pipe open without writing to
-/// it, so we can't wait for it to close.
+/// just before exiting may still be on its way; but a program it started and
+/// left running (`code .`) can hold the terminal open without writing to it,
+/// and on Windows the pseudo console holds it open until it's closed, so we
+/// can't wait for its end.
 const EXIT_GRACE: Duration = Duration::from_millis(300);
-/// At most ~512 KiB of normal UTF-8 output waiting for the UI per command
-/// (lossy decoding can expand invalid bytes by up to three times).
+/// At most ~512 KiB of output waiting for the UI per command.
 const OUTPUT_QUEUE_CHUNKS: usize = 64;
 const POLL_BYTES: usize = 128 * 1024;
 const POLL_CHUNKS: usize = 32;
 
-/// Which of the command's output streams a chunk came from.
-#[derive(Clone, Copy, PartialEq)]
-enum Stream {
-    Stdout,
-    Stderr,
-}
-
 enum Msg {
-    Out(Stream, String),
-    /// A stream reached its end.
+    Out(Vec<u8>),
+    /// The output reached its end.
     Eof,
 }
 
@@ -61,106 +60,55 @@ pub struct RunningCmd {
     pub line: String,
     /// A clone URL root to save if the command succeeds (see `util::handle_cmd`).
     pub clone_root: Option<String>,
-    /// First stable line ID belonging to this command, so a
-    /// failure can recolour its stderr.
-    out_start: u64,
-    /// For stdout and stderr, the output item holding a line that stream has
-    /// written only part of, so the rest of it continues that row even when
-    /// the other stream wrote in between.
-    streams: [OutputStream; 2],
-    /// The output revision when this command last added to it, to tell when
-    /// something else has since (an echoed input line), which ends the rows
-    /// in `streams`.
-    out_revision: u64,
+    /// Its terminal's screen, whose text is in the tab's output.
+    pub term: Term,
     /// Set once Stop ended it, so its exit isn't reported as a failure.
     stopped: bool,
-    pid: u32,
-    stdin: Option<ChildStdin>,
+    pty: Pty,
     rx: Receiver<Msg>,
     lifecycle: Receiver<Lifecycle>,
     reader_cancel: Arc<AtomicBool>,
     ctx: egui::Context,
-    /// Streams not yet at their end.
-    open_streams: u8,
+    /// Set once the output has reached its end.
+    output_ended: bool,
     /// Set once the shell has exited.
     exited: Option<Option<ExitStatus>>,
     grace_over: bool,
     last_output: Instant,
-    #[cfg(windows)]
-    job: Option<win::Job>,
 }
 
 impl RunningCmd {
     /// Start `line` in the system shell (PowerShell 7 on Windows, `sh`
-    /// elsewhere) in `dir`. `out` supplies stable IDs for the tab's output.
-    /// `ctx` is repainted whenever there's news,
-    /// so the output shows without waiting for the user to move the mouse.
+    /// elsewhere) in `dir`, in a terminal of `size` (columns, rows). `out` is
+    /// the tab's output, which its output joins. `ctx` is repainted whenever
+    /// there's news, so the output shows without waiting for the user to
+    /// move the mouse.
     pub fn start(
         line: &str,
         dir: &Path,
+        size: (u16, u16),
         out: &Output,
         ctx: &egui::Context,
-    ) -> std::io::Result<Self> {
-        let mut cmd = if cfg!(windows) {
-            let mut c = quiet_command("pwsh");
-            c.args(["-NoProfile", "-NoLogo", "-Command", line]);
-            c
+    ) -> io::Result<Self> {
+        let (program, args) = if cfg!(windows) {
+            ("pwsh", vec!["-NoProfile", "-NoLogo", "-Command", line])
         } else {
-            let mut c = quiet_command("sh");
-            c.args(["-c", line]);
-            c
+            ("sh", vec!["-c", line])
         };
-        cmd.current_dir(dir)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            // Python fully buffers stdout when it's a pipe rather than a
-            // console, so a script's prints would only show up in chunks of
-            // several KB, or when it exits.
-            .env("PYTHONUNBUFFERED", "1");
-
-        // Its own process group, so Stop can signal everything it starts.
-        #[cfg(unix)]
-        std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
-
-        let mut child = cmd.spawn()?;
-
-        // Put the shell in a job object right away: what it starts (the
-        // `python` in `python run.py`) joins the job too, so Stop can end
-        // those rather than just the shell. The shell takes far longer to
-        // start than this takes, so nothing escapes in between.
-        #[cfg(windows)]
-        let job = win::Job::new(&child);
+        let (cols, rows) = size;
+        let Spawned {
+            pty,
+            output,
+            mut child,
+        } = pty::spawn(program, &args, dir, cols, rows)?;
 
         let (tx, rx) = mpsc::sync_channel(OUTPUT_QUEUE_CHUNKS);
         // Lifecycle messages must not wait behind a full output queue: close
         // and Stop still need to know whether the shell has already exited.
         let (lifecycle_tx, lifecycle) = mpsc::channel();
         let reader_cancel = Arc::new(AtomicBool::new(false));
-        let stdin = child.stdin.take();
-        let mut open_streams = 0;
-        if let Some(out) = child.stdout.take() {
-            read_stream(
-                out,
-                Stream::Stdout,
-                tx.clone(),
-                ctx.clone(),
-                Arc::clone(&reader_cancel),
-            );
-            open_streams += 1;
-        }
-        if let Some(err) = child.stderr.take() {
-            read_stream(
-                err,
-                Stream::Stderr,
-                tx.clone(),
-                ctx.clone(),
-                Arc::clone(&reader_cancel),
-            );
-            open_streams += 1;
-        }
+        read_output(output, tx, ctx.clone(), Arc::clone(&reader_cancel));
 
-        let pid = child.id();
         let waiter_ctx = ctx.clone();
         thread::spawn(move || {
             let status = child.wait().ok();
@@ -177,22 +125,17 @@ impl RunningCmd {
         Ok(Self {
             line: line.to_string(),
             clone_root: None,
-            out_start: out.next_id(),
-            streams: [OutputStream::default(), OutputStream::default()],
-            out_revision: out.revision(),
+            term: Term::new(cols, rows, out),
             stopped: false,
-            pid,
-            stdin,
+            pty,
             rx,
             lifecycle,
             reader_cancel,
             ctx: ctx.clone(),
-            open_streams,
+            output_ended: false,
             exited: None,
             grace_over: false,
             last_output: Instant::now(),
-            #[cfg(windows)]
-            job,
         })
     }
 
@@ -204,27 +147,35 @@ impl RunningCmd {
         let mut bytes = 0;
         let mut chunks = 0;
         let started = Instant::now();
+        let mut more = false;
         while let Ok(msg) = self.rx.try_recv() {
             chunks += 1;
             match msg {
-                Msg::Out(stream, text) => {
+                Msg::Out(data) => {
                     self.last_output = Instant::now();
-                    bytes += text.len();
-                    self.push_out(out, stream, &text);
+                    bytes += data.len();
+                    let replies = self.term.feed(&data, out);
+                    self.send(&replies);
                 }
-                Msg::Eof => self.open_streams -= 1,
+                Msg::Eof => self.output_ended = true,
             }
             if bytes >= POLL_BYTES
                 || chunks >= POLL_CHUNKS
                 || started.elapsed() >= Duration::from_millis(4)
             {
-                self.ctx.request_repaint();
-                return None;
+                more = true;
+                break;
             }
         }
+        self.term.render(out);
+        if more {
+            self.ctx.request_repaint();
+            return None;
+        }
+
         let status = match self.exited {
             Some(status)
-                if self.open_streams == 0
+                if self.output_ended
                     || (self.grace_over && self.last_output.elapsed() >= EXIT_GRACE) =>
             {
                 status
@@ -236,38 +187,11 @@ impl RunningCmd {
             None => return None,
         };
 
-        let success = status.is_some_and(|s| s.success());
+        self.term.finish(out);
         if self.stopped {
             out.push("(stopped)", OutType::StdErrOk);
-        } else if !success {
-            // Its stderr showed as warnings while we couldn't tell; now it's
-            // failed, it shows as errors, like a quick command's.
-            out.fail_since(self.out_start);
         }
-        Some(success)
-    }
-
-    /// Add a chunk of output to `out`. It continues the row of a line the
-    /// same stream left unfinished, so a line that arrives in pieces still
-    /// shows as one.
-    fn push_out(&mut self, out: &mut Output, stream: Stream, text: &str) {
-        if out.revision() != self.out_revision {
-            self.out_cleared();
-        }
-        let kind = match stream {
-            Stream::Stdout => OutType::StdOut,
-            Stream::Stderr => OutType::StdErrOk,
-        };
-        out.write(text, kind, &mut self.streams[stream as usize]);
-        self.out_revision = out.revision();
-    }
-
-    /// The tab's output was emptied, taking what this command wrote so far
-    /// with it, so the indices into it no longer point anywhere.
-    pub fn out_cleared(&mut self) {
-        for stream in &mut self.streams {
-            stream.break_line();
-        }
+        Some(status.is_some_and(|s| s.success()))
     }
 
     fn poll_lifecycle(&mut self) {
@@ -281,56 +205,57 @@ impl RunningCmd {
         }
     }
 
-    /// Send a line typed while the command runs to its stdin. Ignored once
-    /// it has closed its stdin, as a terminal would.
+    /// Whether a full-screen program has the terminal, so the pane shows its
+    /// screen and keys go straight to it.
+    pub fn full_screen(&self) -> bool {
+        self.term.full_screen()
+    }
+
+    /// Send bytes to the program, as typed.
+    pub fn send(&mut self, bytes: &[u8]) {
+        let _ = self.pty.send(bytes);
+    }
+
+    /// Type a line into the program, as Enter would. The terminal echoes it
+    /// when the program wants it echoed (not a password, say).
     pub fn send_line(&mut self, line: &str) {
-        if let Some(stdin) = &mut self.stdin {
-            let sent = stdin
-                .write_all(format!("{line}\n").as_bytes())
-                .and_then(|()| stdin.flush());
-            if sent.is_err() {
-                self.stdin = None;
-            }
+        self.send(format!("{line}\r").as_bytes());
+    }
+
+    /// Ctrl+C, as in a terminal: a REPL drops its input line, most other
+    /// programs exit.
+    pub fn interrupt(&mut self) {
+        let _ = self.pty.interrupt();
+    }
+
+    /// End the program's input, as Ctrl+D (Ctrl+Z on Windows) does on an
+    /// empty line in a terminal.
+    pub fn end_input(&mut self) {
+        let _ = self.pty.end_input();
+    }
+
+    /// Match the terminal to the pane's size, in characters. Only while a
+    /// full-screen program has it: a resize makes Windows' pseudo console
+    /// repaint the screen from how it reflowed its lines, which can differ
+    /// from what the pane already shows, and the emulator cuts off lines
+    /// it narrows. Ordinary output is unaffected by the size it started at.
+    pub fn resize(&mut self, cols: u16, rows: u16) {
+        if self.full_screen() {
+            self.pty.resize(cols, rows);
+            self.term.resize(cols, rows);
         }
     }
 
-    /// Close the command's stdin, so it reads the end of its input. Lines
-    /// typed after are ignored, as in [Self::send_line].
-    pub fn close_stdin(&mut self) {
-        self.stdin = None;
-    }
-
-    /// End the command and everything it started, as Ctrl+C in a terminal
-    /// would (though without giving it the chance to clean up that a Ctrl+C
-    /// does). Its exit then arrives through [Self::poll] as usual.
+    /// End the command and everything it started, without giving it the
+    /// chance to clean up that an [Self::interrupt] does. Its exit then
+    /// arrives through [Self::poll] as usual.
     pub fn stop(&mut self) {
         self.reader_cancel.store(true, Ordering::Relaxed);
         if self.exited.is_some() {
             return;
         }
         self.stopped = true;
-
-        #[cfg(windows)]
-        {
-            if self.job.as_ref().is_some_and(win::Job::terminate) {
-                return;
-            }
-            // No job, so end the shell's process tree by walking it instead.
-            let _ = quiet_command("taskkill")
-                .args(["/T", "/F", "/PID", &self.pid.to_string()])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
-        }
-        #[cfg(not(windows))]
-        {
-            // The whole process group: the shell was started as its leader.
-            let _ = quiet_command("kill")
-                .args(["-KILL", "--", &format!("-{}", self.pid)])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
-        }
+        self.pty.kill();
     }
 }
 
@@ -340,45 +265,32 @@ impl Drop for RunningCmd {
     fn drop(&mut self) {
         self.poll_lifecycle();
         self.stop();
-        self.reader_cancel.store(true, Ordering::Relaxed);
-        // Dropping the receiver releases any reader blocked by backpressure.
+        // Dropping the receiver releases a reader blocked by backpressure,
+        // and the pty's closing ends the output it's waiting on.
     }
 }
 
-/// Read one of the command's output streams on a thread, sending its text to
-/// `tx` as it arrives rather than line by line, so a prompt with no newline
-/// after it still shows.
-fn read_stream(
+/// Read the terminal's output on a thread, sending it to `tx` as it arrives.
+fn read_output(
     mut src: impl Read + Send + 'static,
-    stream: Stream,
     tx: SyncSender<Msg>,
     ctx: egui::Context,
     cancelled: Arc<AtomicBool>,
 ) {
     thread::spawn(move || {
         let mut buf = [0; 8192];
-        // Read bytes not yet decoded: the start of a UTF-8 character whose
-        // remaining bytes are in the next read.
-        let mut pending = Vec::new();
-        loop {
-            if cancelled.load(Ordering::Relaxed) {
-                break;
-            }
+        while !cancelled.load(Ordering::Relaxed) {
             match src.read(&mut buf) {
+                // A Unix terminal reports its end as an error once everything
+                // in it has exited.
                 Ok(0) | Err(_) => break,
-                Ok(n) => pending.extend_from_slice(&buf[..n]),
-            }
-            let text = take_utf8(&mut pending);
-            if !text.is_empty() {
-                if tx.send(Msg::Out(stream, text)).is_err() {
-                    return;
+                Ok(n) => {
+                    if tx.send(Msg::Out(buf[..n].to_vec())).is_err() {
+                        return;
+                    }
+                    ctx.request_repaint();
                 }
-                ctx.request_repaint();
             }
-        }
-        if !pending.is_empty() {
-            let text = String::from_utf8_lossy(&pending).into_owned();
-            let _ = tx.send(Msg::Out(stream, text));
         }
         let _ = tx.send(Msg::Eof);
         ctx.request_repaint();
@@ -397,54 +309,4 @@ pub fn take_utf8(bytes: &mut Vec<u8>) -> String {
     let text = String::from_utf8_lossy(&bytes[..end]).into_owned();
     bytes.drain(..end);
     text
-}
-
-#[cfg(windows)]
-mod win {
-    use std::{os::windows::io::AsRawHandle, process::Child, ptr::null};
-
-    use windows_sys::Win32::{
-        Foundation::{CloseHandle, HANDLE},
-        System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW, TerminateJobObject},
-    };
-
-    /// A Windows job object holding a command's shell and every process it
-    /// starts. Closing it leaves them running: a program the command started
-    /// on its own, such as an editor, should outlive it.
-    pub struct Job(HANDLE);
-
-    // SAFETY: a job handle can be used and closed from any thread.
-    unsafe impl Send for Job {}
-
-    impl Job {
-        /// A new job holding `child`, or `None` if Windows refused one.
-        pub fn new(child: &Child) -> Option<Self> {
-            // SAFETY: plain calls on handles we own; `child`'s handle stays
-            // open for the duration.
-            unsafe {
-                let job = CreateJobObjectW(null(), null());
-                if job.is_null() {
-                    return None;
-                }
-                if AssignProcessToJobObject(job, child.as_raw_handle() as HANDLE) == 0 {
-                    CloseHandle(job);
-                    return None;
-                }
-                Some(Self(job))
-            }
-        }
-
-        /// End every process in the job. Returns whether that worked.
-        pub fn terminate(&self) -> bool {
-            // SAFETY: `self.0` is a job handle we own.
-            unsafe { TerminateJobObject(self.0, 1) != 0 }
-        }
-    }
-
-    impl Drop for Job {
-        fn drop(&mut self) {
-            // SAFETY: `self.0` is a job handle we own, closed only here.
-            unsafe { CloseHandle(self.0) };
-        }
-    }
 }

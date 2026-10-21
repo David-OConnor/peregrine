@@ -181,6 +181,41 @@ impl Output {
         }
     }
 
+    /// Add a finished line of `text`, styled over its byte ranges by
+    /// `styles`, which cover all of it. Returns its ID.
+    pub fn push_styled(
+        &mut self,
+        text: &str,
+        styles: &[(Range<usize>, ansi::Style)],
+        kind: OutType,
+    ) -> u64 {
+        let id = self.new_line(kind);
+        for (range, style) in styles {
+            self.append(id, &text[range.clone()], *style);
+        }
+        self.trim();
+        self.revision += 1;
+        id
+    }
+
+    /// Remove the lines from `id` on, at the end.
+    pub fn truncate_from(&mut self, id: u64) {
+        while let Some(line) = self.lines.pop_back_if(|line| line.id >= id) {
+            self.bytes -= line.bytes();
+            // Its ID goes to the next new line: finding a line by its ID
+            // relies on them being consecutive.
+            self.next_id = line.id;
+        }
+        if self
+            .selection
+            .is_some_and(|s| s.anchor.line >= id || s.head.line >= id)
+        {
+            self.selection = None;
+            self.dragging = false;
+        }
+        self.revision += 1;
+    }
+
     /// Continue an unfinished line in this stream, including when the other
     /// stream has written in between. An echo/clear ends the continuation.
     /// A carriage return (as in CRLF, or a progress bar redrawing itself)
@@ -317,14 +352,6 @@ impl Output {
         }
         line.height = None;
         self.bytes += line.bytes();
-    }
-
-    pub fn fail_since(&mut self, first: u64) {
-        for line in &mut self.lines {
-            if line.id >= first && line.kind == OutType::StdErrOk {
-                line.kind = OutType::StdErr;
-            }
-        }
     }
 
     fn index(&self, id: u64) -> Option<usize> {

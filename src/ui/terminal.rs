@@ -14,9 +14,9 @@ use egui::{
 use shell::DirList;
 
 use super::{
-    COLOR_BRANCH, COLOR_HIS, clipboard,
+    COLOR_BRANCH, COLOR_HIS, clipboard, grid,
     line_edit::{self, Edit, LineKey},
-    remote_grid, scratchpad,
+    scratchpad,
 };
 use crate::{
     OutType, path_color,
@@ -416,9 +416,8 @@ fn input_id() -> Id {
 /// in the input itself, where Tab autocompletes, in the Scratchpad, where it
 /// indents unless set not to (see [scratchpad::Scratchpad::keeps_tab]), or
 /// while a popup is up, where it moves between the popup's buttons. While a
-/// full-screen program
-/// runs on the remote, its screen stands in for the input, so Tab moves the
-/// keyboard there instead. Either way, a hidden terminal is shown.
+/// full-screen program runs, its screen stands in for the input, so Tab
+/// moves the keyboard there instead. Either way, a hidden terminal is shown.
 pub fn focus_input_key(state: &mut State, ctx: &Context) {
     if ctx.memory(|m| {
         m.has_focus(input_id())
@@ -453,8 +452,8 @@ pub fn focus_input_key(state: &mut State, ctx: &Context) {
     ctx.memory_mut(|m| m.move_focus(egui::FocusDirection::None));
     state.ui.panel_vis.terminal = true;
 
-    if state.live_here().is_some_and(|l| l.grid_mode()) {
-        ctx.memory_mut(|m| m.request_focus(remote_grid::grid_id()));
+    if state.grid_here() {
+        ctx.memory_mut(|m| m.request_focus(grid::grid_id()));
         return;
     }
     let i = state.ui.active_tab;
@@ -495,10 +494,10 @@ pub fn term_in(state: &mut State, ui: &mut Ui) {
             .command()
             .map_or_else(|| "remote terminal".to_string(), str::to_string)
     });
-    // A full-screen remote program has the keyboard; see `term_out`. Once
-    // it's done, the keyboard comes back here.
-    let grid = state.live_here().is_some_and(|l| l.grid_mode());
-    if !grid && remote_grid::has_focus(ui.ctx()) {
+    // A full-screen program has the keyboard; see `term_out`. Once it's
+    // done, the keyboard comes back here.
+    let grid = state.grid_here();
+    if !grid && grid::has_focus(ui.ctx()) {
         state.ui.focus_input = true;
     }
     let running = state
@@ -506,6 +505,7 @@ pub fn term_in(state: &mut State, ui: &mut Ui) {
         .map(|cmd| cmd.line.clone())
         .or(remote_busy.clone());
     let mut stop = false;
+    let mut interrupt = false;
     let mut cancel = false;
 
     // Wrapped, so a long cwd or running command flows onto extra rows (and
@@ -557,7 +557,7 @@ pub fn term_in(state: &mut State, ui: &mut Ui) {
                 let hover = if remote_busy.is_some() {
                     "Interrupt the remote command (Ctrl+C)"
                 } else {
-                    "End the command and everything it started (Ctrl+C)"
+                    "End the command and everything it started. Ctrl+C interrupts it instead"
                 };
                 stop = ui.button("Stop").on_hover_text(hover).clicked();
             }
@@ -619,9 +619,9 @@ pub fn term_in(state: &mut State, ui: &mut Ui) {
         && !right
         && (consume(ui, Key::ArrowRight) || line_keys.contains(&LineKey::Edit(Edit::End)));
 
-    // Ctrl+C stops a running command, as in a terminal, or else cancels the
-    // input, unless there's text selected for it to copy (egui sends it as a
-    // Copy event, not a key).
+    // Ctrl+C interrupts a running command, as in a terminal, or else cancels
+    // the input, unless there's text selected for it to copy (egui sends it
+    // as a Copy event, not a key).
     let mut cancel_input = false;
     if focused && ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy))) {
         let input_selected = TextEdit::load_state(ui.ctx(), input_id)
@@ -633,7 +633,7 @@ pub fn term_in(state: &mut State, ui: &mut Ui) {
             .unwrap_or(false);
         if !input_selected && !label_selected {
             if running.is_some() {
-                stop = true;
+                interrupt = true;
             } else {
                 cancel_input = true;
             }
@@ -646,21 +646,25 @@ pub fn term_in(state: &mut State, ui: &mut Ui) {
         state.ui.cli_input[active].clear();
         state.reset_history_nav();
     }
-    if stop {
+    if stop || interrupt {
         if remote_busy.is_some() {
             state.interrupt_remote();
-        } else {
+        } else if stop {
             state.stop_running();
+        } else {
+            state.interrupt_running();
         }
         state.ui.focus_input = true;
     }
 
-    // A full-screen remote program has the keyboard, and the pane.
+    // A full-screen program has the keyboard, and the pane.
     if grid {
         ui.label(
-            RichText::new("A full-screen program is running on the remote; keys go to it. Click it if they don't.")
-                .color(COLOR_STDERR_OK)
-                .small(),
+            RichText::new(
+                "A full-screen program is running; keys go to it. Click it if they don't.",
+            )
+            .color(COLOR_STDERR_OK)
+            .small(),
         );
         return;
     }
@@ -770,9 +774,9 @@ pub fn term_in(state: &mut State, ui: &mut Ui) {
 
     if submitted {
         let input = std::mem::take(&mut state.ui.cli_input[active]);
-        // A line for a program running on the remote goes straight to it; the
-        // remote terminal echoes it when the program wants it echoed (not a
-        // password, say), so it isn't echoed here.
+        // A line for a running program goes straight to it; its terminal
+        // echoes it when the program wants it echoed (not a password, say),
+        // so it isn't echoed here.
         if remote_busy.is_some() {
             state.send_remote_line(&input);
         } else if running.is_some() {
@@ -793,18 +797,27 @@ fn edit_input(state: &mut State, ctx: &Context, edit: Edit) {
 
 /// The "terminal" output pane: scrolls, sticks to the bottom so the latest
 /// line stays in view, and colours rows by stream kind. While a full-screen
-/// program runs on the tab's remote, its screen instead.
+/// program runs in the tab, locally or on its remote, its screen instead.
 pub fn term_out(state: &mut State, ui: &mut Ui) {
     set_mono_size(ui, state.font_size);
-    state.ui.term_size = remote_grid::size_in_cells(ui);
+    state.ui.term_size = grid::size_in_cells(ui);
     let i = state.ui.active_tab;
+    if let Some(cmd) = state.running[i].as_mut().filter(|c| c.full_screen()) {
+        let paste = state.ui.clipboard.pending_text.take();
+        let take_focus = std::mem::take(&mut cmd.term.grid_started);
+        let keys = grid::show(cmd.term.screen(), take_focus, ui, paste);
+        cmd.send(&keys);
+        return;
+    }
     if let Some(live) = state.remote[i]
         .as_mut()
         .and_then(Remote::live_mut)
         .filter(|l| l.grid_mode())
     {
         let paste = state.ui.clipboard.pending_text.take();
-        remote_grid::show(live, ui, paste);
+        let take_focus = std::mem::take(&mut live.grid_started);
+        let keys = grid::show(live.screen.screen(), take_focus, ui, paste);
+        live.session.send(&keys);
         return;
     }
     show(&mut state.ui.out[i], ui);

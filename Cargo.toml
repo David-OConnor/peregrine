@@ -71,17 +71,21 @@ raw-window-handle = "0.6"
 # in a job object, so Stop ends everything they started. Files rows dragged
 # out of the window go to other programs through the shell's drag and drop
 # (`SHDoDragDrop`, with the data object Explorer drags; see
-# `src/drag_out.rs`).
+# `src/drag_out.rs`). Local commands run in a pseudo console (ConPTY, with
+# the pipes it talks over; see `src/pty.rs`), as the `shell` crate's Ctrl+C
+# handling already builds.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Graphics_Gdi",
     "Win32_Security",
     "Win32_Storage_FileSystem",
     "Win32_System_Com",
+    "Win32_System_Console",
     "Win32_System_Diagnostics_Debug",
     "Win32_System_JobObjects",
     "Win32_System_Memory",
     "Win32_System_Ole",
+    "Win32_System_Pipes",
     "Win32_System_Registry",
     "Win32_System_SystemServices",
     "Win32_System_Threading",
@@ -101,6 +105,11 @@ clipboard-win = { version = "5.4", features = ["std"] }
 # egui's clipboard already builds it.
 [target.'cfg(not(windows))'.dependencies]
 arboard = { version = "3.6", default-features = false }
+
+# Local commands run in a pseudo terminal (`openpty`; see `src/pty.rs`). The
+# `shell` crate already builds it.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 # Files rows dragged out of the window, on Linux (see `src/drag_out.rs`): on
 # X11 with the XDND protocol, over an x11rb connection of our own; on Wayland

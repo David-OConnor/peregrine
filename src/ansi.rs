@@ -30,6 +30,27 @@ impl Style {
         }
     }
 
+    /// Text in these colours (`None` for the default) and attributes.
+    pub const fn with(
+        fg: Option<Color32>,
+        bg: Option<Color32>,
+        bold: bool,
+        italic: bool,
+        underline: bool,
+    ) -> Self {
+        Self {
+            fg,
+            bg,
+            bold,
+            italic,
+            underline,
+        }
+    }
+
+    pub fn has_background(self) -> bool {
+        self.bg.is_some()
+    }
+
     pub fn format(self, default_fg: Color32, font: FontId) -> TextFormat {
         let color = self.fg.unwrap_or(default_fg);
         let color = if self.bold { brighten(color) } else { color };

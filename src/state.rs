@@ -1396,10 +1396,8 @@ impl State {
     /// Empty the active tab's output pane, as `clear` does in a terminal.
     pub fn clear_out(&mut self) {
         let i = self.ui.active_tab;
+        // A running command notices on its own (see `term::Term`).
         self.ui.out[i].clear();
-        if let Some(cmd) = self.running[i].as_mut() {
-            cmd.out_cleared();
-        }
         if let Some(live) = self.remote[i].as_mut().and_then(Remote::live_mut) {
             live.out_cleared();
         }
@@ -1996,7 +1994,7 @@ impl State {
             );
             return;
         }
-        match RunningCmd::start(line, dir, &self.ui.out[i], ctx) {
+        match RunningCmd::start(line, dir, self.ui.term_size, &self.ui.out[i], ctx) {
             Ok(mut cmd) => {
                 cmd.clone_root = clone_root;
                 self.running[i] = Some(cmd);
@@ -2005,39 +2003,57 @@ impl State {
         }
     }
 
-    /// Stop the command running in the active tab.
+    /// The command running in the active tab, if any.
+    pub fn running_here_mut(&mut self) -> Option<&mut RunningCmd> {
+        self.running[self.ui.active_tab].as_mut()
+    }
+
+    /// Stop the command running in the active tab, and everything it started.
     pub fn stop_running(&mut self) {
-        if let Some(cmd) = self.running[self.ui.active_tab].as_mut() {
+        if let Some(cmd) = self.running_here_mut() {
             cmd.stop();
+        }
+    }
+
+    /// Ctrl+C for the command running in the active tab.
+    pub fn interrupt_running(&mut self) {
+        if let Some(cmd) = self.running_here_mut() {
+            cmd.interrupt();
         }
     }
 
     /// End the input of the command running in the active tab, as Ctrl+D on
     /// an empty line does in a terminal.
     pub fn end_running_input(&mut self) {
-        if let Some(cmd) = self.running[self.ui.active_tab].as_mut() {
-            cmd.close_stdin();
+        if let Some(cmd) = self.running_here_mut() {
+            cmd.end_input();
         }
     }
 
-    /// Send a line typed into the active tab to its running command's stdin,
-    /// echoing it into the pane as a terminal would.
+    /// Type a line into the command running in the active tab. Its terminal
+    /// echoes it into the pane, unless the program has turned echo off.
     pub fn send_running_line(&mut self, line: &str) {
-        let i = self.ui.active_tab;
-        if let Some(cmd) = self.running[i].as_mut() {
+        if let Some(cmd) = self.running_here_mut() {
             cmd.send_line(line);
-            self.push_out(line, OutType::Prompt);
         }
+    }
+
+    /// Whether a full-screen program has the active tab's terminal, locally
+    /// or on its remote, so the pane shows its screen and keys go to it.
+    pub fn grid_here(&self) -> bool {
+        self.running_here().is_some_and(RunningCmd::full_screen)
+            || self.live_here().is_some_and(LiveRemote::grid_mode)
     }
 
     /// Bring each tab's running command's new output into its pane, and wrap
     /// up any that have finished. Called once per frame.
     pub fn pump_running(&mut self) {
+        let (cols, rows) = self.ui.term_size;
         for i in 0..self.running.len() {
-            let Some(success) = self.running[i]
-                .as_mut()
-                .and_then(|cmd| cmd.poll(&mut self.ui.out[i]))
-            else {
+            let Some(success) = self.running[i].as_mut().and_then(|cmd| {
+                cmd.resize(cols, rows);
+                cmd.poll(&mut self.ui.out[i])
+            }) else {
                 continue;
             };
             let Some(cmd) = self.running[i].take() else {

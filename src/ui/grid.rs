@@ -1,9 +1,10 @@
-//! The remote terminal's screen, for full-screen programs (vim, nano, less,
-//! top): drawn cell by cell from the emulator in [LiveRemote::screen], with
-//! the keyboard going straight to the remote while it has focus. Text typed
-//! arrives as egui text events; other keys are encoded as an xterm would
-//! (see `shell::ssh::keys`). Ctrl+C, Ctrl+X and Ctrl+V reach egui as copy,
-//! cut and paste, so those are turned back into what a terminal sends.
+//! A terminal's screen, for full-screen programs (vim, nano, less, top), run
+//! locally (see [crate::term]) or over SSH (see [crate::remote]): drawn cell
+//! by cell from its emulator, with the keyboard going straight to the
+//! program while it has focus. Text typed arrives as egui text events; other
+//! keys are encoded as an xterm would (see `shell::ssh::keys`). Ctrl+C,
+//! Ctrl+X and Ctrl+V reach egui as copy, cut and paste, so those are turned
+//! back into what a terminal sends.
 
 use egui::{
     Align2, Color32, Event, EventFilter, FontId, Id, Key, Modifiers, Rect, Sense, Stroke,
@@ -11,15 +12,15 @@ use egui::{
 };
 use shell::ssh::keys::{TermKey, TermMods, encode_key, encode_paste};
 
-use crate::{ansi, remote::LiveRemote, ui::terminal::COLOR_STDOUT};
+use crate::{ansi, ui::terminal::COLOR_STDOUT};
 
 /// The screen widget's id, so other code can tell when it has focus.
 pub fn grid_id() -> Id {
-    Id::new("remote_grid")
+    Id::new("terminal_grid")
 }
 
 /// Whether the screen has keyboard focus, in which case keys are the
-/// remote program's, not shortcuts.
+/// program's, not shortcuts.
 pub fn has_focus(ctx: &egui::Context) -> bool {
     ctx.memory(|m| m.has_focus(grid_id()))
 }
@@ -47,19 +48,26 @@ pub fn size_in_cells(ui: &Ui) -> (u16, u16) {
     (cols, rows)
 }
 
-/// Draw the screen, and while it has focus, send it the frame's keys.
-/// `pending_paste` is text from the Clipboard panel's "Paste to CLI".
-pub fn show(live: &mut LiveRemote, ui: &mut Ui, pending_paste: Option<String>) {
+/// Draw `screen`, and while it has focus, take the frame's keys for the
+/// program. `take_focus` gives it focus, as a program that just took over
+/// should have. `pending_paste` is text from the Clipboard panel's "Paste to
+/// CLI". Returns what to send the program.
+pub fn show(
+    screen: &vt100::Screen,
+    take_focus: bool,
+    ui: &mut Ui,
+    pending_paste: Option<String>,
+) -> Vec<u8> {
     let font = TextStyle::Monospace.resolve(ui.style());
     let cell = cell_size(ui, &font);
     let rect = ui.available_rect_before_wrap();
     let response = ui.interact(rect, grid_id(), Sense::click());
 
-    // A program that just took over gets the keyboard, as does a click.
-    if response.clicked() || std::mem::take(&mut live.grid_started) {
+    if response.clicked() || take_focus {
         response.request_focus();
     }
     let focused = response.has_focus();
+    let mut bytes = Vec::new();
     if focused {
         // Tab, the arrows and Escape are the program's, not egui's focus
         // navigation.
@@ -74,20 +82,18 @@ pub fn show(live: &mut LiveRemote, ui: &mut Ui, pending_paste: Option<String>) {
                 },
             )
         });
-        let bytes = take_input(live, ui);
-        live.session.send(&bytes);
+        bytes = take_input(screen, ui);
     }
     if let Some(text) = pending_paste {
-        let bracketed = live.screen.screen().bracketed_paste();
-        live.session.send(&encode_paste(&text, bracketed));
+        bytes.extend(encode_paste(&text, screen.bracketed_paste()));
     }
 
-    paint(live, ui, rect, &font, cell, focused);
+    paint(screen, ui, rect, &font, cell, focused);
+    bytes
 }
 
-/// Take this frame's keyboard events out of egui, encoded for the remote.
-fn take_input(live: &LiveRemote, ui: &mut Ui) -> Vec<u8> {
-    let screen = live.screen.screen();
+/// Take this frame's keyboard events out of egui, encoded for the program.
+fn take_input(screen: &vt100::Screen, ui: &mut Ui) -> Vec<u8> {
     let (app_cursor, bracketed) = (screen.application_cursor(), screen.bracketed_paste());
     let mut out = Vec::new();
     ui.input_mut(|input| {
@@ -224,8 +230,14 @@ fn brighten(c: Color32) -> Color32 {
     Color32::from_rgb(lift(c.r()), lift(c.g()), lift(c.b()))
 }
 
-fn paint(live: &LiveRemote, ui: &Ui, rect: Rect, font: &FontId, cell: egui::Vec2, focused: bool) {
-    let screen = live.screen.screen();
+fn paint(
+    screen: &vt100::Screen,
+    ui: &Ui,
+    rect: Rect,
+    font: &FontId,
+    cell: egui::Vec2,
+    focused: bool,
+) {
     let (rows, cols) = screen.size();
     let painter = ui.painter_at(rect);
 

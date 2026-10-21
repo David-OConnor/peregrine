@@ -3,7 +3,7 @@
 use std::{fs, io, path::Path};
 
 use shell::{
-    DirList, clone_root, commands, commands::Frontend, find_bookmark, find_recent_dir,
+    DirList, clone_root, commands, commands::Frontend, find_bookmark, find_cd_fallback,
     path_from_args, ssh,
 };
 
@@ -195,7 +195,7 @@ pub fn handle_cmd(state: &mut State, cmd: &str, input: &str, args: &str, ctx: &e
 
         "cd" => {
             // `cd <number>` jumps to a recent dir by index; anything else is
-            // a path, bookmark or recent-dir name.
+            // a path, bookmark, recent-dir or standard-dir name.
             let target = if let Ok(idx) = args.parse::<usize>() {
                 let resolved = state.recent_dirs.get(idx).map(|r| r.path.clone());
                 if resolved.is_none() {
@@ -213,7 +213,9 @@ pub fn handle_cmd(state: &mut State, cmd: &str, input: &str, args: &str, ctx: &e
                     args,
                 );
                 if !target.is_dir() && !args.is_empty() && !args.starts_with('~') {
-                    if let Some(found) = find_recent_dir(&state.recent_dirs, args) {
+                    if let Some(found) =
+                        find_cd_fallback(&state.recent_dirs, state.home.as_deref(), args)
+                    {
                         target = found;
                     }
                 }

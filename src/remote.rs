@@ -13,6 +13,7 @@ use shell::ssh::{Connecting, Phase, RemoteEvent, RemoteSession};
 use crate::{
     OutType,
     running::take_utf8,
+    term::Replies,
     terminal::{Output, Stream},
 };
 
@@ -58,39 +59,6 @@ pub struct Pumped {
     pub ready: bool,
     /// Output is still waiting: pump again next frame.
     pub more: bool,
-}
-
-/// Answers a remote program's questions about the terminal, as a terminal
-/// would: where the cursor is, and what kind of terminal this is. Some
-/// programs wait for the answer.
-#[derive(Default)]
-pub struct Replies(Vec<u8>);
-
-impl vt100::Callbacks for Replies {
-    fn unhandled_csi(
-        &mut self,
-        screen: &mut vt100::Screen,
-        i1: Option<u8>,
-        _i2: Option<u8>,
-        params: &[&[u16]],
-        c: char,
-    ) {
-        let first = params.first().and_then(|p| p.first()).copied().unwrap_or(0);
-        match (i1, c, first) {
-            // Cursor position report.
-            (None, 'n', 6) => {
-                let (row, col) = screen.cursor_position();
-                self.0
-                    .extend_from_slice(format!("\x1b[{};{}R", row + 1, col + 1).as_bytes());
-            }
-            // Device status: OK.
-            (None, 'n', 5) => self.0.extend_from_slice(b"\x1b[0n"),
-            // Primary and secondary device attributes, as a VT220.
-            (None, 'c', 0) => self.0.extend_from_slice(b"\x1b[?62;22c"),
-            (Some(b'>'), 'c', 0) => self.0.extend_from_slice(b"\x1b[>1;10;0c"),
-            _ => {}
-        }
-    }
 }
 
 pub struct LiveRemote {
@@ -188,7 +156,7 @@ impl LiveRemote {
                 }
             }
         }
-        let replies = std::mem::take(&mut self.screen.callbacks_mut().0);
+        let replies = self.screen.callbacks_mut().take();
         self.session.send(&replies);
     }
 

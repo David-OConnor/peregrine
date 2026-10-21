@@ -214,7 +214,7 @@ fn shortcut_groups(mac: bool) -> Vec<(&'static str, Shortcuts)> {
         ),
         (
             format!("{cmd} + C"),
-            "Stop the running command, or else clear the input, when no text is selected",
+            "Interrupt the running command, or else clear the input, when no text is selected",
         ),
         (
             "Ctrl + D".into(),

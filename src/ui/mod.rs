@@ -15,18 +15,18 @@ pub mod clipboard;
 mod cmd_history;
 pub mod dirs;
 mod file_browser;
+mod grid;
 pub mod line_edit;
 pub mod panes;
 pub mod path_panel;
 mod project_bar;
 mod remote;
-mod remote_grid;
 pub mod scratchpad;
 mod search;
 mod settings;
 mod tab_keys;
 mod tabs;
-mod terminal;
+pub mod terminal;
 
 use crate::{
     OutType,
@@ -713,10 +713,10 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
     }
 
     // After that command, which runs in the tab it was typed in, and before
-    // any widget, so the input box never sees these keys. Not while a remote
+    // any widget, so the input box never sees these keys. Not while a
     // full-screen program has the keyboard: Ctrl+W is vim's, and nano's,
     // Ctrl+B is tmux's, and Alt + a digit is irssi's and weechat's.
-    if !remote_grid::has_focus(ui.ctx()) {
+    if !grid::has_focus(ui.ctx()) {
         tab_keys::handle(state, ui.ctx());
         terminal::toggle_bookmark_key(state, ui.ctx());
         terminal::bookmark_number_keys(state, ui.ctx());

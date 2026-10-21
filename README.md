@@ -71,7 +71,9 @@ The [Shell](https://github.com/david-oconnor/shell) terminal: It wraps your OS's
 
 Most CLI commands from *Shell* work here, but this version includes more functionality, enabled by the GUI.
 
-Autocomplate works from a mixture of bookmarks, recent commands, and files in the current directory. Autocomplete messages display automatically in grey; press the **right arrow key** to complete the line to one.
+Commands run in a terminal of their own (a pseudo console on Windows), so interactive programs work as they do in a terminal window: REPLs such as `python` take the lines you type, and full-screen programs (`vim`, `nano`, `edit`, `less`, git's pager) take over the output pane while they run, with the keyboard going to them. Ctrl+C interrupts the running command; the **Stop** button ends it and everything it started.
+
+Autocomplate works from a mixture of bookmarks, recent commands, and files in the current directory. `cd` also falls back to the OS's standard directories by name, after bookmarks and recent directories, so e.g. `cd program f` goes to `C:\Program Files` and `cd etc` to `/etc` with nothing saved. Autocomplete messages display automatically in grey; press the **right arrow key** to complete the line to one.
 
 Type `shelp` in the CLI input to list every command and key shortcut.
 
@@ -97,6 +99,8 @@ A convenient interface to edit items in your OS's system *PATH* environment vari
 
 
 ### SSH / Remote terminal
+**Warning: the SSH / remote feature is WIP, and doesn't always work correctly**.
+
 `ssh [user@]host [port]`, or a saved remote's button in the tab strip or Remote panel, connects the current tab. Connecting happens in the background, so an unreachable host never freezes the window. Once connected, commands typed in that tab run in your remote login shell, which keeps its working directory and environment between them. Full-screen programs (`vim`, `nano`, `top`, `less`) take over the output pane while they run, with the keyboard going to them; lines typed while any other remote command runs go to it as input, and Ctrl+C interrupts it. `exit` logs out; `disconnect` closes the connection.
 
 Logging in uses your SSH keys (from an SSH agent, or `~/.ssh/id_*` without a passphrase), or a password saved in the OS keyring via the Remote panel. When a password is needed, the Remote panel's form opens for it.
