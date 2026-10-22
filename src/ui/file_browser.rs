@@ -30,8 +30,8 @@ pub(super) fn draw(state: &mut State, ui: &mut Ui) {
     // The whole pane, for the mouse Back/Forward buttons below.
     let pane_rect = ui.max_rect();
 
-    // A click in this pane gives it Enter, the arrow keys and Ctrl+A / C /
-    // X / V; a click anywhere else takes them away.
+    // A click in this pane gives it typing, Enter, the arrow keys and
+    // Ctrl+A / C / X / V; a click anywhere else takes them away.
     let modal_open =
         state.ui.delete_pending.is_some() || ui.memory(|m| m.top_modal_layer().is_some());
     if !modal_open && ui.input(|i| i.pointer.any_pressed()) {
@@ -55,6 +55,29 @@ pub(super) fn draw(state: &mut State, ui: &mut Ui) {
         && state.ui.path_edit.is_none()
         && state.ui.files_active
         && !ui.ctx().text_edit_focused();
+
+    // Typing with the Files pane active starts its quick name filter. Give
+    // the Search box focus before any pane widgets see the key, so it receives
+    // the first text event too. The box then filters and selects the first
+    // hit exactly as if it had been clicked. Leave shortcuts and other
+    // editors (including a new file's name) alone.
+    let type_to_search = list_has_keys
+        && state.ui.create.is_none()
+        && !state.ui.focus_input
+        && !ui::grid::has_focus(ui.ctx())
+        && !egui::Popup::is_any_open(ui.ctx())
+        && ui.input(|i| {
+            !i.pointer.any_pressed()
+                && !i.modifiers.command
+                && !i.modifiers.ctrl
+                && !i.modifiers.alt
+                && i.events.iter().any(|event| {
+                    matches!(event, Event::Text(text) if text.chars().any(|c| !c.is_control()))
+                })
+        });
+    if type_to_search {
+        ui.memory_mut(|m| m.request_focus(search_id));
+    }
 
     let open_selected = (search_has_keys || list_has_keys)
         && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter));
@@ -470,30 +493,6 @@ pub(super) fn draw(state: &mut State, ui: &mut Ui) {
 
     if paste {
         state.paste_files(ui.ctx());
-    }
-
-    // Typing with the Files pane active starts its quick name filter. Give
-    // the Search box focus before drawing it so it receives the first text
-    // event too; the box then handles filtering and selecting the first hit
-    // exactly as if it had been clicked. Leave shortcuts and other editors
-    // (including a new file's name) alone.
-    let type_to_search = list_has_keys
-        && state.ui.create.is_none()
-        && state.ui.path_edit.is_none()
-        && !state.ui.focus_input
-        && !ui::grid::has_focus(ui.ctx())
-        && !egui::Popup::is_any_open(ui.ctx())
-        && ui.input(|i| {
-            !i.pointer.any_pressed()
-                && !i.modifiers.command
-                && !i.modifiers.ctrl
-                && !i.modifiers.alt
-                && i.events.iter().any(|event| {
-                    matches!(event, Event::Text(text) if text.chars().any(|c| !c.is_control()))
-                })
-        });
-    if type_to_search {
-        ui.memory_mut(|m| m.request_focus(search_id));
     }
 
     // Deep search follows the Search box on its row while there's room for
