@@ -625,8 +625,8 @@ pub fn term_in(state: &mut State, ui: &mut Ui) {
     let left = !tab && !up && !down && cd_active && consume(ui, Key::ArrowLeft);
     let right = !tab && !up && !down && !left && cd_active && consume(ui, Key::ArrowRight);
 
-    // → (or End) with the caret at the end accepts the greyed history
-    // suggestion, as in the CLI.
+    // → (or End) with the caret at the end accepts the greyed suggestion (a
+    // past command, or the rest of a `cd` directory), as in the CLI.
     let caret_at_end = TextEdit::load_state(ui.ctx(), input_id)
         .and_then(|s| s.cursor.char_range())
         .is_none_or(|r| {
@@ -747,16 +747,16 @@ pub fn term_in(state: &mut State, ui: &mut Ui) {
         .show(ui);
     let response = output.response;
 
-    // Grey ghost text for the history suggestion, painted just after the
-    // end of the typed text. Clipped to the whole box: the edit's own text
-    // clip rect ends where the typed text does.
+    // Grey ghost text for the suggestion, painted just after the end of the
+    // typed text. Clipped to the whole box: the edit's own text clip rect
+    // ends where the typed text does.
     if let Some(hint) = hint.as_ref().filter(|_| !accept_hint) {
         let end = egui::text::CCursor::new(state.ui.cli_input[active].chars().count());
         let pos = output.galley_pos + output.galley.pos_from_cursor(end).min.to_vec2();
         ui.painter().with_clip_rect(response.rect).text(
             pos,
             egui::Align2::LEFT_TOP,
-            hint,
+            &hint.display,
             TextStyle::Monospace.resolve(ui.style()),
             ui.visuals().weak_text_color(),
         );
@@ -775,20 +775,34 @@ pub fn term_in(state: &mut State, ui: &mut Ui) {
     }
 
     if tab || accept_hint {
-        // Completion looks at local files, which mean nothing on a remote.
-        if tab && !state.is_remote() {
-            state.autocomplete_input();
-        } else if let Some(hint) = hint.as_ref().filter(|_| accept_hint) {
-            state.ui.cli_input[active].push_str(hint);
-        }
+        let line = &state.ui.cli_input[active];
+        let caret = if tab {
+            // At the caret, as in the CLI, not the end of the line.
+            let chars = TextEdit::load_state(ui.ctx(), response.id)
+                .and_then(|s| s.cursor.char_range())
+                .map_or(usize::MAX, |r| r.primary.index.0);
+            let pos = line
+                .char_indices()
+                .nth(chars)
+                .map_or(line.len(), |(b, _)| b);
+            state.autocomplete_input(pos)
+        } else if let Some(hint) = hint.as_ref() {
+            state.ui.cli_input[active] = hint.line.clone();
+            Some(hint.line.len())
+        } else {
+            None
+        };
         // egui's TextEdit keeps its own caret position, which isn't
         // updated when we replace the buffer behind its back. Move the
-        // caret to the end so it follows the completed text.
-        if let Some(mut edit_state) = TextEdit::load_state(ui.ctx(), response.id) {
-            let end = CCursor::new(state.ui.cli_input[active].chars().count());
+        // caret to follow the completed text.
+        if let Some(caret) = caret
+            && let Some(mut edit_state) = TextEdit::load_state(ui.ctx(), response.id)
+        {
+            let line = &state.ui.cli_input[active];
+            let caret = CCursor::new(line[..caret].chars().count());
             edit_state
                 .cursor
-                .set_char_range(Some(CCursorRange::one(end)));
+                .set_char_range(Some(CCursorRange::one(caret)));
             edit_state.store(ui.ctx(), response.id);
         }
     } else if up {

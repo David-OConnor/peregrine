@@ -75,7 +75,9 @@ Most CLI commands from *Shell* work here, but this version includes more functio
 
 Commands run in a terminal of their own (a pseudo console on Windows), so interactive programs work as they do in a terminal window: REPLs such as `python` take the lines you type, and full-screen programs (`vim`, `nano`, `edit`, `less`, git's pager) take over the output pane while they run, with the keyboard going to them. Ctrl+C interrupts the running command; the **Stop** button ends it and everything it started.
 
-Autocomplate works from a mixture of bookmarks, recent commands, and files in the current directory. `cd` also falls back to the OS's standard directories by name, after bookmarks and recent directories, so e.g. `cd program f` goes to `C:\Program Files` and `cd etc` to `/etc` with nothing saved. Autocomplete messages display automatically in grey; press the **right arrow key** to complete the line to one.
+Autocomplete works from a mixture of bookmarks, recent commands, and files in the current directory. `cd` also falls back to the OS's standard directories by name, after bookmarks and recent directories, so e.g. `cd program f` goes to `C:\Program Files` and `cd etc` to `/etc` with nothing saved. Autocomplete messages display automatically in gray; press the **right arrow key** to complete the line to one.
+
+When navigating directires using `cd`, the `Tab` key attempts to guess the path to go to. Enter also does the same. todo: Enter, Tab, and right arrow have ambiguities and overlaps here; resolve in behavior, docs, or both.
 
 Type `shelp` in the CLI input to list every command and key shortcut.
 
@@ -208,7 +210,7 @@ On Windows and Linux, **Ctrl + W**, **Ctrl + T**, and **Ctrl + N** stay tab shor
 - **Ctrl + D**: Delete the character under the cursor. On an empty line, ends a running program's input; with nothing running, it's `exit`.
 
 ### Scratchpad
-Notes kept between runs, in a side panel (the **Scratchpad** toggle). The Terminal keys above work in it too, on the cursor's line: **Ctrl + A** / **Ctrl + E** go to its start / end, **Ctrl + K** / **Ctrl + U** delete to them (**Ctrl + K** at a line's end joins the next line on), and **Ctrl + P** / **Ctrl + N** move up / down a line. As in the CLI input, **Ctrl + W**, **Ctrl + T** and **Ctrl + N** stay tab shortcuts on Windows and Linux. **Tab** indents, rather than going to the CLI input.
+Notes kept between runs, in a side panel (the **Scratchpad** toggle). **Ctrl + A** selects all the text, as in other editors (**Cmd + A** on Mac, where **Ctrl + A** goes to the line's start). The other Terminal keys above work in it too, on the cursor's line: **Home** / **Ctrl + E** go to its start / end, **Ctrl + K** / **Ctrl + U** delete to them (**Ctrl + K** at a line's end joins the next line on), and **Ctrl + P** / **Ctrl + N** move up / down a line. As in the CLI input, **Ctrl + W**, **Ctrl + T** and **Ctrl + N** stay tab shortcuts on Windows and Linux. **Tab** indents, rather than going to the CLI input.
 
 ### Bookmarks
 - **Alt + 0** to **Alt + 9**: Go to that bookmark, by its number in the Bookmarks panel. (Same as `bm 1` etc in the CLI.) On Mac, **Cmd + Option + 0** to **9**

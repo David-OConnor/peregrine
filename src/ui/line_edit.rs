@@ -344,6 +344,16 @@ pub fn set_caret(ctx: &Context, id: Id, caret: usize) {
     edit_state.store(ctx, id);
 }
 
+/// Select all of `text`, the text of the text box `id`.
+pub fn select_all(ctx: &Context, id: Id, text: &str) {
+    let mut edit_state = TextEdit::load_state(ctx, id).unwrap_or_default();
+    edit_state.cursor.set_char_range(Some(CCursorRange::two(
+        CCursor::new(0),
+        CCursor::new(text.chars().count()),
+    )));
+    edit_state.store(ctx, id);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

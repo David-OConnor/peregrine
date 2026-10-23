@@ -3,7 +3,8 @@
 //!
 //! The panel is a toolbar over one text box, which fills the rest of it.
 //! Shell's line-editing keys (see [line_edit]) work in it, as in the CLI
-//! input, where they make sense for several lines. Tab inserts a tab or 4
+//! input, where they make sense for several lines, except that Ctrl+A selects
+//! all, as in other text boxes. Tab inserts a tab or 4
 //! spaces, or goes to the CLI input as elsewhere, as picked at the top.
 
 use std::{
@@ -194,7 +195,7 @@ pub(super) fn draw(state: &mut State, ui: &mut Ui) {
     if ctx.memory(|m| m.has_focus(id)) {
         let mac = ctx.os() == OperatingSystem::Mac;
         let spaces = pad.tab == ScratchpadTab::Spaces;
-        let keys = ui.input_mut(|i| {
+        let (keys, select_all) = ui.input_mut(|i| {
             // Tab as typed text, which the box puts in at the caret. (Set to
             // Focus term, Tab is gone by now; see
             // `terminal::focus_input_key`.)
@@ -209,6 +210,10 @@ pub(super) fn draw(state: &mut State, ui: &mut Ui) {
                     }
                 }
             }
+            // Ctrl+A (Cmd+A on Mac) selects all, as in other text boxes,
+            // rather than going to the line's start as in the CLI input. (On
+            // Mac, Ctrl+A still does that.)
+            let select_all = i.consume_key(Modifiers::COMMAND, Key::A);
             let keys = line_edit::take_keys(&mut i.events, mac);
             // Ctrl+P / Ctrl+N are Up / Down, as in Emacs.
             for key in &keys {
@@ -222,7 +227,7 @@ pub(super) fn draw(state: &mut State, ui: &mut Ui) {
                     });
                 }
             }
-            keys
+            (keys, select_all)
         });
         for key in keys {
             let edit = match key {
@@ -234,6 +239,9 @@ pub(super) fn draw(state: &mut State, ui: &mut Ui) {
             };
             line_edit::apply_in_box(&ctx, id, &mut pad.text, edit, &mut state.ui.kill_ring);
             pad.mark_changed();
+        }
+        if select_all {
+            line_edit::select_all(&ctx, id, &pad.text);
         }
     }
 

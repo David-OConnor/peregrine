@@ -129,12 +129,53 @@ fn bold_font_candidates() -> Vec<PathBuf> {
     }
 }
 
-/// Register the [bold_family] font family: the first bold system font found
-/// (see [bold_font_candidates]), falling back to the normal proportional
-/// fonts for glyphs it lacks. If none is found the family is just the
-/// proportional fonts, so text drawn in it is still readable, only not bold.
+/// System fonts with wide symbol coverage (arrows, math, astrological signs,
+/// dingbats, box drawing...), which egui's built-in fonts mostly lack. Every
+/// one of these that exists is added by [install_fonts] as a last fallback,
+/// so typed or pasted text like "☿→☉" draws instead of showing boxes.
+fn symbol_font_candidates() -> Vec<PathBuf> {
+    if cfg!(windows) {
+        let windir = std::env::var_os("WINDIR").unwrap_or_else(|| r"C:\Windows".into());
+        let fonts = PathBuf::from(windir).join("Fonts");
+        vec![fonts.join("seguisym.ttf")]
+    } else if cfg!(target_os = "macos") {
+        vec!["/System/Library/Fonts/Apple Symbols.ttf".into()]
+    } else {
+        [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/TTF/DejaVuSans.ttf",
+            "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSansSymbols-Regular.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSansSymbols2-Regular.ttf",
+            "/usr/share/fonts/noto/NotoSansSymbols-Regular.ttf",
+            "/usr/share/fonts/noto/NotoSansSymbols2-Regular.ttf",
+        ]
+        .into_iter()
+        .map(PathBuf::from)
+        .collect()
+    }
+}
+
+/// Add the system symbol fonts (see [symbol_font_candidates]) to the end of
+/// the proportional and monospace families, then register the [bold_family]
+/// font family: the first bold system font found (see
+/// [bold_font_candidates]), falling back to the normal proportional fonts for
+/// glyphs it lacks. If none is found the family is just the proportional
+/// fonts, so text drawn in it is still readable, only not bold.
 pub fn install_fonts(ctx: &egui::Context) {
     let mut defs = FontDefinitions::default();
+    for (i, bytes) in symbol_font_candidates()
+        .into_iter()
+        .filter_map(|p| std::fs::read(p).ok())
+        .enumerate()
+    {
+        let name = format!("symbols-{i}");
+        defs.font_data
+            .insert(name.clone(), Arc::new(FontData::from_owned(bytes)));
+        for family in [FontFamily::Proportional, FontFamily::Monospace] {
+            defs.families.entry(family).or_default().push(name.clone());
+        }
+    }
     let mut family = defs
         .families
         .get(&FontFamily::Proportional)

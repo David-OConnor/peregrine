@@ -7,11 +7,11 @@ use std::{
 
 use chrono::Utc;
 use shell::{
-    Appearance, BookmarkSort, BookmarkView, BrowserFile, CmdHistoryPrefs, DirLabelLens, DirList,
-    FilesPanelPrefs, FontSizes, HistoryItem, NavState, OpenTabs, PaneSplits, PanelVis, PanelWidths,
-    RecentDir, RemoteTerminal, ScratchpadPrefs, WindowSize, apply_completion, current_branch,
-    dir_missing, get_home, read_browser_files, remove_missing_recent_dirs, remove_saved_dir,
-    save_data,
+    Appearance, BookmarkSort, BookmarkView, BrowserFile, CmdHistoryPrefs, CompletionSources,
+    DirLabelLens, DirList, FilesPanelPrefs, FontSizes, HintCache, HistoryItem, InputHint, NavState,
+    OpenTabs, PaneSplits, PanelVis, PanelWidths, RecentDir, RemoteTerminal, ScratchpadPrefs,
+    WindowSize, apply_completion, complete_input, current_branch, dir_missing, get_home,
+    read_browser_files, remove_missing_recent_dirs, remove_saved_dir, save_data,
     ssh::{self, ConnectError, ConnectRequest, secrets},
     stale_dir_list, truncate_branch,
 };
@@ -66,9 +66,12 @@ pub struct StateUi {
     /// `submit_command` and taken at the start of the next frame, so the echo
     /// paints before a built-in that blocks (`sync`, say) starts.
     pub pending_cmd: Option<String>,
-    /// The input at a Tab whose completion was ambiguous and added nothing.
-    /// A second Tab on the same input lists the candidates, as the CLI does.
+    /// The input after a Tab that left several candidates. A second Tab on
+    /// the same input lists them, as the CLI does.
     pub tab_list_pending: Option<String>,
+    /// The last greyed suggestion worked out, so repaints don't read the
+    /// disk again. See [State::input_hint].
+    pub hint_cache: HintCache,
     /// Text deleted from the CLI input with Shell's line-editing keys, for
     /// Ctrl+Y to paste back. One for all tabs, as the CLI's line editor has.
     pub kill_ring: ui::line_edit::KillRing,
@@ -283,6 +286,7 @@ impl Default for StateUi {
             focus_input: true,
             pending_cmd: None,
             tab_list_pending: None,
+            hint_cache: Default::default(),
             kill_ring: Default::default(),
             scratchpad: Default::default(),
             bookmarks_search: String::new(),
@@ -1864,47 +1868,64 @@ impl State {
         }
     }
 
-    /// Complete the active input row, as the CLI's Tab does (see
-    /// [completion::complete]): extend it to the candidates' shared prefix,
-    /// or, when that adds nothing, list the candidates on a second Tab.
-    pub fn autocomplete_input(&mut self) {
+    /// What Tab completion and the greyed suggestion draw on, filled as the
+    /// CLI fills it.
+    fn completion_sources(&self) -> CompletionSources<'_> {
+        CompletionSources {
+            cwd: self.cwd(),
+            home: self.home.as_deref(),
+            bookmarks: &self.dir_bookmarks,
+            recent_dirs: &self.recent_dirs,
+            clone_roots: &self.clone_roots,
+            history: &self.history,
+            remote: self.is_remote(),
+        }
+    }
+
+    /// Complete the active input row at byte `pos`, as the CLI's Tab does
+    /// (see [complete_input]): extend the word there to the candidates'
+    /// shared prefix. With several candidates, the next Tab lists them, as
+    /// rustyline's does. Returns where the caret goes, when the row changed.
+    pub fn autocomplete_input(&mut self, pos: usize) -> Option<usize> {
         let i = self.ui.active_tab;
         let live = self.ui.cli_input[i].clone();
-        let Some(result) = completion::complete(
-            &live,
-            live.len(),
-            self.cwd(),
-            self.home.as_deref(),
-            &self.dir_bookmarks,
-            &self.recent_dirs,
-            &self.clone_roots,
-        ) else {
-            return;
-        };
+        let result = complete_input(&live, pos, &self.completion_sources())?;
+        let several = result.candidates.len() > 1;
         // As in rustyline, only take the shared prefix when it adds to the
         // input: case-insensitive and fuzzy candidates can share less than
         // was typed.
-        let applied = apply_completion(&live, live.len(), &result)
-            .filter(|text| result.candidates.len() == 1 || text.len() > live.len());
-        if let Some(text) = applied {
-            self.ui.cli_input[i] = text;
-            self.ui.tab_list_pending = None;
-        } else if result.candidates.len() > 1 {
-            if self.ui.tab_list_pending.as_deref() == Some(live.as_str()) {
+        let applied = apply_completion(&live, pos, &result)
+            .filter(|text| !several || text.len() > live.len());
+        let caret = match applied {
+            Some(text) => {
+                // Only `start..pos` was replaced.
+                let caret = pos + text.len() - live.len();
+                self.ui.cli_input[i] = text;
+                Some(caret)
+            }
+            None if several && self.ui.tab_list_pending.as_deref() == Some(live.as_str()) => {
                 let prompt = self.prompt(&self.ui.history_nav[i]);
                 self.push_out(format!("{prompt}> {live}"), OutType::Prompt);
                 self.push_out(completion::candidate_list(&result), OutType::StdOut);
                 self.ui.tab_list_pending = None;
-            } else {
-                self.ui.tab_list_pending = Some(live);
+                return None;
             }
-        }
+            None => None,
+        };
+        self.ui.tab_list_pending = several.then(|| self.ui.cli_input[i].clone());
+        caret
     }
 
-    /// The greyed history suggestion for the active input row (see
-    /// [completion::history_hint]); → accepts it.
-    pub fn input_hint(&self) -> Option<String> {
-        completion::history_hint(&self.history, &self.ui.cli_input[self.ui.active_tab])
+    /// The greyed suggestion for the active input row (see
+    /// [shell::input_hint]), as the CLI shows it; →, End and Ctrl+E accept
+    /// it.
+    pub fn input_hint(&mut self) -> Option<InputHint> {
+        // Taken out while the sources borrow the rest of `self`.
+        let mut cache = std::mem::take(&mut self.ui.hint_cache);
+        let live = &self.ui.cli_input[self.ui.active_tab];
+        let hint = cache.get(live, live.len(), &self.completion_sources());
+        self.ui.hint_cache = cache;
+        hint
     }
 
     /// Reset the active tab's recall state back to the live input. Called

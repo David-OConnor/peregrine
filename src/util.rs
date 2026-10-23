@@ -3,8 +3,8 @@
 use std::{fs, io, path::Path};
 
 use shell::{
-    DirList, clone_root, commands, commands::Frontend, find_bookmark, find_cd_fallback,
-    path_from_args, ssh,
+    DirList, clone_root, commands, commands::Frontend, find_bookmark, path_from_args, resolve_cd,
+    ssh,
 };
 
 use crate::{OutType, out_type_for, remote::Remote, state::State, util};
@@ -195,7 +195,8 @@ pub fn handle_cmd(state: &mut State, cmd: &str, input: &str, args: &str, ctx: &e
 
         "cd" => {
             // `cd <number>` jumps to a recent dir by index; anything else is
-            // a path, bookmark, recent-dir or standard-dir name.
+            // a path, bookmark, recent-dir or standard-dir name, or the start
+            // of a directory Tab would complete.
             let target = if let Ok(idx) = args.parse::<usize>() {
                 let resolved = state.recent_dirs.get(idx).map(|r| r.path.clone());
                 if resolved.is_none() {
@@ -206,20 +207,19 @@ pub fn handle_cmd(state: &mut State, cmd: &str, input: &str, args: &str, ctx: &e
                 }
                 resolved
             } else {
-                let mut target = path_from_args(
+                match resolve_cd(
                     state.home.as_deref(),
                     state.cwd(),
                     &state.dir_bookmarks,
+                    &state.recent_dirs,
                     args,
-                );
-                if !target.is_dir() && !args.is_empty() && !args.starts_with('~') {
-                    if let Some(found) =
-                        find_cd_fallback(&state.recent_dirs, state.home.as_deref(), args)
-                    {
-                        target = found;
+                ) {
+                    Ok(target) => Some(target),
+                    Err(e) => {
+                        state.push_out(format!("cd: {e}"), OutType::StdErr);
+                        None
                     }
                 }
-                Some(target)
             };
 
             if let Some(target) = target {
