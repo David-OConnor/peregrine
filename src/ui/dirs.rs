@@ -16,7 +16,7 @@ use crate::{
     render_with_tilde,
     state::State,
     ui,
-    ui::{ListAction, search},
+    ui::{ListAction, search, terminal},
 };
 
 /// Default max displayed length (in characters) of a Bookmarks / Recent dirs
@@ -167,8 +167,14 @@ fn dir_click(resp: &egui::Response, path: &Path, list: DirList) -> Option<ListAc
 
 /// The Files and Recent dirs button that adds a dir to Bookmarks, or removes
 /// it: a gold ★ while it's bookmarked, otherwise ☆. `small` as for
-/// [Ui::small_button].
-pub(super) fn bookmark_star(ui: &mut Ui, bookmarked: bool, small: bool) -> egui::Response {
+/// [Ui::small_button]. With `cwd` it's for the active tab's dir, which
+/// [terminal::TOGGLE_BOOKMARK] toggles too, so the hover text names that.
+pub(super) fn bookmark_star(
+    ui: &mut Ui,
+    bookmarked: bool,
+    small: bool,
+    cwd: bool,
+) -> egui::Response {
     let (text, hover) = if bookmarked {
         (
             RichText::new(STAR_ON.to_string()).color(STAR_COLOR),
@@ -176,6 +182,11 @@ pub(super) fn bookmark_star(ui: &mut Ui, bookmarked: bool, small: bool) -> egui:
         )
     } else {
         (RichText::new(STAR_OFF.to_string()), "Bookmark this dir")
+    };
+    let hover = if cwd {
+        format!("{hover} ({})", bookmark_shortcut(ui))
+    } else {
+        hover.to_owned()
     };
 
     let mut button = Button::new(text);
@@ -185,9 +196,15 @@ pub(super) fn bookmark_star(ui: &mut Ui, bookmarked: bool, small: bool) -> egui:
     ui.add(button).on_hover_text(hover)
 }
 
+/// [terminal::TOGGLE_BOOKMARK] as this OS writes it, e.g. `Ctrl+B`.
+fn bookmark_shortcut(ui: &Ui) -> String {
+    ui.ctx().format_shortcut(&terminal::TOGGLE_BOOKMARK)
+}
+
 /// The Bookmarks panel button that toggles the current dir's bookmark, named
 /// by its final directory: "☆ Bookmark synthesis" for `~/code/bio_web/synthesis`,
-/// or "x Rem synthesis" once it's bookmarked. The hover text has the full path.
+/// or "x Rem synthesis" once it's bookmarked. The hover text has the full path,
+/// and the shortcut that does the same from anywhere.
 fn cwd_bookmark_button(ui: &mut Ui, state: &State) -> egui::Response {
     let cwd = state.cwd();
     let bookmarked = state.dir_bookmarks.iter().any(|p| p == cwd);
@@ -209,6 +226,7 @@ fn cwd_bookmark_button(ui: &mut Ui, state: &State) -> egui::Response {
         )
     };
 
+    let hover = format!("{hover} ({})", bookmark_shortcut(ui));
     let path = ui::path_job(ui, cwd, state.home.as_deref());
     ui.button(text).on_hover_ui(|ui| {
         ui.label(hover);
@@ -236,21 +254,20 @@ fn dir_label_chars<'a>(
 /// The `Paths | Names` selector at the top of the Bookmarks / Recent dirs
 /// panels: whether each row shows the dir's path or just its final name. How
 /// many characters of it to show is in the Settings window. `what` names the
-/// panel's dirs, for the tooltips. Returns true if it changed.
+/// panel's dirs, for the tooltips. Added to `ui`'s row, for the caller to lay
+/// out. Returns true if it changed.
 fn dir_label_mode_control(ui: &mut Ui, names: &mut bool, what: &str) -> bool {
     let before = *names;
 
-    ui.horizontal(|ui| {
-        ui.selectable_value(names, false, "Paths")
-            .on_hover_text(format!(
-                "Show each {what}'s path, e.g. ~/code/Bio/molchanica"
-            ));
+    ui.selectable_value(names, false, "Paths")
+        .on_hover_text(format!(
+            "Show each {what}'s path, e.g. ~/code/Bio/molchanica"
+        ));
 
-        ui.selectable_value(names, true, "Names")
-            .on_hover_text(format!(
-                "Show just each {what}'s final name, e.g. molchanica"
-            ));
-    });
+    ui.selectable_value(names, true, "Names")
+        .on_hover_text(format!(
+            "Show just each {what}'s final name, e.g. molchanica"
+        ));
 
     *names != before
 }
@@ -411,7 +428,10 @@ fn bookmark_drop_slot(rows: &[(usize, Rect)], pos: Pos2, gap: f32) -> Option<(us
 pub(super) fn dir_bookmarks(state: &mut State, ui: &mut Ui) {
     ui::panel_header(ui, "Bookmarks", &mut state.ui.panel_vis.bookmarks);
 
-    if dir_label_mode_control(ui, &mut state.bookmark_names, "bookmark") {
+    let names_changed = ui
+        .horizontal(|ui| dir_label_mode_control(ui, &mut state.bookmark_names, "bookmark"))
+        .inner;
+    if names_changed {
         let _ = state.save();
     }
 
@@ -419,14 +439,22 @@ pub(super) fn dir_bookmarks(state: &mut State, ui: &mut Ui) {
         state.set_bookmark_sort(sort);
     }
 
-    ui.horizontal_wrapped(|ui| {
-        if cwd_bookmark_button(ui, state).clicked() {
-            let msg = state.toggle_bookmark_cwd();
-            state.push_out(msg, OutType::StdOut);
-        }
-    });
+    // The search box shares the button's row, as much of it as the button
+    // leaves.
+    let (toggle, searched) = ui
+        .horizontal_wrapped(|ui| {
+            let toggle = cwd_bookmark_button(ui, state).clicked();
+            let searched =
+                search::inline_search_box(ui, &mut state.ui.bookmarks_search, "bookmarks_search");
+            (toggle, searched)
+        })
+        .inner;
 
-    if search::search_box(ui, &mut state.ui.bookmarks_search, "bookmarks_search") {
+    if toggle {
+        let msg = state.toggle_bookmark_cwd();
+        state.push_out(msg, OutType::StdOut);
+    }
+    if searched {
         state.refresh_bookmarks_filter();
     }
     ui.separator();
@@ -535,11 +563,24 @@ pub(super) fn dir_bookmarks(state: &mut State, ui: &mut Ui) {
 pub(super) fn dir_history(state: &mut State, ui: &mut Ui) {
     ui::panel_header(ui, "Recent dirs", &mut state.ui.panel_vis.recent_dirs);
 
-    if dir_label_mode_control(ui, &mut state.recent_dir_names, "recent dir") {
+    // The search box shares the selector's row, as much of it as that leaves.
+    let (names_changed, searched) = ui
+        .horizontal_wrapped(|ui| {
+            let names_changed =
+                dir_label_mode_control(ui, &mut state.recent_dir_names, "recent dir");
+            let searched = search::inline_search_box(
+                ui,
+                &mut state.ui.recent_dirs_search,
+                "recent_dirs_search",
+            );
+            (names_changed, searched)
+        })
+        .inner;
+
+    if names_changed {
         let _ = state.save();
     }
-
-    if search::search_box(ui, &mut state.ui.recent_dirs_search, "recent_dirs_search") {
+    if searched {
         state.refresh_recent_dirs_filter();
     }
     ui.separator();
@@ -577,7 +618,7 @@ pub(super) fn dir_history(state: &mut State, ui: &mut Ui) {
                         action = Some(a);
                     }
 
-                    if bookmark_star(ui, bookmarked, true).clicked() {
+                    if bookmark_star(ui, bookmarked, true, false).clicked() {
                         action = Some(ListAction::ToggleBookmark(r.path.clone()));
                     }
 

@@ -33,6 +33,7 @@ use image::{
 use crate::{
     files::{format_size, open_with_default_app},
     markdown::{self, Block, Details, is_markdown},
+    ui::terminal::{TOGGLE_BOOKMARK, take_shortcut},
 };
 
 mod gutter;
@@ -157,6 +158,9 @@ struct Inner {
     cache: Option<CommonMarkCache>,
     /// Source of unique viewport ids.
     next_id: u64,
+    /// [TOGGLE_BOOKMARK] was pressed in a viewer window, for the main
+    /// window's next pass to act on (see [FileViewers::take_bookmark_key]).
+    bookmark_key: bool,
 }
 
 /// One viewer window.
@@ -626,6 +630,12 @@ impl FileViewers {
         }
     }
 
+    /// Whether [TOGGLE_BOOKMARK] was pressed in a viewer window since last
+    /// asked, so it works from these windows as from the main one.
+    pub fn take_bookmark_key(&self) -> bool {
+        std::mem::take(&mut self.lock().bookmark_key)
+    }
+
     fn lock(&self) -> MutexGuard<'_, Inner> {
         lock(&self.inner)
     }
@@ -659,12 +669,19 @@ impl Inner {
             docs,
             to_open,
             cache,
+            bookmark_key,
             ..
         } = self;
         let Some(doc) = docs.iter_mut().find(|d| d.id == id) else {
             return;
         };
         let ctx = ui.ctx().clone();
+
+        // The main window acts on it, in its next pass.
+        if take_shortcut(&ctx, TOGGLE_BOOKMARK) {
+            *bookmark_key = true;
+            ctx.request_repaint_of(ViewportId::ROOT);
+        }
 
         if ctx.input(|i| i.viewport().close_requested()) {
             // eframe repaints the main window too, whose `show` drops us.

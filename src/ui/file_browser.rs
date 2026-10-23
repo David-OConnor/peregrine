@@ -8,7 +8,9 @@ use egui::{
 };
 
 use crate::{
-    OutType, clipboard, drag_out,
+    OutType,
+    clipboard::{self, OnConflict},
+    drag_out,
     files::{self, FileSort, SortKey},
     path_color, render_with_tilde,
     state::{FileCreate, FileRename, State},
@@ -32,8 +34,9 @@ pub(super) fn draw(state: &mut State, ui: &mut Ui) {
 
     // A click in this pane gives it typing, Enter, the arrow keys and
     // Ctrl+A / C / X / V; a click anywhere else takes them away.
-    let modal_open =
-        state.ui.delete_pending.is_some() || ui.memory(|m| m.top_modal_layer().is_some());
+    let modal_open = state.ui.delete_pending.is_some()
+        || state.ui.paste_conflict.is_some()
+        || ui.memory(|m| m.top_modal_layer().is_some());
     if !modal_open && ui.input(|i| i.pointer.any_pressed()) {
         let active = ui.rect_contains_pointer(pane_rect);
         state.ui.files_activating_press = active && !state.ui.files_active;
@@ -167,7 +170,7 @@ pub(super) fn draw(state: &mut State, ui: &mut Ui) {
             {
                 open_clicked = true;
             }
-            star_clicked = ui::dirs::bookmark_star(ui, bookmarked, false).clicked();
+            star_clicked = ui::dirs::bookmark_star(ui, bookmarked, false, true).clicked();
 
             // Left-aligned in whatever width the buttons leave.
             ui.with_layout(Layout::left_to_right(Align::TOP), |ui| {
@@ -321,8 +324,7 @@ pub(super) fn draw(state: &mut State, ui: &mut Ui) {
     // selected, Unselect. Wraps so the latter drop to a second row
     // in a narrow panel.
     let has_sel = !state.selection.paths.is_empty();
-    let pasting = state.paste.is_some();
-    let busy = pasting || state.deleting.is_some();
+    let busy = state.file_op_busy();
     let mut filters_changed = false;
     let mut new_sort: Option<FileSort> = None;
 
@@ -670,6 +672,111 @@ pub(super) fn delete_popup(state: &mut State, ctx: &egui::Context) {
     }
 
     if state.ui.delete_pending.is_none() {
+        ctx.request_repaint();
+    }
+}
+
+/// Shown while a paste or drop is held back because some of the items' names
+/// are taken where they're going (see [crate::state::PasteConflict]), as a file manager
+/// asks: replace what's there (it goes to the Recycle Bin / Trash), keep
+/// both under new names, skip those items, or paste nothing. Esc or a click
+/// outside is Cancel. Outside the pane, like [delete_popup].
+pub(super) fn paste_conflict_popup(state: &mut State, ctx: &egui::Context) {
+    let Some(c) = &state.ui.paste_conflict else {
+        return;
+    };
+    let home = state.home.as_deref();
+    let trash = if cfg!(windows) {
+        "Recycle Bin"
+    } else {
+        "Trash"
+    };
+    let n = c.clashes.len();
+    let some_free = c.srcs.len() > n;
+    // What Keep both names them, as for `notes.txt`.
+    let renamed = if c.moving {
+        "\"notes (2).txt\""
+    } else {
+        "\"notes - Copy.txt\""
+    };
+
+    let mut choice = None;
+    let mut cancel = false;
+
+    let modal = Modal::new(Id::new("paste_conflict_popup")).show(ctx, |ui| {
+        ui::scale_panel_fonts(ui, state.gui_font_size);
+        ui.set_width(380.0_f32.min((ctx.content_rect().width() - 48.0).max(100.0)));
+        ui.heading(if n == 1 {
+            "An item with this name is already there"
+        } else {
+            "Items with these names are already there"
+        });
+
+        let verb = if c.moving { "moved" } else { "pasted" };
+        let mut lead = ui::path_job(ui, &c.dest, home);
+        let body = egui::TextFormat {
+            font_id: TextStyle::Body.resolve(ui.style()),
+            color: Color32::PLACEHOLDER,
+            ..Default::default()
+        };
+        let has = match n {
+            1 => format!(" already has an item named as one being {verb}:"),
+            n => format!(" already has {n} items named as ones being {verb}:"),
+        };
+        lead.append(&has, 0.0, body);
+        ui.label(lead);
+        ui.add_space(4.0);
+
+        ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
+            for path in &c.clashes {
+                let name = path.file_name().map_or_else(
+                    || path.display().to_string(),
+                    |n| n.to_string_lossy().into_owned(),
+                );
+                let text = if path.is_dir() {
+                    format!("📁 {name}")
+                } else {
+                    name
+                };
+                ui.label(RichText::new(text).monospace());
+            }
+        });
+
+        ui.add_space(8.0);
+        ui.horizontal_wrapped(|ui| {
+            let replace = ui.button("Replace").on_hover_text(format!(
+                "Move the items already there to the {trash}, and put these in their place. \
+                 A folder is replaced whole, not merged."
+            ));
+            let keep = ui.button("Keep both").on_hover_text(format!(
+                "Put these beside the ones there, under new names: notes.txt becomes {renamed}"
+            ));
+            let skip = some_free.then(|| {
+                ui.button("Skip these")
+                    .on_hover_text("Leave these out, and go on with the rest")
+            });
+            let stop = ui.button("Cancel").on_hover_text("Do nothing");
+
+            // Keep keyboard focus in the modal, starting on Keep both, which
+            // touches nothing that's there, so Enter does that.
+            let buttons = [Some(&replace), Some(&keep), skip.as_ref(), Some(&stop)];
+            if !buttons.iter().flatten().any(|b| b.has_focus()) {
+                keep.request_focus();
+            }
+
+            if replace.clicked() {
+                choice = Some(OnConflict::Replace);
+            } else if keep.clicked() {
+                choice = Some(OnConflict::KeepBoth);
+            } else if skip.is_some_and(|b| b.clicked()) {
+                choice = Some(OnConflict::Skip);
+            }
+            cancel = stop.clicked();
+        });
+    });
+
+    if choice.is_some() || cancel || modal.should_close() {
+        state.resolve_paste_conflict(choice, ctx);
         ctx.request_repaint();
     }
 }

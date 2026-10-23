@@ -490,6 +490,45 @@ mod os {
     }
 }
 
+/// What a paste does with the items whose names are already taken where
+/// they're going, as picked in the dialog that asks (see
+/// `ui::file_browser::paste_conflict_popup`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OnConflict {
+    /// Move what's there to the Recycle Bin / Trash, and paste in its place.
+    /// A folder is replaced whole, not merged.
+    Replace,
+    /// Paste under a free name beside what's there (see [free_name]).
+    KeepBoth,
+    /// Leave them out, and paste the rest.
+    Skip,
+}
+
+/// Those of `srcs` whose names are taken in `dest`, so pasting them there
+/// needs to know what to do about it (see [OnConflict]). Not one already in
+/// `dest`: a copy of it is pasted beside it, and a move leaves it be.
+pub fn paste_conflicts(srcs: &[PathBuf], dest: &Path) -> Vec<PathBuf> {
+    srcs.iter()
+        .filter(|src| {
+            src.file_name().is_some_and(|name| {
+                let there = dest.join(name);
+                fs::symlink_metadata(&there).is_ok() && !same_entry(src, &there)
+            })
+        })
+        .cloned()
+        .collect()
+}
+
+/// Whether `a` and `b` are the same entry, though they may be spelled
+/// differently (in case, on Windows).
+fn same_entry(a: &Path, b: &Path) -> bool {
+    a == b
+        || match (fs::canonicalize(a), fs::canonicalize(b)) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        }
+}
+
 /// A paste started by [Paste::start], copying or moving files into a dir on
 /// a background thread. [Paste::try_finish] collects the outcome.
 pub struct Paste {
@@ -502,14 +541,22 @@ pub struct Paste {
 }
 
 impl Paste {
-    /// Start copying (or with `moving`, moving) `srcs` into `dest`. `ctx` is
-    /// repainted when it's done.
-    pub fn start(srcs: Vec<PathBuf>, dest: PathBuf, moving: bool, ctx: egui::Context) -> Self {
+    /// Start copying (or with `moving`, moving) `srcs` into `dest`. Where a
+    /// name's taken there, with `replace` what's there is moved to the
+    /// Recycle Bin / Trash first; otherwise it's kept, and the new item gets
+    /// a free name (see [paste_one]). `ctx` is repainted when it's done.
+    pub fn start(
+        srcs: Vec<PathBuf>,
+        dest: PathBuf,
+        moving: bool,
+        replace: bool,
+        ctx: egui::Context,
+    ) -> Self {
         let srcs_ = srcs.clone();
         let handle = thread::spawn(move || {
             let results = srcs_
                 .iter()
-                .map(|src| paste_one(src, &dest, moving))
+                .map(|src| paste_one(src, &dest, moving, replace))
                 .collect();
             ctx.request_repaint();
             results
@@ -531,12 +578,12 @@ impl Paste {
     }
 }
 
-/// Copy or move `src` into `dest_dir`, returning its new path. A copy that
-/// would clash with an existing name gets Explorer's "name - Copy.ext" (then
-/// "- Copy (2)", ...), so pasting back into the same folder duplicates it. A
-/// move never replaces anything: a clash is an error. Moving something into
-/// the folder it's already in does nothing.
-fn paste_one(src: &Path, dest_dir: &Path, moving: bool) -> Result<PathBuf, String> {
+/// Copy or move `src` into `dest_dir`, returning its new path. Where its name
+/// is taken, with `replace` what's there goes to the Recycle Bin / Trash
+/// first (never deleted outright); otherwise it gets a free name (see
+/// [free_name]). Copying into the folder it's already in always does that,
+/// duplicating it, and moving it there does nothing.
+fn paste_one(src: &Path, dest_dir: &Path, moving: bool, replace: bool) -> Result<PathBuf, String> {
     let Some(name) = src.file_name() else {
         return Err(format!(
             "can't paste {}: it's a filesystem root",
@@ -556,23 +603,35 @@ fn paste_one(src: &Path, dest_dir: &Path, moving: bool) -> Result<PathBuf, Strin
 
     let err = |e: io::Error| format!("{}: {e}", src.display());
 
+    let plain = dest_dir.join(name);
+    let taken = fs::symlink_metadata(&plain).is_ok();
+    let itself = taken && same_entry(src, &plain);
+    if itself && moving {
+        return Ok(src.to_path_buf());
+    }
+
+    let target = if !taken {
+        plain
+    } else if replace && !itself {
+        // Trashing it would take what's pasted along.
+        if src.starts_with(&plain) {
+            return Err(format!(
+                "can't replace {}: {} is inside it",
+                plain.display(),
+                src.display()
+            ));
+        }
+        trash::delete(&plain).map_err(|e| format!("can't replace {}: {e}", plain.display()))?;
+        plain
+    } else {
+        free_name(dest_dir, name, md.is_dir(), moving)
+    };
+
     if !moving {
-        let target = free_name(dest_dir, name, md.is_dir());
         copy_entry(src, &target).map_err(err)?;
         return Ok(target);
     }
 
-    if src.parent() == Some(dest_dir) {
-        return Ok(src.to_path_buf());
-    }
-    let target = dest_dir.join(name);
-    if fs::symlink_metadata(&target).is_ok() {
-        return Err(format!(
-            "can't move {}: {} already exists",
-            src.display(),
-            target.display()
-        ));
-    }
     match fs::rename(src, &target) {
         Ok(()) => {}
         // To another drive: copy, then delete the original.
@@ -586,8 +645,10 @@ fn paste_one(src: &Path, dest_dir: &Path, moving: bool) -> Result<PathBuf, Strin
 }
 
 /// `dir/name` if nothing's there, otherwise the first free "stem - Copy.ext",
-/// "stem - Copy (2).ext", ... Folders keep any dots in their name whole.
-fn free_name(dir: &Path, name: &OsStr, is_folder: bool) -> PathBuf {
+/// "stem - Copy (2).ext", ... as Explorer names a copy, or for an item
+/// `moving` there, "stem (2).ext", "stem (3).ext", ... Folders keep any dots
+/// in their name whole.
+fn free_name(dir: &Path, name: &OsStr, is_folder: bool, moving: bool) -> PathBuf {
     let plain = dir.join(name);
     if fs::symlink_metadata(&plain).is_err() {
         return plain;
@@ -600,12 +661,12 @@ fn free_name(dir: &Path, name: &OsStr, is_folder: bool) -> PathBuf {
     let stem = stem.to_string_lossy();
     (1..)
         .map(|n| {
-            let copy = if n == 1 {
-                " - Copy".to_owned()
-            } else {
-                format!(" - Copy ({n})")
+            let suffix = match (moving, n) {
+                (true, n) => format!(" ({})", n + 1),
+                (false, 1) => " - Copy".to_owned(),
+                (false, n) => format!(" - Copy ({n})"),
             };
-            dir.join(format!("{stem}{copy}{ext}"))
+            dir.join(format!("{stem}{suffix}{ext}"))
         })
         .find(|p| fs::symlink_metadata(p).is_err())
         .unwrap()
@@ -655,5 +716,55 @@ fn remove_entry(path: &Path, md: &fs::Metadata) -> io::Result<()> {
     } else {
         // A link to a folder on Windows is removed as a folder.
         fs::remove_file(path).or_else(|_| fs::remove_dir(path))
+    }
+}
+
+#[cfg(test)]
+mod paste_tests {
+    use super::*;
+
+    /// A new, empty dir for one test, with `from/` and `to/` in it, each
+    /// holding a `notes.txt`.
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("peregrine_paste_{name}"));
+        let _ = fs::remove_dir_all(&dir);
+        for sub in ["from", "to"] {
+            fs::create_dir_all(dir.join(sub)).unwrap();
+            fs::write(dir.join(sub).join("notes.txt"), sub).unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn conflicts_are_taken_names_but_not_the_item_itself() {
+        let root = scratch("conflicts");
+        let (from, to) = (root.join("from"), root.join("to"));
+        fs::write(from.join("free.txt"), "").unwrap();
+        let srcs = [from.join("notes.txt"), from.join("free.txt")];
+
+        assert_eq!(paste_conflicts(&srcs, &to), [from.join("notes.txt")]);
+        assert!(paste_conflicts(&srcs, &from).is_empty());
+    }
+
+    #[test]
+    fn keeping_both_names_copies_and_moves_apart() {
+        let root = scratch("keep_both");
+        let (from, to) = (root.join("from"), root.join("to"));
+
+        let copy = paste_one(&from.join("notes.txt"), &to, false, false).unwrap();
+        assert_eq!(copy, to.join("notes - Copy.txt"));
+        assert_eq!(fs::read_to_string(to.join("notes.txt")).unwrap(), "to");
+
+        let moved = paste_one(&from.join("notes.txt"), &to, true, false).unwrap();
+        assert_eq!(moved, to.join("notes (2).txt"));
+        assert_eq!(fs::read_to_string(&moved).unwrap(), "from");
+        assert!(!from.join("notes.txt").exists());
+
+        // Into its own folder: a copy is a duplicate, a move does nothing.
+        let dup = paste_one(&to.join("notes.txt"), &to, false, false).unwrap();
+        assert_eq!(dup, to.join("notes - Copy (2).txt"));
+        let stay = paste_one(&to.join("notes.txt"), &to, true, true).unwrap();
+        assert_eq!(stay, to.join("notes.txt"));
+        assert_eq!(fs::read_to_string(&stay).unwrap(), "to");
     }
 }

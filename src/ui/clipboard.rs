@@ -8,11 +8,14 @@ use std::{
 };
 
 use chrono::{DateTime, Local, Utc};
-use egui::{Align, Button, Color32, Event, Frame, Layout, RichText, ScrollArea, Stroke, TextEdit, TextWrapMode, Ui};
+use egui::{
+    Align, Button, Color32, Event, Frame, Layout, RichText, ScrollArea, Stroke, TextEdit,
+    TextWrapMode, Ui,
+};
 
 use crate::{
     OutType,
-    clipboard::{self, Content, History, Paste, SysClipboard, TextCapture},
+    clipboard::{self, Content, History, SysClipboard, TextCapture},
     state::State,
 };
 
@@ -466,13 +469,14 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
                         OutType::StdErr,
                     );
                 }
-                if paste {
-                    state.paste = Some(Paste::start(
-                        paths.clone(),
-                        state.cwd().to_path_buf(),
-                        *cut,
-                        ui.ctx().clone(),
-                    ));
+                if paste && state.file_op_busy() {
+                    state.push_out(
+                        "paste: wait for the file operation in progress to finish",
+                        OutType::StdErr,
+                    );
+                } else if paste {
+                    let dest = state.cwd().to_path_buf();
+                    state.start_paste(paths.clone(), dest, *cut, ui.ctx());
                 }
             }
         }

@@ -15,7 +15,7 @@ use egui::{
     text::{CCursor, CCursorRange, LayoutJob},
 };
 
-use super::{Divider, MIN_SPLIT_HEIGHT, panel_header, plural, scale_panel_fonts};
+use super::{Divider, MIN_SPLIT_HEIGHT, panel_header, plural, scale_panel_fonts, terminal};
 use crate::{
     OutType,
     path_env::{self, DirPrograms, Scope},
@@ -588,6 +588,9 @@ pub fn path_window(state: &mut State, ctx: &Context) {
             state.ui.panel_vis.path_editor = false;
             return;
         }
+        // As in the main window. (Embedded in it, the main window's pass
+        // has already taken it.)
+        terminal::toggle_bookmark_key(state, ui.ctx());
         CentralPanel::default().show(ui, |ui| {
             scale_panel_fonts(ui, state.gui_font_size);
             // Without native multi-window support egui draws this as a

@@ -24,16 +24,24 @@ pub fn cmd_history(state: &mut State, ui: &mut Ui) {
     } else {
         "Hiding the dir each command was run in. Click to show it."
     };
-    if ui
-        .add(Button::selectable(show_dir, "Show dir"))
-        .on_hover_text(hover)
-        .clicked()
-    {
+    // The search box shares the toggle's row, as much of it as that leaves.
+    let (toggled, searched) = ui
+        .horizontal_wrapped(|ui| {
+            let toggled = ui
+                .add(Button::selectable(show_dir, "Show dir"))
+                .on_hover_text(hover)
+                .clicked();
+            let searched =
+                search::inline_search_box(ui, &mut state.ui.history_search, "history_search");
+            (toggled, searched)
+        })
+        .inner;
+
+    if toggled {
         state.cmd_history_show_dir = !show_dir;
         let _ = state.save();
     }
-
-    if search::search_box(ui, &mut state.ui.history_search, "history_search") {
+    if searched {
         state.refresh_history_filter();
     }
     ui.separator();

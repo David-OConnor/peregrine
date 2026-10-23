@@ -303,7 +303,9 @@ pub(super) fn show(out: &mut Output, ui: &mut Ui) {
 }
 
 /// Bookmarks the active tab's cwd, or removes its bookmark, from anywhere in
-/// the window: Ctrl+B, as in the CLI (where it only adds). Cmd+B on Mac.
+/// the window, the PATH window and the file viewers included: Ctrl+B, as in
+/// the CLI (where it only adds). Cmd+B on Mac. Not while a full-screen
+/// program has the keyboard, which gets it instead (see `ui::draw`).
 pub const TOGGLE_BOOKMARK: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::B);
 
 /// Act on [TOGGLE_BOOKMARK] if it was pressed this frame, and remove its key
@@ -345,7 +347,7 @@ pub fn toggle_terminal_key(state: &mut State, ctx: &Context) {
 
 /// Whether `shortcut` was pressed this frame, after removing its key events.
 /// A held key counts once.
-pub(super) fn take_shortcut(ctx: &Context, shortcut: KeyboardShortcut) -> bool {
+pub fn take_shortcut(ctx: &Context, shortcut: KeyboardShortcut) -> bool {
     ctx.input_mut(|i| {
         let mut pressed = false;
         i.events.retain(|event| match event {

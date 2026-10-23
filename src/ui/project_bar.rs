@@ -2,8 +2,9 @@
 //! for each kind of project the active tab's dir is (see [project::Project]).
 
 use egui::{
-    Align, Button, Color32, Frame, Id, IntoAtoms, Key, KeyboardShortcut, Layout, Modifiers,
-    RichText, TextEdit, TextStyle, Ui,
+    Align, Button, Color32, EventFilter, Frame, Id, IntoAtoms, Key, KeyboardShortcut, Layout,
+    Modifiers, Popup, RichText, TextEdit, TextStyle, Ui,
+    text::{CCursor, CCursorRange},
 };
 
 use crate::{OutType, project, state::State, submit_command, ui, ui::terminal};
@@ -96,7 +97,8 @@ fn tinted_group(ui: &mut Ui, tint: Tint, add_contents: impl FnOnce(&mut Ui)) {
 }
 
 /// Right-aligned in the rest of `ui`'s row: Git while the dir's in a repo (as
-/// the prompt's branch shows), Cargo, Python, each on a band of its brand's
+/// the prompt's branch shows), with a button for each branch active lately
+/// (see [project::Branches::recent]), Cargo, Python, each on a band of its brand's
 /// color (see [tinted_group]). Each button runs its line as if typed, so
 /// it's echoed, kept in history, and runs in the background like any other,
 /// with `python` the venv's. Not while connected over SSH, where typed lines
@@ -164,14 +166,31 @@ fn groups(state: &mut State, ui: &mut Ui) {
     }
 
     if let Some(branch) = &branch {
+        state.load_git_branches();
+        let branches = state.git_branches.as_ref();
+        let names = branches.map_or(&[][..], |b| &b.names);
+        let recent = branches.map_or(&[][..], |b| &b.recent);
+        let mut reload_branches = false;
+
         tinted_group(ui, GIT_TINT, |ui| {
+            // The latest first, from the left.
+            let shown = &recent[..recent.len().min(project::MAX_RECENT_BRANCHES)];
+            for name in shown.iter().rev() {
+                if name == branch {
+                    ui.add(Button::selectable(true, name.as_str()))
+                        .on_hover_text("The current branch");
+                } else if cmd_button(ui, idle, name.as_str(), &format!("git switch {name}")) {
+                    line = Some(project::git_branch(&dir, name));
+                }
+            }
+            if !shown.is_empty() {
+                ui.separator();
+            }
+
             let input = &mut state.ui.git_branch_input;
-            let resp = ui.add(
-                TextEdit::singleline(input)
-                    .hint_text(branch.as_str())
-                    .desired_width(ui::chars_width(ui, TextStyle::Body, 14.0)),
-            );
-            let entered = resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+            let (entered, gained_focus) = branch_box(ui, input, branch, names);
+            // Read afresh, for any made outside since.
+            reload_branches = gained_focus;
 
             let typed = !input.trim().is_empty();
             let clicked = ui
@@ -202,6 +221,10 @@ fn groups(state: &mut State, ui: &mut Ui) {
             }
             ui.strong("Git:");
         });
+
+        if reload_branches {
+            state.git_branches = None;
+        }
     }
 
     if stop {
@@ -212,6 +235,134 @@ fn groups(state: &mut State, ui: &mut Ui) {
         Some(Err(e)) => state.push_out(e, OutType::StdErr),
         None => {}
     }
+}
+
+/// The most branches [branch_box] lists under itself.
+const MAX_BRANCH_MATCHES: usize = 10;
+
+/// The Git group's Branch box, holding `input`, with the `current` branch as
+/// its hint. While it's typed in, the branches of `names` that match it (see
+/// [branch_matches]) are listed under it: ↑ / ↓ pick one, and Tab or a click
+/// puts it in the box; Enter with one picked switches to that one. Returns
+/// whether Enter was pressed, to switch to what's then in the box, and
+/// whether the box just got the keyboard.
+fn branch_box(ui: &mut Ui, input: &mut String, current: &str, names: &[String]) -> (bool, bool) {
+    let id = Id::new("git_branch_input");
+    let pick_id = id.with("pick");
+    let mut matches = branch_matches(names, input);
+    let mut pick = ui
+        .data(|d| d.get_temp::<usize>(pick_id))
+        .filter(|&i| i < matches.len());
+
+    // Taken before the box sees them.
+    let focused = ui.memory(|m| m.has_focus(id));
+    let (mut up, mut down, mut tab) = (false, false, false);
+    if focused && !matches.is_empty() {
+        ui.input_mut(|i| {
+            up = i.consume_key(Modifiers::NONE, Key::ArrowUp);
+            down = i.consume_key(Modifiers::NONE, Key::ArrowDown);
+            tab = i.consume_key(Modifiers::NONE, Key::Tab);
+        });
+    }
+    let n = matches.len();
+    if down {
+        pick = Some(pick.map_or(0, |i| (i + 1) % n));
+    }
+    if up {
+        pick = Some(pick.map_or(n - 1, |i| (i + n - 1) % n));
+    }
+    let mut fill = tab.then(|| matches[pick.unwrap_or(0)].clone());
+
+    // Tab and Up / Down stay with the box, rather than move the focus to
+    // another widget.
+    let filter = EventFilter {
+        tab: true,
+        horizontal_arrows: true,
+        vertical_arrows: true,
+        escape: false,
+    };
+    let resp = ui
+        .add(
+            TextEdit::singleline(input)
+                .id(id)
+                .event_filter(filter)
+                .hint_text(current)
+                .desired_width(ui::chars_width(ui, TextStyle::Body, 14.0)),
+        )
+        .on_hover_text(
+            "A branch to switch to, or create. The branches matching what's typed are \
+             listed under it: ↑ / ↓ to pick one, Tab to fill it in",
+        );
+    let entered = resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+
+    if entered && let Some(i) = pick {
+        *input = matches[i].clone();
+    }
+    if resp.changed() {
+        pick = None;
+        matches = branch_matches(names, input);
+    }
+
+    // While it has the keyboard, or has just lost it to a click on the list.
+    let listed = (resp.has_focus() || resp.lost_focus()) && !entered && !matches.is_empty();
+    if listed {
+        Popup::from_response(&resp)
+            .open(true)
+            .width(resp.rect.width())
+            .show(|ui| {
+                for (i, name) in matches.iter().enumerate() {
+                    let row = ui.add(Button::selectable(pick == Some(i), name.as_str()));
+                    if row.clicked() {
+                        fill = Some(name.clone());
+                    }
+                    if pick == Some(i) && (up || down) {
+                        row.scroll_to_me(None);
+                    }
+                }
+            });
+    }
+
+    if let Some(name) = fill {
+        *input = name;
+        pick = None;
+        // Back in the box, with the caret at the end.
+        ui.memory_mut(|m| m.request_focus(id));
+        if let Some(mut state) = TextEdit::load_state(ui.ctx(), id) {
+            let end = CCursor::new(input.chars().count());
+            state.cursor.set_char_range(Some(CCursorRange::one(end)));
+            state.store(ui.ctx(), id);
+        }
+    }
+
+    ui.data_mut(|d| match pick {
+        Some(i) => {
+            d.insert_temp(pick_id, i);
+        }
+        None => d.remove::<usize>(pick_id),
+    });
+    (entered, resp.gained_focus())
+}
+
+/// The branches of `names` (sorted) that `typed` matches, ignoring case: those
+/// it starts, then those it's in elsewhere. Not one it already names
+/// exactly. None until something's typed. At most [MAX_BRANCH_MATCHES].
+fn branch_matches(names: &[String], typed: &str) -> Vec<String> {
+    let typed = typed.trim();
+    if typed.is_empty() {
+        return Vec::new();
+    }
+    let needle = typed.to_lowercase();
+    let (starts, within): (Vec<&String>, Vec<&String>) = names
+        .iter()
+        .filter(|name| *name != typed && name.to_lowercase().contains(&needle))
+        .partition(|name| name.to_lowercase().starts_with(&needle));
+
+    starts
+        .into_iter()
+        .chain(within)
+        .take(MAX_BRANCH_MATCHES)
+        .cloned()
+        .collect()
 }
 
 /// While a

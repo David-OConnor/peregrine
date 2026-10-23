@@ -18,14 +18,14 @@ use shell::{
 
 use crate::{
     OutType,
-    clipboard::{self, Paste},
+    clipboard::{self, OnConflict, Paste},
     cmd_color::CmdColors,
     completion,
     deep_search::{self, DeepSearch},
     drag_out,
     files::{Delete, FileDetails, FileSort, SelectionSummary, sort_browser_files},
     path_color,
-    project::Project,
+    project::{Branches, Project},
     remote::{LiveRemote, Remote},
     running::RunningCmd,
     terminal::{self, Output},
@@ -156,6 +156,9 @@ pub struct StateUi {
     pub path_edit: Option<PathEdit>,
     /// Snapshot of the selected paths awaiting the delete confirmation.
     pub delete_pending: Option<Vec<PathBuf>>,
+    /// A paste or drop waiting on the user to say what to do with items
+    /// whose names are taken where they're going.
+    pub paste_conflict: Option<PasteConflict>,
     /// Set while the last click was in the Files panel, so Ctrl+C / X / V
     /// act on its files rather than on whatever else has the keyboard.
     pub files_active: bool,
@@ -309,6 +312,7 @@ impl Default for StateUi {
             create: None,
             path_edit: None,
             delete_pending: None,
+            paste_conflict: None,
             files_active: false,
             files_activating_press: false,
             files_copy_pending: None,
@@ -353,6 +357,18 @@ pub struct FileRename {
     /// Set once the edit box has taken focus with the name selected, which
     /// happens the first frame it's drawn.
     pub focused: bool,
+}
+
+/// A Files-panel paste or drop held back because some of the items' names
+/// are taken where they're going, until the user picks what to do with them
+/// (see [State::resolve_paste_conflict]).
+pub struct PasteConflict {
+    pub srcs: Vec<PathBuf>,
+    pub dest: PathBuf,
+    /// Moving them, rather than copying.
+    pub moving: bool,
+    /// Those of `srcs` whose names are taken in `dest`.
+    pub clashes: Vec<PathBuf>,
 }
 
 /// A new folder or file being named in the Files panel, before it's made
@@ -452,6 +468,10 @@ pub struct State {
     /// when that tab's cwd isn't inside a repo. Refreshed by
     /// `refresh_branch` after every command, cd, tab switch, or new tab.
     pub branch: Vec<Option<String>>,
+    /// The branches of the active tab's repo, for the project bar's Git
+    /// group. Read when it's first drawn after `refresh_branch` drops them
+    /// (see [Self::load_git_branches]).
+    pub git_branches: Option<Branches>,
     /// Last observed window size, refreshed every frame from the viewport so
     /// `save` persists the size the user left the window at. `None` until the
     /// first frame reports a size (and on a fresh file with no saved value).
@@ -536,6 +556,7 @@ impl Default for State {
             state_path: save_data::default_path()
                 .unwrap_or_else(|| PathBuf::from(save_data::FILENAME)),
             branch: vec![branch],
+            git_branches: None,
             window_size: None,
             font_size: ui::DEFAULT_FONT_SIZE,
             gui_font_size: ui::DEFAULT_GUI_FONT_SIZE,
@@ -641,6 +662,17 @@ impl State {
     pub fn refresh_branch(&mut self) {
         let i = self.ui.active_tab;
         self.branch[i] = current_branch(&self.cwd[i]);
+        self.git_branches = None;
+    }
+
+    /// Make sure `git_branches` holds the active tab's repo's branches,
+    /// reading them if they were dropped (see [Self::refresh_branch]) or are
+    /// another dir's.
+    pub fn load_git_branches(&mut self) {
+        let cwd = &self.cwd[self.ui.active_tab];
+        if self.git_branches.as_ref().is_none_or(|b| b.dir != *cwd) {
+            self.git_branches = Some(Branches::read(cwd));
+        }
     }
 
     /// Re-read the active tab's cwd into `browser_files`. Called after
@@ -1039,9 +1071,10 @@ impl State {
     /// Copy the files on the OS clipboard into the active tab's cwd, or move
     /// them if they were cut. Runs in the background; [Self::pump_paste]
     /// picks up the outcome. Ignored while an earlier paste is still going.
+    /// Names already taken here are asked about first (see [PasteConflict]).
     /// The cwd moves to the top of Recent dirs.
     pub fn paste_files(&mut self, ctx: &egui::Context) {
-        if self.paste.is_some() || self.deleting.is_some() {
+        if self.file_op_busy() {
             return;
         }
         match clipboard::get_files() {
@@ -1057,7 +1090,7 @@ impl State {
                 }
                 let dest = self.cwd().to_path_buf();
                 self.touch_recent_dir(&dest);
-                self.paste = Some(Paste::start(srcs, dest, cut, ctx.clone()));
+                self.start_paste(srcs, dest, cut, ctx);
             }
             Ok(None) => self.push_out(
                 "paste: there are no files on the clipboard",
@@ -1070,10 +1103,11 @@ impl State {
     /// Move (or with `copy`, copy) `srcs` into the folder `dest`, as dropping
     /// Files rows on a folder does. Runs in the background like a paste
     /// ([Self::pump_paste] picks up the outcome too), so it's refused while
-    /// one is going. Dropping a folder on itself does nothing. The cwd moves
-    /// to the top of Recent dirs.
+    /// one is going, and asks about names already taken there in the same
+    /// way. Dropping a folder on itself does nothing. The cwd moves to the
+    /// top of Recent dirs.
     pub fn drop_files(&mut self, srcs: &[PathBuf], dest: &Path, copy: bool, ctx: &egui::Context) {
-        if self.paste.is_some() || self.deleting.is_some() {
+        if self.file_op_busy() {
             let what = if copy { "copy" } else { "move" };
             self.push_out(
                 format!("{what}: wait for the file operation in progress to finish"),
@@ -1087,7 +1121,62 @@ impl State {
         }
         let cwd = self.cwd().to_path_buf();
         self.touch_recent_dir(&cwd);
-        self.paste = Some(Paste::start(srcs, dest.to_path_buf(), !copy, ctx.clone()));
+        self.start_paste(srcs, dest.to_path_buf(), !copy, ctx);
+    }
+
+    /// Whether a paste, drop or delete is under way, or waiting on the user,
+    /// so another can't start.
+    pub fn file_op_busy(&self) -> bool {
+        self.paste.is_some() || self.deleting.is_some() || self.ui.paste_conflict.is_some()
+    }
+
+    /// Copy (or with `moving`, move) `srcs` into `dest` in the background,
+    /// unless some of their names are taken there: then hold it in
+    /// `ui.paste_conflict` for the user to say what to do about them first
+    /// (see [Self::resolve_paste_conflict]).
+    pub fn start_paste(
+        &mut self,
+        srcs: Vec<PathBuf>,
+        dest: PathBuf,
+        moving: bool,
+        ctx: &egui::Context,
+    ) {
+        let clashes = clipboard::paste_conflicts(&srcs, &dest);
+        if clashes.is_empty() {
+            self.paste = Some(Paste::start(srcs, dest, moving, false, ctx.clone()));
+        } else {
+            self.ui.paste_conflict = Some(PasteConflict {
+                srcs,
+                dest,
+                moving,
+                clashes,
+            });
+        }
+    }
+
+    /// Carry on with the paste held in `ui.paste_conflict` as `choice` says,
+    /// or with `None`, drop it.
+    pub fn resolve_paste_conflict(&mut self, choice: Option<OnConflict>, ctx: &egui::Context) {
+        let Some(PasteConflict {
+            mut srcs,
+            dest,
+            moving,
+            clashes,
+        }) = self.ui.paste_conflict.take()
+        else {
+            return;
+        };
+        let Some(choice) = choice else {
+            return;
+        };
+
+        if choice == OnConflict::Skip {
+            srcs.retain(|s| !clashes.contains(s));
+        }
+        if !srcs.is_empty() {
+            let replace = choice == OnConflict::Replace;
+            self.paste = Some(Paste::start(srcs, dest, moving, replace, ctx.clone()));
+        }
     }
 
     /// Once a paste (or drop) has finished: report what failed, re-read the
@@ -1386,6 +1475,7 @@ impl State {
             deleting: None,
             state_path: path,
             branch,
+            git_branches: None,
             window_size: loaded.window_size,
             font_size: loaded.font_size.cli.unwrap_or(ui::DEFAULT_FONT_SIZE),
             gui_font_size: loaded.font_size.gui.unwrap_or(ui::DEFAULT_GUI_FONT_SIZE),

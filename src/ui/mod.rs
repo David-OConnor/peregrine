@@ -733,6 +733,11 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
         terminal::bookmark_number_keys(state, ui.ctx());
         terminal::focus_input_key(state, ui.ctx());
     }
+    // Pressed in a file viewer window (see `viewer::FileViewers`).
+    if state.file_viewers.take_bookmark_key() {
+        let msg = state.toggle_bookmark_cwd();
+        state.push_out(msg, OutType::StdOut);
+    }
 
     // Bring in output from shell commands running in the background, and
     // wrap up any that have finished. Their reader threads request a repaint
@@ -780,6 +785,7 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
     settings::show(state, ui.ctx());
     dirs::stale_dir_popup(state, ui.ctx());
     file_browser::delete_popup(state, ui.ctx());
+    file_browser::paste_conflict_popup(state, ui.ctx());
     scratchpad::popups(state, ui.ctx());
 
     // A command was submitted this frame: paint its echo, then come straight

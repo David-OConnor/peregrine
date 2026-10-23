@@ -27,6 +27,10 @@ use crate::{
 
 pub const QUICK_SEARCH_WIDTH: f32 = 140.;
 
+/// The narrowest an [inline_search_box] gets beside the widgets before it on
+/// its row; any narrower and it goes on a row of its own.
+const INLINE_SEARCH_MIN_WIDTH: f32 = 60.;
+
 /// The narrowest the Deep search box gets with its toggles beside it; any
 /// narrower and they go on a row of their own under it. No narrower than the
 /// Search box.
@@ -264,6 +268,27 @@ pub fn deep_search_results(
 pub fn search_box(ui: &mut Ui, buf: &mut String, id_salt: &str) -> bool {
     let id = ui.make_persistent_id(id_salt);
     search_box_with_id(ui, buf, id)
+}
+
+/// A [search_box] that follows other widgets on a `horizontal_wrapped` row,
+/// taking the rest of it, up to [QUICK_SEARCH_WIDTH]. When that would leave
+/// it narrower than [INLINE_SEARCH_MIN_WIDTH], it wraps onto a row of its own
+/// instead.
+pub fn inline_search_box(ui: &mut Ui, buf: &mut String, id_salt: &str) -> bool {
+    let id = ui.make_persistent_id(id_salt);
+    let rest = ui.available_size_before_wrap().x;
+    let width = if rest >= INLINE_SEARCH_MIN_WIDTH {
+        rest.min(QUICK_SEARCH_WIDTH)
+    } else {
+        QUICK_SEARCH_WIDTH
+    };
+    ui.add(
+        TextEdit::singleline(buf)
+            .hint_text("Search")
+            .desired_width(width)
+            .id(id),
+    )
+    .changed()
 }
 
 /// A [search_box] with the given `id`, for one whose focus is checked from
