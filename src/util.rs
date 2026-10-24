@@ -7,7 +7,9 @@ use shell::{
     ssh,
 };
 
-use crate::{OutType, out_type_for, remote::Remote, state::State, util};
+use crate::{
+    OutType, out_type_for, path_color, remote::Remote, render_with_tilde, state::State, util,
+};
 
 /// Read a file into a `String`. Used by the `cat` builtin to populate the
 /// output pane.
@@ -61,7 +63,7 @@ pub fn handle_cmd(state: &mut State, cmd: &str, input: &str, args: &str, ctx: &e
                     state.run_remote(&c);
                 }
             }
-            "rm_targets" | "open" => state.push_out(
+            "rm_targets" | "open" | "view" | "edit" => state.push_out(
                 format!("{cmd}: only runs locally; disconnect first"),
                 OutType::StdErr,
             ),
@@ -150,6 +152,31 @@ pub fn handle_cmd(state: &mut State, cmd: &str, input: &str, args: &str, ctx: &e
             }
         }
 
+        // A file in a viewer window; `edit` opens it in edit mode.
+        "view" | "edit" => {
+            if args.is_empty() {
+                state.push_out(format!("{cmd}: usage: {cmd} <file>"), OutType::StdErr);
+                return;
+            }
+            let target = path_from_args(
+                state.home.as_deref(),
+                state.cwd(),
+                &state.dir_bookmarks,
+                args,
+            );
+            if !target.is_file() {
+                state.push_out(
+                    format!("{cmd}: {}: no such file", target.display()),
+                    OutType::StdErr,
+                );
+            } else if cmd == "edit" {
+                state.file_viewers.edit(target);
+            } else {
+                state.file_viewers.open(target);
+            }
+            ctx.request_repaint();
+        }
+
         "del" => {
             let (sub, rest) = match args.find(char::is_whitespace) {
                 Some(i) => (&args[..i], args[i..].trim()),
@@ -223,7 +250,16 @@ pub fn handle_cmd(state: &mut State, cmd: &str, input: &str, args: &str, ctx: &e
             };
 
             if let Some(target) = target {
+                let before = state.cwd().to_path_buf();
                 state.change_saved_dir(target, DirList::RecentDirs);
+                if state.cwd() != before {
+                    let shown = render_with_tilde(state.cwd(), state.home.as_deref());
+                    let parts = path_color::parts(&shown, Some("~"), true);
+                    state.push_out(
+                        format!("Navigated to {}", path_color::to_ansi(&parts)),
+                        OutType::StdOut,
+                    );
+                }
             }
         }
 

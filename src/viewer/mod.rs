@@ -3,7 +3,8 @@
 //! viewport): Markdown rendered by `egui_commonmark` (see `crate::markdown`),
 //! source highlighted by `syntect`, plain text as is, images decoded by the
 //! `image` crate. Each window re-reads its file when it changes on disk, so it
-//! can sit beside an editor as a live preview.
+//! can sit beside an editor as a live preview. Text files open read-only;
+//! the toolbar can switch them to a small editor (see `editor`).
 
 use std::{
     ffi::OsStr,
@@ -19,10 +20,10 @@ use std::{
 };
 
 use egui::{
-    CentralPanel, Color32, ColorImage, Context, Frame, Id, Key, Label, Margin, Modifiers, Panel,
-    Rect, RichText, ScrollArea, Sense, Shape, TextureFilter, TextureHandle, TextureOptions, Ui,
-    UiBuilder, Vec2, ViewportBuilder, ViewportCommand, ViewportId, emath::GuiRounding, pos2,
-    scroll_area, vec2,
+    Button, CentralPanel, Color32, ColorImage, Context, Frame, Id, Key, Margin, Modal, Modifiers,
+    Panel, Pos2, Rect, RichText, ScrollArea, Sense, Shape, TextEdit, TextStyle, TextureFilter,
+    TextureHandle, TextureOptions, Ui, UiBuilder, Vec2, ViewportBuilder, ViewportCommand,
+    ViewportId, emath::GuiRounding, pos2, scroll_area, vec2,
 };
 use egui_commonmark::CommonMarkCache;
 use image::{
@@ -36,8 +37,10 @@ use crate::{
     ui::terminal::{TOGGLE_BOOKMARK, take_shortcut},
 };
 
+mod editor;
 mod gutter;
 mod search;
+mod selection;
 mod syntax;
 
 /// Extensions (lowercase) of plain-text files. A `.lock` file that `syntax`
@@ -76,6 +79,8 @@ const MAX_BYTES: u64 = 1 << 20;
 
 const WINDOW_SIZE: [f32; 2] = [820., 900.];
 const MIN_WINDOW_SIZE: [f32; 2] = [300., 200.];
+/// New windows open at the last window's size, but no smaller than this.
+const MIN_REMEMBERED_SIZE: Vec2 = vec2(500., 400.);
 
 /// Whether `path` is a file type the viewer shows, so a double-click views it
 /// here rather than handing it to the OS's default program.
@@ -151,7 +156,10 @@ struct Inner {
     /// Files to open (or focus and reload, if already open) at the end of the
     /// main window's next pass. Queued rather than opened directly so the
     /// Files panel and links clicked in a viewer window share one path.
-    to_open: Vec<PathBuf>,
+    /// `true` opens it in edit mode.
+    to_open: Vec<(PathBuf, bool)>,
+    /// Where a viewer window last moved or resized to: new ones open there.
+    placement: Option<Placement>,
     /// One Markdown cache for every window: building it loads syntect's
     /// syntax and theme sets, so it's created on the first Markdown open, not
     /// at startup.
@@ -161,6 +169,8 @@ struct Inner {
     /// [TOGGLE_BOOKMARK] was pressed in a viewer window, for the main
     /// window's next pass to act on (see [FileViewers::take_bookmark_key]).
     bookmark_key: bool,
+    /// The main window was closed while a viewer still has unsaved edits.
+    quit_pending: bool,
 }
 
 /// One viewer window.
@@ -194,6 +204,55 @@ struct Doc {
     notice: Option<String>,
     /// Find, for text: the toolbar's second row.
     search: search::Search,
+    /// Present only in edit mode; automatic reloads leave it alone.
+    editor: Option<editor::Editor>,
+    /// An action waiting for Save / Discard / Cancel on an unsaved draft.
+    pending: Option<Action>,
+    selection: selection::Markdown,
+    /// Where the window opened. Fixed: egui moves a window whose builder
+    /// changes.
+    opened_at: Option<Placement>,
+    /// Where the window was last seen, to notice it moving or resizing.
+    placement: Option<Placement>,
+}
+
+/// A viewer window's place on screen, in points.
+#[derive(Clone, Copy, PartialEq)]
+struct Placement {
+    /// The outer frame's top left.
+    pos: Pos2,
+    /// The content area's size.
+    size: Vec2,
+}
+
+impl Placement {
+    /// The current viewport's placement. `None` while minimized, maximized
+    /// or full screen: new windows shouldn't open like that.
+    fn of(ctx: &Context) -> Option<Self> {
+        ctx.input(|i| {
+            let info = i.viewport();
+            let special = [info.minimized, info.maximized, info.fullscreen];
+            if special.contains(&Some(true)) {
+                return None;
+            }
+            let size = info.inner_rect?.size();
+            if size.x <= 0. || size.y <= 0. {
+                return None;
+            }
+            Some(Self {
+                pos: info.outer_rect?.min,
+                size,
+            })
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Action {
+    View,
+    Reload,
+    Close,
+    OpenExternal,
 }
 
 /// What a window shows.
@@ -251,6 +310,11 @@ impl Doc {
             open: true,
             notice: None,
             search: search::Search::default(),
+            editor: None,
+            pending: None,
+            selection: selection::Markdown::default(),
+            opened_at: None,
+            placement: None,
         };
         doc.reload(ctx);
         doc
@@ -271,6 +335,7 @@ impl Doc {
             return;
         }
         let read = read_text(&self.path);
+        self.selection = selection::Markdown::default();
         self.layout.clear();
         self.truncated = read.as_ref().ok().and_then(|(_, size)| *size);
         self.lines = read.as_ref().map_or(0, |(text, _)| {
@@ -288,6 +353,9 @@ impl Doc {
     /// Re-read the file if its modification time changed since it was read.
     /// Polled at most once per [RELOAD_POLL].
     fn reload_if_changed(&mut self, ctx: &Context) {
+        if self.editor.is_some() {
+            return;
+        }
         if self.last_poll.elapsed() < RELOAD_POLL {
             return;
         }
@@ -354,7 +422,120 @@ impl Doc {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| self.path.display().to_string());
-        format!("{name} - {}", self.kind.name())
+        let changed = if self.dirty() { " *" } else { "" };
+        let mode = if self.editor.is_some() {
+            "Edit"
+        } else {
+            self.kind.name()
+        };
+        format!("{name}{changed} - {mode}")
+    }
+
+    fn dirty(&self) -> bool {
+        self.editor.as_ref().is_some_and(editor::Editor::dirty)
+    }
+
+    /// Whether edit mode is available: the whole of a text file is loaded.
+    fn can_edit(&self) -> bool {
+        self.kind != Kind::Image
+            && self.truncated.is_none()
+            && matches!(self.content, Ok(Content::Text(_)))
+    }
+
+    fn start_editing(&mut self, ctx: &Context) {
+        match editor::Editor::load(&self.path) {
+            Ok(editor) => {
+                self.editor = Some(editor);
+                editor::Editor::reset_state(ctx, self.id);
+                self.notice = None;
+            }
+            Err(e) => self.notice = Some(e),
+        }
+        ctx.request_repaint();
+    }
+
+    fn save(&mut self, ctx: &Context) -> bool {
+        let Some(editor) = &mut self.editor else {
+            return true;
+        };
+        match editor.save(&self.path) {
+            Ok(()) => {
+                self.reload(ctx);
+                self.notice = None;
+                ctx.memory_mut(|m| m.request_focus(editor::id(self.id)));
+                ctx.request_repaint();
+                true
+            }
+            Err(e) => {
+                self.notice = Some(e);
+                false
+            }
+        }
+    }
+
+    fn request(&mut self, ctx: &Context, action: Action) {
+        if self.dirty() {
+            self.pending = Some(action);
+        } else {
+            self.perform(ctx, action);
+        }
+    }
+
+    fn perform(&mut self, ctx: &Context, action: Action) {
+        self.pending = None;
+        match action {
+            Action::View => {
+                self.editor = None;
+                self.reload(ctx);
+                self.notice = None;
+            }
+            Action::Reload => {
+                let editing = self.editor.take().is_some();
+                self.reload(ctx);
+                self.notice = None;
+                if editing {
+                    self.start_editing(ctx);
+                }
+            }
+            Action::Close => self.open = false,
+            Action::OpenExternal => match open_with_default_app(&self.path) {
+                Ok(()) => self.open = false,
+                Err(e) => self.notice = Some(format!("Couldn't open: {e}")),
+            },
+        }
+        ctx.request_repaint();
+        ctx.request_repaint_of(ViewportId::ROOT);
+    }
+
+    fn confirm_pending(&mut self, ctx: &Context) {
+        let Some(action) = self.pending else {
+            return;
+        };
+        let mut save = false;
+        let mut discard = false;
+        let mut cancel = false;
+        let modal = Modal::new(Id::new(("viewer_unsaved", self.id))).show(ctx, |ui| {
+            ui.set_max_width(420.);
+            ui.heading("Save changes?");
+            ui.label(format!(
+                "{} has unsaved edits.",
+                self.path.file_name().unwrap_or_default().to_string_lossy()
+            ));
+            if let Some(error) = &self.notice {
+                ui.colored_label(ui.visuals().error_fg_color, error);
+            }
+            ui.horizontal(|ui| {
+                save = ui.button("Save").clicked();
+                discard = ui.button("Discard edits").clicked();
+                cancel = ui.button("Cancel").clicked();
+            });
+        });
+        if discard || (save && self.save(ctx)) {
+            self.perform(ctx, action);
+        } else if cancel || modal.should_close() {
+            self.pending = None;
+            ctx.memory_mut(|m| m.request_focus(editor::id(self.id)));
+        }
     }
 }
 
@@ -600,29 +781,48 @@ impl FileViewers {
     /// Open `path` in a viewer window, or focus and reload its window if it's
     /// already open. Takes effect in [Self::show], later this pass.
     pub fn open(&self, path: PathBuf) {
-        self.lock().to_open.push(path);
+        self.lock().to_open.push((path, false));
+    }
+
+    /// As [Self::open], in edit mode when the file allows it.
+    pub fn edit(&self, path: PathBuf) {
+        self.lock().to_open.push((path, true));
     }
 
     /// Keep each open window alive. Call once per pass of the main window:
     /// egui closes any viewport that isn't shown in its parent's pass.
     pub fn show(&self, ctx: &Context) {
-        let windows: Vec<(ViewportId, String)> = {
+        let windows: Vec<(ViewportId, String, Option<Placement>)> = {
             let mut inner = self.lock();
-            for path in std::mem::take(&mut inner.to_open) {
-                inner.open_now(ctx, path);
+            for (path, edit) in std::mem::take(&mut inner.to_open) {
+                inner.open_now(ctx, path, edit);
             }
             inner.docs.retain(|d| d.open);
-            inner.docs.iter().map(|d| (d.id, d.title())).collect()
+            if ctx.input(|i| i.viewport().close_requested()) && inner.docs.iter().any(Doc::dirty) {
+                ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+                inner.quit_pending = true;
+            }
+            inner.confirm_quit(ctx);
+            inner
+                .docs
+                .iter()
+                .map(|d| (d.id, d.title(), d.opened_at))
+                .collect()
         };
 
         // The lock is released first: without native multi-window support
         // egui runs the callback right here, embedded in the main window.
-        for (id, title) in windows {
-            let builder = ViewportBuilder::default()
+        for (id, title, opened_at) in windows {
+            let mut builder = ViewportBuilder::default()
                 .with_title(title)
                 .with_inner_size(WINDOW_SIZE)
                 .with_min_inner_size(MIN_WINDOW_SIZE)
                 .with_icon(crate::app_icon());
+            if let Some(p) = opened_at {
+                builder = builder
+                    .with_position(p.pos)
+                    .with_inner_size(p.size.max(MIN_REMEMBERED_SIZE));
+            }
             let inner = Arc::clone(&self.inner);
             ctx.show_viewport_deferred(id, builder, move |ui, _class| {
                 lock(&inner).show_window(ui, id);
@@ -648,19 +848,71 @@ fn lock(inner: &Mutex<Inner>) -> MutexGuard<'_, Inner> {
 }
 
 impl Inner {
-    fn open_now(&mut self, ctx: &Context, path: PathBuf) {
+    fn confirm_quit(&mut self, ctx: &Context) {
+        if !self.quit_pending {
+            return;
+        }
+        let mut save = false;
+        let mut discard = false;
+        let mut cancel = false;
+        let modal = Modal::new(Id::new("viewer_unsaved_quit")).show(ctx, |ui| {
+            ui.set_max_width(480.);
+            ui.heading("Save changes before quitting?");
+            for doc in self.docs.iter().filter(|d| d.dirty()) {
+                ui.label(doc.path.display().to_string());
+                if let Some(error) = &doc.notice {
+                    ui.colored_label(ui.visuals().error_fg_color, error);
+                }
+            }
+            ui.horizontal(|ui| {
+                save = ui.button("Save all").clicked();
+                discard = ui.button("Discard edits and quit").clicked();
+                cancel = ui.button("Cancel").clicked();
+            });
+        });
+        if save {
+            let mut saved = true;
+            for doc in self.docs.iter_mut().filter(|d| d.dirty()) {
+                saved &= doc.save(ctx);
+            }
+            if !saved {
+                return;
+            }
+        }
+        if save || discard {
+            for doc in &mut self.docs {
+                doc.editor = None;
+            }
+            self.quit_pending = false;
+            ctx.send_viewport_cmd(ViewportCommand::Close);
+        } else if cancel || modal.should_close() {
+            self.quit_pending = false;
+        }
+    }
+
+    fn open_now(&mut self, ctx: &Context, path: PathBuf, edit: bool) {
         let kind = Kind::of(&path);
         // Compare canonical paths so `./README.md` and `docs/../README.md`
         // find the same window.
         let path = fs::canonicalize(&path).map(strip_verbatim).unwrap_or(path);
         if let Some(doc) = self.docs.iter_mut().find(|d| d.path == path && d.open) {
-            doc.reload(ctx);
+            if doc.editor.is_none() {
+                doc.reload(ctx);
+                if edit && doc.can_edit() {
+                    doc.start_editing(ctx);
+                }
+            }
             ctx.send_viewport_cmd_to(doc.id, ViewportCommand::Focus);
             return;
         }
         let id = ViewportId::from_hash_of(("file_viewer", self.next_id));
         self.next_id += 1;
-        self.docs.push(Doc::new(ctx, id, path, kind));
+        let mut doc = Doc::new(ctx, id, path, kind);
+        doc.opened_at = self.placement;
+        if edit && doc.can_edit() {
+            doc.start_editing(ctx);
+        }
+        self.docs.push(doc);
     }
 
     /// Render the window for viewport `id`. Runs in that viewport's own pass.
@@ -670,12 +922,23 @@ impl Inner {
             to_open,
             cache,
             bookmark_key,
+            placement,
             ..
         } = self;
         let Some(doc) = docs.iter_mut().find(|d| d.id == id) else {
             return;
         };
         let ctx = ui.ctx().clone();
+        let title = doc.title();
+
+        // Only a change counts, so the last window moved or resized wins,
+        // not whichever happens to draw last.
+        if let Some(now) = Placement::of(&ctx)
+            && doc.placement != Some(now)
+        {
+            doc.placement = Some(now);
+            *placement = Some(now);
+        }
 
         // The main window acts on it, in its next pass.
         if take_shortcut(&ctx, TOGGLE_BOOKMARK) {
@@ -684,16 +947,23 @@ impl Inner {
         }
 
         if ctx.input(|i| i.viewport().close_requested()) {
-            // eframe repaints the main window too, whose `show` drops us.
-            doc.open = false;
-            return;
+            if doc.dirty() {
+                ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+            }
+            doc.request(&ctx, Action::Close);
+            if !doc.open {
+                return;
+            }
         }
 
-        if ctx.input(|i| i.key_pressed(Key::F5)) {
-            doc.reload(&ctx);
+        if doc.pending.is_none() && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::F5)) {
+            doc.request(&ctx, Action::Reload);
         } else {
             doc.reload_if_changed(&ctx);
         }
+        let save_key = doc.editor.is_some()
+            && doc.pending.is_none()
+            && ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::S));
         if doc.kind == Kind::Image {
             let step = ctx.input_mut(|i| {
                 isize::from(i.consume_key(Modifiers::NONE, Key::ArrowRight))
@@ -703,7 +973,7 @@ impl Inner {
                 doc.navigate(&ctx, step);
             }
         }
-        if doc.kind != Kind::Image {
+        if doc.kind != Kind::Image && doc.pending.is_none() {
             doc.search.keys(&ctx);
         }
         doc.receive_image(&ctx);
@@ -717,39 +987,31 @@ impl Inner {
             .show(ui, |ui| toolbar(doc, ui, id));
 
         let mut margin = Margin::symmetric(16, 8);
-        if matches!(doc.kind, Kind::Code(_) | Kind::Text) {
+        if matches!(doc.kind, Kind::Code(_) | Kind::Text) || doc.editor.is_some() {
             // The line numbers' gutter starts at the window's edge.
             margin.left = 0;
         }
         CentralPanel::default()
             .frame(Frame::central_panel(ui.style()).inner_margin(margin))
-            .show(ui, |ui| match &doc.content {
-                Ok(Content::Text(text)) if doc.kind == Kind::Markdown => {
-                    ScrollArea::vertical()
-                        .id_salt(("viewer_scroll", id))
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| {
-                            let cache = cache.get_or_insert_with(CommonMarkCache::default);
-                            let top_left = ui.max_rect().min;
-                            let width = ui.available_width();
-                            let mut details = Details::Shown(&mut doc.details_open);
-                            markdown::show(
-                                ui,
-                                text,
-                                &doc.blocks,
-                                &doc.path,
-                                cache,
-                                id,
-                                &mut details,
-                            );
-                            let layout = search::Layout::markdown(
-                                text,
-                                width,
-                                ui.min_rect().height(),
-                                &doc.details_open,
-                            );
-                            doc.search.markdown(ui, top_left, layout, id, |ui| {
-                                let mut details = Details::Measured(&doc.details_open);
+            .show(ui, |ui| {
+                if let Some(editor) = &mut doc.editor {
+                    editor.show(ui, doc.kind, &mut doc.search, id);
+                    return;
+                }
+                match &doc.content {
+                    Ok(Content::Text(text)) if doc.kind == Kind::Markdown => {
+                        ScrollArea::vertical()
+                            .id_salt(("viewer_scroll", id))
+                            .animated(false)
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                let cache = cache.get_or_insert_with(CommonMarkCache::default);
+                                let top_left = ui.max_rect().min;
+                                let width = ui.available_width();
+                                let mut details = Details::Shown(&mut doc.details_open);
+                                // Selection must survive labels scrolling off
+                                // screen; the viewer keeps its own endpoints.
+                                ui.style_mut().interaction.selectable_labels = false;
                                 markdown::show(
                                     ui,
                                     text,
@@ -759,27 +1021,71 @@ impl Inner {
                                     id,
                                     &mut details,
                                 );
+                                let layout = search::Layout::markdown(
+                                    text,
+                                    width,
+                                    ui.min_rect().height(),
+                                    &doc.details_open,
+                                );
+                                doc.selection.show(ui, top_left, layout, id, |ui| {
+                                    let mut details = Details::Measured(&doc.details_open);
+                                    markdown::show(
+                                        ui,
+                                        text,
+                                        &doc.blocks,
+                                        &doc.path,
+                                        cache,
+                                        id,
+                                        &mut details,
+                                    );
+                                });
+                                let layout = search::Layout::markdown(
+                                    text,
+                                    width,
+                                    ui.min_rect().height(),
+                                    &doc.details_open,
+                                );
+                                doc.search.markdown(ui, top_left, layout, id, |ui| {
+                                    let mut details = Details::Measured(&doc.details_open);
+                                    markdown::show(
+                                        ui,
+                                        text,
+                                        &doc.blocks,
+                                        &doc.path,
+                                        cache,
+                                        id,
+                                        &mut details,
+                                    );
+                                });
                             });
-                        });
-                }
-                Ok(Content::Text(text)) => {
-                    let (kind, lines) = (doc.kind, doc.lines);
-                    show_text(ui, text, kind, lines, &mut doc.layout, &mut doc.search, id);
-                }
-                Ok(Content::Image(picture)) => show_image(ui, picture, &mut doc.zoom, id),
-                Ok(Content::Loading) => {
-                    ui.spinner();
-                }
-                Err(e) => {
-                    ui.label(RichText::new(e).color(ui.visuals().error_fg_color));
+                    }
+                    Ok(Content::Text(text)) => {
+                        let (kind, lines) = (doc.kind, doc.lines);
+                        show_text(ui, text, kind, lines, &mut doc.layout, &mut doc.search, id);
+                    }
+                    Ok(Content::Image(picture)) => show_image(ui, picture, &mut doc.zoom, id),
+                    Ok(Content::Loading) => {
+                        ui.spinner();
+                    }
+                    Err(e) => {
+                        ui.label(RichText::new(e).color(ui.visuals().error_fg_color));
+                    }
                 }
             });
 
-        if doc.kind == Kind::Markdown {
+        if save_key && doc.editor.is_some() && doc.pending.is_none() {
+            doc.save(&ctx);
+        }
+        if doc.kind == Kind::Markdown && doc.editor.is_none() {
             let base_dir = doc.path.parent().unwrap_or(Path::new(""));
             for path in markdown::take_local_links(&ctx, base_dir) {
                 open_link(doc, path, to_open, &ctx);
             }
+        }
+        doc.confirm_pending(&ctx);
+        let new_title = doc.title();
+        if new_title != title {
+            ctx.send_viewport_cmd(ViewportCommand::Title(new_title));
         }
     }
 }
@@ -812,17 +1118,33 @@ fn show_text(
         .scope_builder(UiBuilder::new().max_rect(body), |ui| {
             scroll
                 .id_salt(("viewer_scroll", window))
+                .animated(false)
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     let wrap_width = match language {
                         Some(_) => f32::INFINITY,
                         None => ui.available_width(),
                     };
-                    let galley = layout.galley(ui, text, language, wrap_width);
                     // Highlights go under the text, so they're drawn first.
                     let behind = ui.painter().add(Shape::Noop);
-                    let label = Label::new(Arc::clone(&galley)).selectable(true);
-                    let pos = ui.add(label).rect.min;
+                    let mut buffer = text.as_ref();
+                    let mut layouter = |ui: &Ui, _: &dyn egui::TextBuffer, _| {
+                        layout.galley(ui, text, language, wrap_width)
+                    };
+                    // An immutable TextBuffer keeps the current view read-only
+                    // while retaining a selection outside the visible rows.
+                    let output = TextEdit::multiline(&mut buffer)
+                        .id(Id::new(("viewer_text", window)))
+                        .font(TextStyle::Monospace)
+                        .cursor_at_end(false)
+                        .desired_width(f32::INFINITY)
+                        .min_size(ui.available_size())
+                        .margin(0)
+                        .frame(Frame::NONE)
+                        .layouter(&mut layouter)
+                        .show(ui);
+                    selection::text(ui, &output.response, language.is_some());
+                    let (galley, pos) = (output.galley, output.galley_pos);
                     search.paint_text(ui, &galley, pos, behind);
                     (galley, pos)
                 })
@@ -838,7 +1160,46 @@ fn show_text(
 /// next and zoom controls for an image, or the find bar under them for text.
 /// In viewer window `window`.
 fn toolbar(doc: &mut Doc, ui: &mut Ui, window: ViewportId) {
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
+        if doc.kind != Kind::Image {
+            let editing = doc.editor.is_some();
+            if ui
+                .add_enabled(editing, Button::selectable(!editing, "View"))
+                .clicked()
+            {
+                doc.request(ui.ctx(), Action::View);
+            }
+            if ui
+                .add_enabled(
+                    !editing && doc.can_edit(),
+                    Button::selectable(editing, "Edit"),
+                )
+                .on_hover_text("Edit the complete text file; files open in read-only View mode")
+                .clicked()
+            {
+                doc.start_editing(ui.ctx());
+            }
+            if editing {
+                if ui
+                    .add_enabled(doc.dirty(), Button::new("Save"))
+                    .on_hover_text("Save changes (Ctrl+S; Cmd+S on Mac)")
+                    .clicked()
+                {
+                    doc.save(ui.ctx());
+                }
+                if ui
+                    .button("Discard edits")
+                    .on_hover_text("Discard the draft and return to View mode")
+                    .clicked()
+                {
+                    doc.perform(ui.ctx(), Action::View);
+                }
+                if doc.dirty() {
+                    ui.colored_label(ui.visuals().warn_fg_color, "Unsaved edits");
+                }
+            }
+            ui.separator();
+        }
         if doc.kind == Kind::Image {
             if ui
                 .button("⬅")
@@ -861,22 +1222,14 @@ fn toolbar(doc: &mut Doc, ui: &mut Ui, window: ViewportId) {
             .on_hover_text("Re-read the file (F5)")
             .clicked()
         {
-            doc.reload(ui.ctx());
-            doc.notice = None;
+            doc.request(ui.ctx(), Action::Reload);
         }
         if ui
             .button("Open with OS default")
             .on_hover_text("Open with the default program for this file type")
             .clicked()
         {
-            match open_with_default_app(&doc.path) {
-                Ok(()) => {
-                    // The main window's pass is what drops a closed window.
-                    doc.open = false;
-                    ui.ctx().request_repaint_of(ViewportId::ROOT);
-                }
-                Err(e) => doc.notice = Some(format!("Couldn't open: {e}")),
-            }
+            doc.request(ui.ctx(), Action::OpenExternal);
         }
         if let Ok(Content::Image(picture)) = &doc.content {
             zoom_controls(ui, picture, &mut doc.zoom);
@@ -1003,11 +1356,16 @@ fn padding(size: Vec2, viewport: Vec2) -> Vec2 {
 /// Open `path`, a local file linked from `doc`: in another viewer window if
 /// it's a type the viewer shows, otherwise (e.g. a folder) with its
 /// default program.
-fn open_link(doc: &mut Doc, path: PathBuf, to_open: &mut Vec<PathBuf>, ctx: &Context) {
+fn open_link(
+    doc: &mut Doc,
+    path: PathBuf,
+    to_open: &mut Vec<(PathBuf, bool)>,
+    ctx: &Context,
+) {
     if !path.exists() {
         doc.notice = Some(format!("Link target not found: {}", path.display()));
     } else if can_view(&path) {
-        to_open.push(path);
+        to_open.push((path, false));
         // The main window's pass is what opens it.
         ctx.request_repaint_of(ViewportId::ROOT);
     } else if let Err(e) = open_with_default_app(&path) {

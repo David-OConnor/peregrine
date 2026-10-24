@@ -61,6 +61,8 @@ pub(super) struct Search {
     /// Markdown: search the layout again next pass, as a table or image
     /// can take a pass to settle.
     remeasure: bool,
+    /// Editing can reuse an allocation's address; don't rely on it alone.
+    text_changed: bool,
 }
 
 /// The matches found.
@@ -213,7 +215,7 @@ fn find(text: &str, needle: &Needle, limit: usize) -> Vec<Range<usize>> {
 /// text) on a row of `galley` within `visible` (a y range, relative to the
 /// galley), and the index of the range it's from. Pieces are relative to
 /// the galley's top left.
-fn row_pieces(
+pub(super) fn row_pieces(
     galley: &Galley,
     ranges: &[Range<usize>],
     visible: Rangef,
@@ -451,16 +453,21 @@ impl Search {
     /// Source or plain text: find the query in `text`, if either changed.
     /// Call before [Self::paint_text].
     pub(super) fn find_in_text(&mut self, ctx: &Context, text: &Arc<str>) {
+        let changed = std::mem::take(&mut self.text_changed);
         let Some(needle) = self.needle() else {
             self.clear();
             return;
         };
         let (start, len) = Layout::address(text);
         let layout = Layout::Text(start, len);
-        if self.stale(&needle, &layout) {
+        if self.stale(&needle, &layout) || changed {
             let found = Found::Chars(find(text, &needle, MAX_MATCHES));
             self.set_found(ctx, found, needle, layout);
         }
+    }
+
+    pub(super) fn text_changed(&mut self) {
+        self.text_changed = true;
     }
 
     /// Source or plain text: highlight the matches showing in `galley`,
@@ -572,6 +579,29 @@ fn measure(
     needle: &Needle,
     show: impl FnOnce(&mut Ui),
 ) -> Found {
+    let mut rects = Vec::new();
+    let mut count = 0;
+    for text in measure_text(ui, width, window, show) {
+        if count >= MAX_MATCHES {
+            break;
+        }
+        let ranges = find(text.galley.text(), needle, MAX_MATCHES - count);
+        row_pieces(&text.galley, &ranges, Rangef::EVERYTHING, |i, r| {
+            rects.push((count + i, r.translate(text.pos.to_vec2())));
+        });
+        count += ranges.len();
+    }
+    Found::Rects { rects, count }
+}
+
+/// All rendered text, including off-screen labels, positioned relative to
+/// the document's origin. Shared by find and Markdown's persistent selection.
+pub(super) fn measure_text(
+    ui: &Ui,
+    width: f32,
+    window: ViewportId,
+    show: impl FnOnce(&mut Ui),
+) -> Vec<TextShape> {
     let ctx = ui.ctx();
     let id = Id::new(("viewer_find_measure", window));
     let layer = LayerId::new(Order::Background, id);
@@ -589,24 +619,18 @@ fn measure(
     drop(measure);
     let painted = ctx.graphics_mut(|g| std::mem::take(g.entry(layer)));
 
-    let mut rects = Vec::new();
-    let mut count = 0;
     let mut texts = Vec::new();
     for clipped in painted.all_entries() {
         collect_text(&clipped.shape, &mut texts);
     }
-    for text in texts {
-        if count >= MAX_MATCHES {
-            break;
-        }
-        let ranges = find(text.galley.text(), needle, MAX_MATCHES - count);
-        let offset = text.pos - OFFSCREEN;
-        row_pieces(&text.galley, &ranges, Rangef::EVERYTHING, |i, r| {
-            rects.push((count + i, r.translate(offset)));
-        });
-        count += ranges.len();
-    }
-    Found::Rects { rects, count }
+    texts
+        .into_iter()
+        .map(|text| {
+            let mut text = text.clone();
+            text.pos -= OFFSCREEN.to_vec2();
+            text
+        })
+        .collect()
 }
 
 /// The text shapes in `shape`, in the order they paint.

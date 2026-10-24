@@ -6,6 +6,7 @@
 Cargo.lock
 
 .claude
+AGENTS.md
 
 
 # This application's save data

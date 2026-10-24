@@ -185,12 +185,10 @@ impl Source {
         // the worker runs, and keeps it after a regex error or a budget limit.
         let galley = self.galley.get_or_insert_with(|| {
             ui.fonts_mut(|fonts| {
-                fonts.layout_job(LayoutJob::simple(
-                    text.to_string(),
-                    style.font,
-                    style.color,
-                    style.wrap_width,
-                ))
+                let mut job =
+                    LayoutJob::simple(text.to_string(), style.font, style.color, style.wrap_width);
+                job.keep_trailing_whitespace = true;
+                fonts.layout_job(job)
             })
         });
         Arc::clone(galley)
@@ -226,6 +224,7 @@ fn highlight(text: &str, language: &str, style: &Style, cancel: &AtomicBool) -> 
     let start = Instant::now();
     let mut job = LayoutJob {
         text: text.into(),
+        keep_trailing_whitespace: true,
         ..Default::default()
     };
     job.wrap.max_width = style.wrap_width;
@@ -263,4 +262,37 @@ fn highlight(text: &str, language: &str, style: &Style, cancel: &AtomicBool) -> 
     }
 
     Some(job)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn editor_languages_keep_their_text_and_have_syntax_colors() {
+        let style = Style {
+            dark: true,
+            font: FontId::monospace(13.),
+            color: Color32::WHITE,
+            pixels_per_point: 1.,
+            wrap_width: f32::INFINITY,
+        };
+        for (language, text) in [
+            ("rs", "fn main() { let answer = 42; }\n"),
+            ("py", "def example():\n    return 'hello'\n"),
+            ("js", "const answer = 42; // comment\n"),
+            ("html", "<html><body class=\"test\">Hello</body></html>\n"),
+            ("md", "# Heading\n\nSome **bold** text.\n"),
+        ] {
+            let job = highlight(text, language, &style, &AtomicBool::new(false)).unwrap();
+            assert_eq!(job.text, text);
+            let first = job.sections[0].format.color;
+            assert!(
+                job.sections
+                    .iter()
+                    .any(|section| section.format.color != first),
+                "{language} should be highlighted"
+            );
+        }
+    }
 }

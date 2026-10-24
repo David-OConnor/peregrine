@@ -3,6 +3,8 @@
 
 An integrated terminal and file browser. For Linux, Windows, and MacOS. I built this for my own file-system and CLI workflows. Wherever I notice a friction point, I update this program to address it. For example, when using a `cd` command to navigate in a terminal, I've made it trivial to access ones I've used before, or to find the right directory using a few characters from dir's name. It also smooths over miscellaneous OS-level functionality which I've encountered pain points in.
 
+*If I may be so bold*: This program likely represents a simple improvement to many people's workflows.
+
 The initial inspiration: I do not enjoy manually navigating directories (In a terminal with `cd` commands, nor my OS's file browser). In the case of ones I use frequent, there is no reason I must!
 
 One description: an **Integrate File Environment or IFE**: like an IDE, but a general tool for files. Of course, most IDEs (Like Jetbrains') include functionality this program has - I still use this because it's light, and is designed to work across the whole system instead of a project.
@@ -66,6 +68,10 @@ You can rename a file by selecting it, then clicking its name again. Double-clic
 Drag files and folders onto a folder (or the ⬆ and shortcut buttons) to move them there; hold Ctrl to copy. Drag them out of the window to drop them on Explorer or Nautilus, the desktop, a web page's upload box, or any other program that takes files from a file manager (Windows, and Linux on X11 or Wayland).
 
 Opening most popular text-based file formats (.txt, Markdown, TOML, most code files) or image (.png, .jpg, .bmp) file in the browser will open an integrated viewer; you can then open in your OS's default handler from there. In the image viewer, Ctrl+scroll zooms and dragging pans.
+
+Text files open read-only. Use **Edit** at the top of the viewer to edit text or Markdown source with syntax highlighting, line numbers, find, selection, copy/paste, undo/redo, and Tab indentation. **Save** (Ctrl+S, or Cmd+S on Mac) writes the changes; **Discard edits** returns to View mode and loads the file from disk. Switching to **View**, reloading, or closing with unsaved edits offers Save, Discard, or Cancel. Files over 1 MB and files with invalid or binary text remain available in the viewer; use the OS's default handler to edit them.
+
+In View and Edit modes, drag a text selection to the top or bottom edge to scroll and extend it beyond the visible text. Code files also scroll horizontally when selecting past the left or right edge.
 
 
 ### Terminal / CLI
@@ -134,6 +140,11 @@ Shortcuts to reduce typing:
 - `fmt`: `cargo +nightly fmt`
 
 
+### File viewer
+- `view <file>`: Open a file in the viewer
+- `edit <file>`: Open a file in the viewer, in edit mode
+
+
 ## Non-obvious functionality
 
 - Most controls have tooltips on hover. These list what it does, and its keyboard shortcut.
@@ -173,6 +184,7 @@ On Mac, use **Cmd** in place of **Ctrl**.
 - **Alt + C**: Toggle match case. On Mac, **Cmd + Option + C**
 - **Escape** (in the find box): Clear the search
 - **F5**: Reload the file
+- **Ctrl + S** (in Edit mode): Save changes. **Ctrl + Z** undoes; **Ctrl + Shift + Z** or **Ctrl + Y** redoes
 - **Left** and **Right** arrow keys (image viewer): Previous and next image in the directory
 
 ### Tabs
