@@ -219,8 +219,6 @@ fn groups(state: &mut State, ui: &mut Ui) {
                     line = Some(Ok(cmd.to_owned()));
                 }
             }
-            ui.label(branch.as_str())
-                .on_hover_text("The current branch");
             ui.strong("Git:");
         });
 
