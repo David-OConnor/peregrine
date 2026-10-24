@@ -201,6 +201,10 @@ pub(super) fn draw(state: &mut State, ui: &mut Ui) {
     // disabled when there's nowhere to go in that direction.
     let i = state.ui.active_tab;
     let parent = state.cwd().parent().map(Path::to_path_buf);
+    let project_root = state
+        .project_root
+        .as_ref()
+        .filter(|root| *root != state.cwd());
     let can_back = !state.ui.nav_back[i].is_empty();
     let can_forward = !state.ui.nav_forward[i].is_empty();
 
@@ -246,6 +250,15 @@ pub(super) fn draw(state: &mut State, ui: &mut Ui) {
             .clicked()
         {
             go_forward = true;
+        }
+
+        if let Some(root) = project_root
+            && ui
+                .button("Project root")
+                .on_hover_text(format!("Go to project root: {}", root.display()))
+                .clicked()
+        {
+            go_to = Some(root.clone());
         }
 
         for s in shortcuts {

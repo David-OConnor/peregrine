@@ -81,7 +81,7 @@ pub const DEFAULT_GUI_FONT_SIZE: f32 = 11.;
 /// Bounds the +/- font-size buttons (CLI and GUI) clamp to, so text can't be
 /// shrunk to an unreadable size or blown up past the window.
 pub const MIN_FONT_SIZE: f32 = 8.;
-pub const MAX_FONT_SIZE: f32 = 28.;
+pub const MAX_FONT_SIZE: f32 = 22.;
 
 /// Name of the bold font family registered by [install_fonts]; see
 /// [bold_family].

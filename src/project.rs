@@ -36,6 +36,17 @@ impl Project {
                 || venv_python(dir).is_some(),
         }
     }
+
+    /// The nearest Git, Cargo or Python project containing `dir`, including
+    /// `dir` itself. A `.git` file counts too, for worktrees and submodules.
+    pub fn root(dir: &Path) -> Option<PathBuf> {
+        dir.ancestors()
+            .find(|dir| {
+                let project = Self::detect(dir);
+                dir.join(".git").exists() || project.cargo || project.python
+            })
+            .map(Path::to_path_buf)
+    }
 }
 
 /// The line Git's Branch runs in `dir` for the branch `name`: switch to it if
@@ -438,6 +449,50 @@ fn quote(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_roots_use_the_nearest_git_cargo_or_python_marker() {
+        let root = env::temp_dir().join(format!(
+            "peregrine_project_roots_{}_{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        fs::create_dir(&root).unwrap();
+        assert_eq!(Project::root(&root), None);
+
+        fs::create_dir(root.join(".git")).unwrap();
+        let plain = root.join("plain/sub");
+        fs::create_dir_all(&plain).unwrap();
+        assert_eq!(Project::root(&plain), Some(root.clone()));
+        assert_eq!(Project::root(&root), Some(root.clone()));
+
+        for (i, marker) in [
+            ".git",
+            "Cargo.toml",
+            "pyproject.toml",
+            "setup.py",
+            "manage.py",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let nested = root.join(format!("project_{i}"));
+            let sub = nested.join("src/deep");
+            fs::create_dir_all(&sub).unwrap();
+            // A worktree or submodule has a `.git` file, not a directory.
+            fs::write(nested.join(marker), "").unwrap();
+            assert_eq!(Project::root(&sub), Some(nested.clone()), "{marker}");
+            assert_eq!(Project::root(&nested), Some(nested), "{marker}");
+        }
+
+        let python = root.join("venv_project");
+        fs::create_dir_all(python.join(".venv/bin")).unwrap();
+        fs::create_dir_all(python.join("src/deep")).unwrap();
+        fs::write(python.join(".venv/pyvenv.cfg"), "").unwrap();
+        fs::write(python.join(".venv/bin/python"), "").unwrap();
+        assert_eq!(Project::root(&python.join("src/deep")), Some(python));
+        fs::remove_dir_all(root).unwrap();
+    }
 
     /// A reflog line for `msg` at `time`.
     fn log_line(time: i64, msg: &str) -> String {

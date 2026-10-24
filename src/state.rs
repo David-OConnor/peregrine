@@ -456,6 +456,9 @@ pub struct State {
     /// What kind of project `browser_dir` is, for the Files panel's project
     /// rows. Re-detected along with `browser_files`.
     pub project: Project,
+    /// The nearest project containing `browser_dir`, for the Files panel's
+    /// Project root button. Re-detected along with `browser_files`.
+    pub project_root: Option<PathBuf>,
     /// The picture under `selected_file`'s details, when it's an image. Not
     /// persisted.
     pub file_preview: ImagePreview,
@@ -553,6 +556,7 @@ impl Default for State {
             selected_file: None,
             selection: FileSelection::default(),
             project: Project::default(),
+            project_root: None,
             file_preview: ImagePreview::default(),
             deep_search: None,
             paste: None,
@@ -701,6 +705,7 @@ impl State {
         }
         self.browser_files = read_browser_files(&cwd);
         self.project = Project::detect(&cwd);
+        self.project_root = Project::root(&cwd);
         self.browser_dir = cwd;
         let (attr, dot) = (self.ui.show_hidden_attr, self.ui.show_dotfiles);
         self.browser_files.retain(|f| listing_shows(f, attr, dot));
@@ -1473,6 +1478,7 @@ impl State {
             selected_file: None,
             selection: FileSelection::default(),
             project: Project::default(),
+            project_root: None,
             file_preview: ImagePreview::default(),
             deep_search: None,
             paste: None,
