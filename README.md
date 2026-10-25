@@ -125,7 +125,8 @@ Shortcuts to reduce typing:
 - `pull`: `git pull`
 - `clone`: `git clone`
 - `push`: `git push`
-- `checkout: `git checkout`
+- `checkout`: `git checkout`
+- `switch`: `git switch`
 - `stash`: `git stash`
 - `sync "message"`: `git add .` -> `git commit -am "message"` -> `git push`
 
