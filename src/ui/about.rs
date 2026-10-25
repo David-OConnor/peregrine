@@ -138,7 +138,7 @@ pub(super) fn show(state: &mut State, ctx: &Context) {
             });
 
             ui.add_space(8.);
-            ui.label("Preferences, bookmarks, command history, and clipboard history are saved in the state file shared with Shell:");
+            ui.label("Bookmarks, command history, and clipboard history are saved in the state file shared with Shell:");
             ui.label(render_with_tilde(&state.state_path, state.home.as_deref()))
                 .on_hover_text(state.state_path.to_string_lossy());
 

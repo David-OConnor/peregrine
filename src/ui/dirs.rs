@@ -8,7 +8,8 @@ use egui::{
     Button, CursorIcon, Modal, PointerButton, Pos2, Rangef, Rect, RichText, ScrollArea, Sense,
     Stroke, TextFormat, TextStyle, Ui,
 };
-use shell::{BookmarkSort, DirList};
+use serde::{Deserialize, Serialize};
+use shell::DirList;
 
 use crate::{
     OutType, path_color,
@@ -20,9 +21,8 @@ use crate::{
 };
 
 /// Default max displayed length (in characters) of a Bookmarks / Recent dirs
-/// path, used when the state file has no saved `DIR_LABEL_LEN`. Longer paths
-/// are truncated from the front (see [path_color::truncate_start]), e.g.
-/// `.../code/Bio/dynamics`.
+/// path, until it's set in Settings. Longer paths are truncated from the
+/// front (see [path_color::truncate_start]), e.g. `.../code/Bio/dynamics`.
 pub const DEFAULT_DIR_LABEL_LEN: usize = 22;
 /// Bounds the path-length controls clamp to. The minimum leaves room for a
 /// few characters after the `...`.
@@ -30,8 +30,21 @@ pub const MIN_DIR_LABEL_LEN: usize = 8;
 pub const MAX_DIR_LABEL_LEN: usize = 200;
 
 /// How the Bookmarks panel orders its rows until the user picks a mode at
-/// its top, i.e. when the state file has no saved `BM_SORT`.
+/// its top.
 pub const DEFAULT_BOOKMARK_SORT: BookmarkSort = BookmarkSort::Proximity;
+
+/// How the Bookmarks panel orders its rows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BookmarkSort {
+    /// Oldest first: the order [State::dir_bookmarks] keeps them in.
+    Added,
+    /// By each dir's final name, ignoring case.
+    Alpha,
+    /// By path, so dirs in the same part of the tree sit together.
+    Proximity,
+    /// The order the user dragged them into; see [State::bookmark_order].
+    Custom,
+}
 
 /// Bookmarks column. Narrower than the other side columns: bookmark paths are
 /// truncated (to [DEFAULT_DIR_LABEL_LEN] chars unless the user changes it), so
@@ -255,10 +268,8 @@ fn dir_label_chars<'a>(
 /// panels: whether each row shows the dir's path or just its final name. How
 /// many characters of it to show is in the Settings window. `what` names the
 /// panel's dirs, for the tooltips. Added to `ui`'s row, for the caller to lay
-/// out. Returns true if it changed.
-fn dir_label_mode_control(ui: &mut Ui, names: &mut bool, what: &str) -> bool {
-    let before = *names;
-
+/// out.
+fn dir_label_mode_control(ui: &mut Ui, names: &mut bool, what: &str) {
     ui.selectable_value(names, false, "Paths")
         .on_hover_text(format!(
             "Show each {what}'s path, e.g. ~/code/Bio/molchanica"
@@ -268,8 +279,6 @@ fn dir_label_mode_control(ui: &mut Ui, names: &mut bool, what: &str) -> bool {
         .on_hover_text(format!(
             "Show just each {what}'s final name, e.g. molchanica"
         ));
-
-    *names != before
 }
 
 /// Width of a (non-small) button labelled `text`, padding included.
@@ -428,12 +437,7 @@ fn bookmark_drop_slot(rows: &[(usize, Rect)], pos: Pos2, gap: f32) -> Option<(us
 pub(super) fn dir_bookmarks(state: &mut State, ui: &mut Ui) {
     ui::panel_header(ui, "Bookmarks", &mut state.ui.panel_vis.bookmarks);
 
-    let names_changed = ui
-        .horizontal(|ui| dir_label_mode_control(ui, &mut state.bookmark_names, "bookmark"))
-        .inner;
-    if names_changed {
-        let _ = state.save();
-    }
+    ui.horizontal(|ui| dir_label_mode_control(ui, &mut state.bookmark_names, "bookmark"));
 
     if let Some(sort) = bookmark_sort_control(ui, state.bookmark_sort) {
         state.set_bookmark_sort(sort);
@@ -564,22 +568,13 @@ pub(super) fn dir_history(state: &mut State, ui: &mut Ui) {
     ui::panel_header(ui, "Recent dirs", &mut state.ui.panel_vis.recent_dirs);
 
     // The search box shares the selector's row, as much of it as that leaves.
-    let (names_changed, searched) = ui
+    let searched = ui
         .horizontal_wrapped(|ui| {
-            let names_changed =
-                dir_label_mode_control(ui, &mut state.recent_dir_names, "recent dir");
-            let searched = search::inline_search_box(
-                ui,
-                &mut state.ui.recent_dirs_search,
-                "recent_dirs_search",
-            );
-            (names_changed, searched)
+            dir_label_mode_control(ui, &mut state.recent_dir_names, "recent dir");
+            search::inline_search_box(ui, &mut state.ui.recent_dirs_search, "recent_dirs_search")
         })
         .inner;
 
-    if names_changed {
-        let _ = state.save();
-    }
     if searched {
         state.refresh_recent_dirs_filter();
     }

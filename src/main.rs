@@ -14,6 +14,8 @@ mod files;
 mod markdown;
 mod path_color;
 mod path_env;
+mod placement;
+mod prefs;
 mod project;
 mod pty;
 mod remote;
@@ -243,21 +245,16 @@ fn main() {
     let state_path =
         save_data::default_path().unwrap_or_else(|| PathBuf::from(save_data::FILENAME));
 
-    let state = State::load(state_path).unwrap_or_default();
-
-    // Reopen at the size the user left the window, falling back to the
-    // built-in default when there's no saved size yet.
-    let inner_size = state
-        .window_size
-        .map(|ws| [ws.x, ws.y])
-        .unwrap_or([WINDOW_WIDTH, WINDOW_HEIGHT]);
+    let mut state = State::load(state_path).unwrap_or_default();
 
     let options = eframe::NativeOptions {
-        // Floor the window width at the central column's minimum so the side
-        // panels can always honor [MIN_CENTRAL_WIDTH]; below this the central
-        // panel would have nowhere left to keep its width.
+        // eframe reopens the window where the user left it (`persist_window`,
+        // on by default), so this size is only for the first run. Floor the
+        // window width at the central column's minimum so the side panels can
+        // always honor [MIN_CENTRAL_WIDTH]; below this the central panel
+        // would have nowhere left to keep its width.
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size(inner_size)
+            .with_inner_size([WINDOW_WIDTH, WINDOW_HEIGHT])
             .with_min_inner_size([MIN_CENTRAL_WIDTH, 200.])
             .with_icon(app_icon()),
         ..Default::default()
@@ -268,9 +265,10 @@ fn main() {
         options,
         Box::new(|cc| {
             ui::install_fonts(&cc.egui_ctx);
-            // Without a saved choice, egui follows the OS theme.
-            if let Some(dark) = state.dark_mode {
-                cc.egui_ctx.set_theme(state::theme(dark));
+            // eframe has already restored egui's memory, theme included:
+            // without a saved choice, egui follows the OS theme.
+            if let Some(storage) = cc.storage {
+                prefs::load(&mut state, storage);
             }
             Ok(Box::new(state))
         }),

@@ -17,7 +17,7 @@ use egui::{
     Button, Color32, Context, Event, Id, Key, KeyboardShortcut, Modal, Modifiers, RichText,
     ScrollArea, TextEdit, TextStyle, Ui, ViewportCommand, os::OperatingSystem,
 };
-use shell::ScratchpadTab;
+use serde::{Deserialize, Serialize};
 
 use super::{
     line_edit::{self, Edit, LineKey},
@@ -56,6 +56,18 @@ const TAB_MODES: [(ScratchpadTab, &str, &str); 3] = [
 /// The text box's.
 pub(super) fn edit_id() -> Id {
     Id::new("scratchpad_text")
+}
+
+/// What Tab does in the scratchpad.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ScratchpadTab {
+    /// Inserts a tab character.
+    #[default]
+    Tab,
+    /// Inserts [INDENT].
+    Spaces,
+    /// Moves the keyboard to the CLI input, as Tab does elsewhere.
+    FocusTerm,
 }
 
 #[derive(Default)]
@@ -137,7 +149,6 @@ pub(super) fn draw(state: &mut State, ui: &mut Ui) {
 
     if let Some(tab) = tab_mode_control(ui, state.ui.scratchpad.tab) {
         state.ui.scratchpad.tab = tab;
-        let _ = state.save();
         // Back to the text, from the button.
         ctx.memory_mut(|m| m.request_focus(id));
     }

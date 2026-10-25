@@ -39,7 +39,6 @@ pub fn cmd_history(state: &mut State, ui: &mut Ui) {
 
     if toggled {
         state.cmd_history_show_dir = !show_dir;
-        let _ = state.save();
     }
     if searched {
         state.refresh_history_filter();

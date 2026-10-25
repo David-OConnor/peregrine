@@ -6,7 +6,7 @@ use egui::{
     Area, CentralPanel, Color32, DragAndDrop, Frame, Id, LayerId, Order, Panel, Rect, RichText,
     Sense, Stroke, Ui, Visuals, pos2, vec2,
 };
-use shell::{PanelVis, PanelWidths};
+use serde::{Deserialize, Serialize};
 
 use super::{
     BROWSER_COL_WIDTH, CWD_HIST_COL_WIDTH, REMOTE_COL_WIDTH, RIGHT_COL_WIDTH, central_reserve,
@@ -15,8 +15,7 @@ use super::{
 };
 use crate::state::State;
 
-/// The Clipboard pane's width until it's dragged. Not saved, unlike the
-/// others'.
+/// The Clipboard pane's width until it's dragged.
 const CLIPBOARD_COL_WIDTH: f32 = 260.;
 
 /// Height of the strip across the top of each pane that the user drags it
@@ -27,6 +26,39 @@ const GRIP_HEIGHT: f32 = 8.;
 const GRIP_DOTS: usize = 6;
 const GRIP_DOT_GAP: f32 = 4.;
 const GRIP_DOT_RADIUS: f32 = 1.;
+
+/// Which panes, and the PATH window, are shown.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PanelVis {
+    pub bookmarks: bool,
+    pub recent_dirs: bool,
+    pub recent_cmds: bool,
+    pub recent_cmds_in_dir: bool,
+    pub remote_terminals: bool,
+    pub file_browser: bool,
+    pub path_editor: bool,
+    pub clipboard: bool,
+    pub scratchpad: bool,
+    pub terminal: bool,
+}
+
+impl Default for PanelVis {
+    fn default() -> Self {
+        Self {
+            bookmarks: true,
+            recent_dirs: true,
+            recent_cmds: true,
+            recent_cmds_in_dir: true,
+            remote_terminals: false,
+            file_browser: true,
+            path_editor: false,
+            clipboard: false,
+            scratchpad: false,
+            terminal: true,
+        }
+    }
+}
 
 /// One of the main window's panes. Its show/hide flag is in [PanelVis].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,8 +88,8 @@ impl Pane {
         Self::Scratchpad,
     ];
 
-    /// The name the state file's `PANE_ORDER` line stores it under: its
-    /// [PanelVis] key.
+    /// The name its place in the saved order is stored under (see
+    /// [order_keys]).
     fn key(self) -> &'static str {
         match self {
             Self::Bookmarks => "bookmarks",
@@ -106,22 +138,7 @@ impl Pane {
         *self.visible_mut(&mut vis)
     }
 
-    /// Its saved width, for the panes that save one. The terminal takes
-    /// whatever width the side panes leave.
-    fn width_mut(self, widths: &mut PanelWidths) -> Option<&mut Option<f32>> {
-        match self {
-            Self::Bookmarks => Some(&mut widths.bookmarks),
-            Self::RecentDirs => Some(&mut widths.recent_dirs),
-            Self::Files => Some(&mut widths.file_browser),
-            Self::Remote => Some(&mut widths.remote_terminals),
-            Self::CmdsThisDir => Some(&mut widths.recent_cmds_in_dir),
-            Self::RecentCmds => Some(&mut widths.recent_cmds),
-            Self::Scratchpad => Some(&mut widths.scratchpad),
-            Self::Terminal | Self::Clipboard => None,
-        }
-    }
-
-    /// Its width as a side panel, until one is saved.
+    /// Its width as a side panel, until it's dragged.
     fn default_width(self) -> f32 {
         match self {
             Self::Bookmarks => dirs::BOOKMARK_COL_WIDTH,
@@ -137,7 +154,7 @@ impl Pane {
         }
     }
 
-    /// Its egui panel's id, which egui keeps its live width under.
+    /// Its egui panel's id, which egui keeps (and saves) its width under.
     fn panel_id(self) -> &'static str {
         match self {
             Self::Bookmarks => "bookmarks_panel",
@@ -180,7 +197,7 @@ pub fn order_from_keys(keys: &[String]) -> [Pane; 9] {
     order.try_into().unwrap_or(Pane::DEFAULT_ORDER)
 }
 
-/// `order` as the state file's `PANE_ORDER` line stores it.
+/// `order` as [crate::prefs] saves it.
 pub fn order_keys(order: &[Pane]) -> Vec<String> {
     order.iter().map(|p| p.key().to_owned()).collect()
 }
@@ -264,14 +281,10 @@ pub(super) fn draw(state: &mut State, ui: &mut Ui) {
     follow_drag(state, ui, &rects);
 }
 
-/// `pane` as a resizable side panel, on the left or right, at its saved
-/// width (falling back to its default). Records the width it was drawn at,
-/// so `save` persists drags. Returns where it was drawn.
+/// `pane` as a resizable side panel, on the left or right, at the width it
+/// was dragged to (egui keeps that, between runs too), or its default.
+/// Returns where it was drawn.
 fn side_panel(state: &mut State, ui: &mut Ui, pane: Pane, left: bool) -> Rect {
-    let width = pane
-        .width_mut(&mut state.ui.panel_widths)
-        .and_then(|w| *w)
-        .unwrap_or_else(|| pane.default_width());
     let panel = if left {
         Panel::left(pane.panel_id())
     } else {
@@ -281,7 +294,7 @@ fn side_panel(state: &mut State, ui: &mut Ui, pane: Pane, left: bool) -> Rect {
     let max = central_reserve(ui, f32::INFINITY);
     let r = panel
         .resizable(true)
-        .default_size(width)
+        .default_size(pane.default_width())
         .max_size(max)
         .show(ui, |ui| {
             // The side panels' text follows the "GUI font size" control.
@@ -289,9 +302,7 @@ fn side_panel(state: &mut State, ui: &mut Ui, pane: Pane, left: bool) -> Rect {
             grip(ui, pane);
             contents(state, ui, pane);
         });
-    if let Some(w) = pane.width_mut(&mut state.ui.panel_widths) {
-        *w = Some(r.response.rect.width());
-    }
+
     r.response.rect
 }
 
@@ -406,7 +417,6 @@ fn follow_drag(state: &mut State, ui: &Ui, rects: &[(Pane, Rect)]) {
             let before = others.get(slot).map(|o| o.0);
             let after = slot.checked_sub(1).and_then(|i| others.get(i)).map(|o| o.0);
             move_pane(&mut state.ui.pane_order, pane, before, after);
-            let _ = state.save();
         }
         return;
     }

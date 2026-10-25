@@ -21,7 +21,7 @@ use std::{
 
 use egui::{
     Button, CentralPanel, Color32, ColorImage, Context, Frame, Id, Key, Margin, Modal, Modifiers,
-    Panel, Pos2, Rect, RichText, ScrollArea, Sense, Shape, TextEdit, TextStyle, TextureFilter,
+    Panel, Rect, RichText, ScrollArea, Sense, Shape, TextEdit, TextStyle, TextureFilter,
     TextureHandle, TextureOptions, Ui, UiBuilder, Vec2, ViewportBuilder, ViewportCommand,
     ViewportId, emath::GuiRounding, pos2, scroll_area, vec2,
 };
@@ -34,6 +34,7 @@ use image::{
 use crate::{
     files::{format_size, open_with_default_app},
     markdown::{self, Block, Details, is_markdown},
+    placement::Placement,
     ui::terminal::{TOGGLE_BOOKMARK, take_shortcut},
 };
 
@@ -159,6 +160,7 @@ struct Inner {
     /// `true` opens it in edit mode.
     to_open: Vec<(PathBuf, bool)>,
     /// Where a viewer window last moved or resized to: new ones open there.
+    /// Saved between runs.
     placement: Option<Placement>,
     /// One Markdown cache for every window: building it loads syntect's
     /// syntax and theme sets, so it's created on the first Markdown open, not
@@ -214,37 +216,6 @@ struct Doc {
     opened_at: Option<Placement>,
     /// Where the window was last seen, to notice it moving or resizing.
     placement: Option<Placement>,
-}
-
-/// A viewer window's place on screen, in points.
-#[derive(Clone, Copy, PartialEq)]
-struct Placement {
-    /// The outer frame's top left.
-    pos: Pos2,
-    /// The content area's size.
-    size: Vec2,
-}
-
-impl Placement {
-    /// The current viewport's placement. `None` while minimized, maximized
-    /// or full screen: new windows shouldn't open like that.
-    fn of(ctx: &Context) -> Option<Self> {
-        ctx.input(|i| {
-            let info = i.viewport();
-            let special = [info.minimized, info.maximized, info.fullscreen];
-            if special.contains(&Some(true)) {
-                return None;
-            }
-            let size = info.inner_rect?.size();
-            if size.x <= 0. || size.y <= 0. {
-                return None;
-            }
-            Some(Self {
-                pos: info.outer_rect?.min,
-                size,
-            })
-        })
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -836,6 +807,16 @@ impl FileViewers {
         std::mem::take(&mut self.lock().bookmark_key)
     }
 
+    /// Where new windows open: where one was last moved or resized to.
+    pub fn placement(&self) -> Option<Placement> {
+        self.lock().placement
+    }
+
+    /// Set where new windows open, e.g. as saved by the last run.
+    pub fn set_placement(&self, placement: Option<Placement>) {
+        self.lock().placement = placement;
+    }
+
     fn lock(&self) -> MutexGuard<'_, Inner> {
         lock(&self.inner)
     }
@@ -908,7 +889,7 @@ impl Inner {
         let id = ViewportId::from_hash_of(("file_viewer", self.next_id));
         self.next_id += 1;
         let mut doc = Doc::new(ctx, id, path, kind);
-        doc.opened_at = self.placement;
+        doc.opened_at = self.placement.map(|p| p.on_screen(ctx));
         if edit && doc.can_edit() {
             doc.start_editing(ctx);
         }
@@ -1187,11 +1168,12 @@ fn toolbar(doc: &mut Doc, ui: &mut Ui, window: ViewportId) {
                 {
                     doc.save(ui.ctx());
                 }
-                if ui
-                    .button("Discard edits")
-                    .on_hover_text("Discard the draft and return to View mode")
-                    .clicked()
-                {
+                let (label, hover) = if doc.dirty() {
+                    ("Discard edits", "Discard the draft and return to View mode")
+                } else {
+                    ("View only mode", "Return to View mode")
+                };
+                if ui.button(label).on_hover_text(hover).clicked() {
                     doc.perform(ui.ctx(), Action::View);
                 }
                 if doc.dirty() {

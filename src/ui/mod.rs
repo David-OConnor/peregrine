@@ -89,7 +89,7 @@ const BOLD_FAMILY: &str = "bold";
 
 /// A side panel's title row: the heading on the left and a small `x` on the
 /// right that hides the panel — the same as unticking it in the "Panels:" row
-/// (see [panel_toggles]). `visible` is that panel's [shell::PanelVis] flag.
+/// (see [panel_toggles]). `visible` is that panel's [panes::PanelVis] flag.
 fn panel_header(ui: &mut Ui, title: &str, visible: &mut bool) {
     ui.horizontal(|ui| {
         ui.heading(title);
@@ -387,9 +387,8 @@ impl Divider {
     /// Make the top edge of `pane`, the details pane as drawn, draggable:
     /// highlighted while hovered or dragged, as an egui panel's edge is.
     /// Once a drag ends, sets `split` to where the pane was left (within
-    /// the limits [Self::height] set) and returns `true`, for the caller to
-    /// save it.
-    pub fn end(self, ui: &Ui, pane: Rect, split: &mut f32) -> bool {
+    /// the limits [Self::height] set).
+    pub fn end(self, ui: &Ui, pane: Rect, split: &mut f32) {
         let grab = ui.style().interaction.resize_grab_radius_side;
         let y = pane.top();
         let rect = Rect::from_x_y_ranges(pane.x_range(), egui::Rangef::new(y - grab, y + grab));
@@ -410,10 +409,7 @@ impl Divider {
 
         if resp.drag_stopped() {
             *split = self.fraction(pane.height());
-            return true;
         }
-
-        false
     }
 
     /// `height` as a fraction of the panel's.
@@ -647,7 +643,7 @@ fn selection_details(s: &SelectionSummary, home: Option<&Path>, ui: &mut Ui) {
 /// each sits where its pane does, then the PATH window's. Lives in the
 /// top tabs panel (rendered next to the tab strip) so that even when
 /// every pane is hidden, the user still has a way to bring one
-/// back. Each toggle reads from / writes back to [PanelVis] on the
+/// back. Each toggle reads from / writes back to [panes::PanelVis] on the
 /// active StateUi.
 fn panel_toggles(state: &mut State, ui: &mut Ui) {
     ui.horizontal(|ui| {
@@ -668,21 +664,6 @@ fn panel_toggles(state: &mut State, ui: &mut Ui) {
         ui.add_space(PATH_TOGGLE_GAP);
         ui.toggle_value(&mut v.path_editor, "PATH");
     });
-}
-
-/// Field-by-field equality so a toggle change triggers a save without
-/// adding PartialEq derives on the upstream struct.
-fn panel_vis_eq(a: &shell::PanelVis, b: &shell::PanelVis) -> bool {
-    a.bookmarks == b.bookmarks
-        && a.recent_dirs == b.recent_dirs
-        && a.recent_cmds == b.recent_cmds
-        && a.recent_cmds_in_dir == b.recent_cmds_in_dir
-        && a.remote_terminals == b.remote_terminals
-        && a.file_browser == b.file_browser
-        && a.path_editor == b.path_editor
-        && a.clipboard == b.clipboard
-        && a.scratchpad == b.scratchpad
-        && a.terminal == b.terminal
 }
 
 /// Returns the requested change in font size, or zero when unchanged.
@@ -742,10 +723,6 @@ fn scale_panel_fonts(ui: &mut Ui, size: f32) {
 }
 
 pub fn draw(state: &mut State, ui: &mut Ui) {
-    // Snapshot panel visibility so a change from the "Panels:" toggles, a
-    // panel's own close button, or the clipboard shortcut (handled by
-    // `capture`) is persisted at the end of the frame.
-    let vis_before = state.ui.panel_vis;
     if state.egui_ctx.is_none() {
         state.egui_ctx = Some(ui.ctx().clone());
     }
@@ -801,19 +778,7 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
         panel_toggles(state, ui);
     });
 
-    // Each side panel opens at its saved width (falling back to its default)
-    // and records the width it was drawn at, so `save` persists drags.
-    let prev = state.ui.panel_widths;
     panes::draw(state, ui);
-
-    // A width that changed while the pointer is held is a drag on a panel
-    // edge. Saved once released (below) rather than every frame of the drag.
-    // Changes without a drag (a panel clamped as the window narrows) ride
-    // along with the next save, like the window size.
-    let pointer_down = ui.input(|i| i.pointer.any_down());
-    if pointer_down && state.ui.panel_widths != prev {
-        state.ui.panel_widths_unsaved = true;
-    }
 
     // File viewer windows are child viewports: they only stay open while
     // the main window's pass keeps showing them.
@@ -835,17 +800,12 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
         ui.ctx().request_repaint();
     }
 
-    // Persist on any change so the layout, clipboard history and scratchpad
-    // survive restart.
-    let drag_done = state.ui.panel_widths_unsaved && !pointer_down;
+    // Persist on any change so the clipboard history and scratchpad survive
+    // restart. (The layout and settings are saved by eframe; see
+    // [crate::prefs].)
     let clipboard_changed = std::mem::take(&mut state.ui.clipboard.history.unsaved);
     let scratchpad_due = state.ui.scratchpad.save_due(ui.ctx());
-    if drag_done
-        || clipboard_changed
-        || scratchpad_due
-        || !panel_vis_eq(&vis_before, &state.ui.panel_vis)
-    {
-        state.ui.panel_widths_unsaved = false;
+    if clipboard_changed || scratchpad_due {
         let _ = state.save();
     }
 }

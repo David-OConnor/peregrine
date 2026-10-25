@@ -30,24 +30,19 @@ fn dir_depth_control(ui: &mut Ui) -> i32 {
 }
 
 /// A [DragValue] for a Bookmarks / Recent dirs path length. Updates `len`
-/// live, clamped to [MIN_DIR_LABEL_LEN]..=[MAX_DIR_LABEL_LEN]. Returns true
-/// once a change is complete (a finished drag, or a committed edit), so the
-/// caller can persist it without saving on every frame of a drag. `what`
-/// names the panel's paths, for the tooltip.
-fn dir_label_len_control(ui: &mut Ui, len: &mut usize, what: &str) -> bool {
-    let resp = ui
-        .add(
-            DragValue::new(len)
-                .range(MIN_DIR_LABEL_LEN..=MAX_DIR_LABEL_LEN)
-                .speed(0.25)
-                .update_while_editing(false),
-        )
-        .on_hover_text(format!(
-            "Max characters of {what} paths to show; longer ones are cut from the \
-             front. Drag, or click to type."
-        ));
-
-    (resp.changed() && !resp.dragged()) || resp.drag_stopped()
+/// live, clamped to [MIN_DIR_LABEL_LEN]..=[MAX_DIR_LABEL_LEN]. `what` names
+/// the panel's paths, for the tooltip.
+fn dir_label_len_control(ui: &mut Ui, len: &mut usize, what: &str) {
+    ui.add(
+        DragValue::new(len)
+            .range(MIN_DIR_LABEL_LEN..=MAX_DIR_LABEL_LEN)
+            .speed(0.25)
+            .update_while_editing(false),
+    )
+    .on_hover_text(format!(
+        "Max characters of {what} paths to show; longer ones are cut from the \
+         front. Drag, or click to type."
+    ));
 }
 
 pub(super) fn show(state: &mut State, ctx: &Context) {
@@ -56,7 +51,6 @@ pub(super) fn show(state: &mut State, ctx: &Context) {
     }
 
     let mut dir_depth_delta = 0;
-    let mut save = false;
 
     // Keep the close button's flag separate while the contents borrow state.
     let mut open = true;
@@ -77,15 +71,13 @@ pub(super) fn show(state: &mut State, ctx: &Context) {
                     dir_depth_delta = dir_depth_control(ui);
                     ui.end_row();
 
-                    // Applied every frame so the panels follow a drag live;
-                    // saved once done.
+                    // Applied every frame so the panels follow a drag live.
                     ui.label("Bookmarks chars:");
-                    save |= dir_label_len_control(ui, &mut state.bookmark_label_len, "bookmark");
+                    dir_label_len_control(ui, &mut state.bookmark_label_len, "bookmark");
                     ui.end_row();
 
                     ui.label("Recent dirs chars:");
-                    save |=
-                        dir_label_len_control(ui, &mut state.recent_dir_label_len, "recent dir");
+                    dir_label_len_control(ui, &mut state.recent_dir_label_len, "recent dir");
                     ui.end_row();
                 });
         });
@@ -93,9 +85,5 @@ pub(super) fn show(state: &mut State, ctx: &Context) {
 
     if dir_depth_delta != 0 {
         state.adjust_dir_color_depth(dir_depth_delta);
-    }
-
-    if save {
-        let _ = state.save();
     }
 }

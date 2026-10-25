@@ -441,7 +441,6 @@ pub(super) fn draw(state: &mut State, ui: &mut Ui) {
 
     if filters_changed {
         state.refresh_browser_files();
-        let _ = state.save();
     }
 
     if let Some(sort) = new_sort {
@@ -624,9 +623,7 @@ pub(super) fn draw(state: &mut State, ui: &mut Ui) {
     }
 
     // After the list, so the divider is on top of it for the pointer.
-    if divider.end(ui, details.response.rect, &mut state.ui.files_details_split) {
-        let _ = state.save();
-    }
+    divider.end(ui, details.response.rect, &mut state.ui.files_details_split);
 
     drag_preview(ui);
     drag_out(state, ui);

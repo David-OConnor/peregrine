@@ -7,11 +7,9 @@ use std::{
 
 use chrono::Utc;
 use shell::{
-    Appearance, BookmarkSort, BookmarkView, BrowserFile, CmdHistoryPrefs, CompletionSources,
-    DirLabelLens, DirList, FilesPanelPrefs, FontSizes, HintCache, HistoryItem, InputHint, NavState,
-    OpenTabs, PaneSplits, PanelVis, PanelWidths, RecentDir, RemoteTerminal, ScratchpadPrefs,
-    WindowSize, apply_completion, complete_input, current_branch, dir_missing, get_home,
-    read_browser_files, remove_missing_recent_dirs, remove_saved_dir, save_data,
+    BrowserFile, CompletionSources, DirList, HintCache, HistoryItem, InputHint, NavState, OpenTabs,
+    RecentDir, RemoteTerminal, apply_completion, complete_input, current_branch, dir_missing,
+    get_home, read_browser_files, remove_missing_recent_dirs, remove_saved_dir, save_data,
     ssh::{self, ConnectError, ConnectRequest, secrets},
     stale_dir_list, truncate_branch,
 };
@@ -24,15 +22,16 @@ use crate::{
     deep_search::{self, DeepSearch},
     drag_out,
     files::{Delete, FileDetails, FileSort, SelectionSummary, sort_browser_files},
-    path_color,
+    path_color, prefs,
     project::{Branches, Project},
     remote::{LiveRemote, Remote},
     running::RunningCmd,
     terminal::{self, Output},
     ui::{
         self,
-        panes::{self, Pane},
-        path_panel::PathPanel,
+        dirs::BookmarkSort,
+        panes::{Pane, PanelVis},
+        path_panel::{PathPanel, PathWindow},
     },
     viewer::{FileViewers, ImagePreview},
 };
@@ -108,14 +107,6 @@ pub struct StateUi {
     pub panel_vis: PanelVis,
     /// The panes, left to right. See [ui::panes].
     pub pane_order: [Pane; 9],
-    /// Each side panel's width as drawn last frame (`None` until it's first
-    /// shown, when nothing was saved). Persisted so the panels reopen at the
-    /// widths the user dragged them to; the saved value seeds the panel's
-    /// `default_size`, after which egui owns the live width.
-    pub panel_widths: PanelWidths,
-    /// Set while a panel edge drag has changed `panel_widths` without a save
-    /// yet; `ui::draw` saves once the pointer is released.
-    pub panel_widths_unsaved: bool,
 
     /// Per-tab browser-style back/forward navigation stacks (parallel to
     /// `State::cwd`). `nav_back` holds dirs we can return to (most recent on
@@ -131,7 +122,7 @@ pub struct StateUi {
     pub stale_dir: Option<(PathBuf, DirList)>,
 
     /// Files-panel listing filters, toggled independently by the buttons
-    /// above the listing; not persisted. `show_hidden_attr` covers entries
+    /// above the listing; persisted. `show_hidden_attr` covers entries
     /// with the Windows Hidden attribute ([BrowserFile::hidden_attr]);
     /// `show_dotfiles` covers names starting with `.`.
     pub show_hidden_attr: bool,
@@ -183,6 +174,8 @@ pub struct StateUi {
     /// likewise for the PATH window's; see [ui::Divider]. Persisted.
     pub files_details_split: f32,
     pub path_details_split: f32,
+    /// Where the PATH window is, and opens. Persisted.
+    pub path_window: PathWindow,
     /// Files-panel Deep search text, looked for in the contents (or names)
     /// of every file under the listed dir (see [State::start_deep_search]).
     /// Empty = off, and the panel lists the dir as usual. Cleared on cd,
@@ -301,8 +294,6 @@ impl Default for StateUi {
             history_nav: vec![NavState::new()],
             panel_vis: PanelVis::default(),
             pane_order: Pane::DEFAULT_ORDER,
-            panel_widths: PanelWidths::default(),
-            panel_widths_unsaved: false,
             nav_back: vec![Vec::new()],
             nav_forward: vec![Vec::new()],
             stale_dir: None,
@@ -324,6 +315,7 @@ impl Default for StateUi {
             files_drag_out: None,
             files_details_split: ui::DEFAULT_DETAILS_SPLIT,
             path_details_split: ui::DEFAULT_DETAILS_SPLIT,
+            path_window: PathWindow::default(),
             deep_search: String::new(),
             deep_search_edited: None,
             deep_search_opts: deep_search::Options::default(),
@@ -479,13 +471,9 @@ pub struct State {
     /// group. Read when it's first drawn after `refresh_branch` drops them
     /// (see [Self::load_git_branches]).
     pub git_branches: Option<Branches>,
-    /// Last observed window size, refreshed every frame from the viewport so
-    /// `save` persists the size the user left the window at. `None` until the
-    /// first frame reports a size (and on a fresh file with no saved value).
-    pub window_size: Option<WindowSize>,
     /// Font size (in points) for the terminal input/output panes, adjusted via
-    /// the "CLI font size" +/- buttons on the tab strip and persisted to the
-    /// state file.
+    /// the "CLI font size" +/- buttons on the tab strip and persisted (see
+    /// [prefs]), as are the settings below.
     pub font_size: f32,
     /// Body-text size (in points) for the side panels, adjusted via the "GUI
     /// font size" +/- buttons and persisted alongside `font_size`. The panels'
@@ -504,15 +492,14 @@ pub struct State {
     /// How the Bookmarks panel orders its rows, picked at its top. Persisted.
     pub bookmark_sort: BookmarkSort,
     /// The order the user dragged the bookmarks into, for
-    /// [BookmarkSort::Custom]; see [BookmarkView::order]. Empty until the
-    /// first drag. Persisted.
+    /// [BookmarkSort::Custom]. Empty until the first drag. Persisted to the
+    /// state file. It can name bookmarks since removed, and miss ones added
+    /// since (e.g. by the CLI's Ctrl+B); the panel skips the first and puts
+    /// the second last.
     pub bookmark_order: Vec<PathBuf>,
     /// Whether each Cmd history row shows the "In <dir>" button that re-runs
     /// it where it was first run. Off by default; persisted.
     pub cmd_history_show_dir: bool,
-    /// Whether the window is dark, set by the theme button on the tab strip.
-    /// `None` until first toggled, meaning follow the OS theme. Persisted.
-    pub dark_mode: Option<bool>,
     /// Open Markdown and text viewer windows (double-clicked in the Files
     /// panel).
     /// Not persisted.
@@ -525,14 +512,6 @@ pub struct State {
     /// The main window, for handing Files rows dragged out of it to the OS
     /// (see [crate::drag_out]). Set by the first frame, where that's done.
     pub main_window: Option<drag_out::Window>,
-}
-
-/// A saved Bookmarks / Recent dirs path length, or the default when none was
-/// saved, clamped to the range the panels' controls allow.
-fn dir_label_len(saved: Option<usize>) -> usize {
-    saved
-        .unwrap_or(ui::dirs::DEFAULT_DIR_LABEL_LEN)
-        .clamp(ui::dirs::MIN_DIR_LABEL_LEN, ui::dirs::MAX_DIR_LABEL_LEN)
 }
 
 impl Default for State {
@@ -565,7 +544,6 @@ impl Default for State {
                 .unwrap_or_else(|| PathBuf::from(save_data::FILENAME)),
             branch: vec![branch],
             git_branches: None,
-            window_size: None,
             font_size: ui::DEFAULT_FONT_SIZE,
             gui_font_size: ui::DEFAULT_GUI_FONT_SIZE,
             bookmark_label_len: ui::dirs::DEFAULT_DIR_LABEL_LEN,
@@ -575,7 +553,6 @@ impl Default for State {
             bookmark_sort: ui::dirs::DEFAULT_BOOKMARK_SORT,
             bookmark_order: Vec::new(),
             cmd_history_show_dir: false,
-            dark_mode: None,
             file_viewers: FileViewers::default(),
             path_panel: PathPanel::default(),
             egui_ctx: None,
@@ -1299,6 +1276,8 @@ impl State {
         (n.his_cursor, n.cd_cursor)
     }
 
+    /// Write the state file shared with the CLI. The GUI's settings and
+    /// layout aren't in it; see [prefs].
     pub fn save(&self) -> io::Result<()> {
         // Persist the current tab layout (each tab's cwd, in order, plus the
         // active index) so reopening the GUI restores the same tabs.
@@ -1312,102 +1291,41 @@ impl State {
             &self.history,
             &self.remote_terminals,
             &self.clone_roots,
-            &self.ui.panel_vis,
-            self.window_size,
             &open_tabs,
-            FontSizes {
-                cli: Some(self.font_size),
-                gui: Some(self.gui_font_size),
-            },
-            DirLabelLens {
-                bookmarks: Some(self.bookmark_label_len),
-                recent_dirs: Some(self.recent_dir_label_len),
-                bookmark_names: Some(self.bookmark_names),
-                recent_dir_names: Some(self.recent_dir_names),
-            },
-            &BookmarkView {
-                sort: Some(self.bookmark_sort),
-                order: self.bookmark_order.clone(),
-            },
-            self.ui.panel_widths,
-            FilesPanelPrefs {
-                show_hidden: Some(self.ui.show_hidden_attr),
-                show_dotfiles: Some(self.ui.show_dotfiles),
-                deep_search_names: Some(self.ui.deep_search_opts.file_names),
-            },
-            PaneSplits {
-                files: Some(self.ui.files_details_split),
-                path: Some(self.ui.path_details_split),
-            },
-            CmdHistoryPrefs {
-                show_dir: Some(self.cmd_history_show_dir),
-            },
-            Appearance {
-                dark_mode: self.dark_mode,
-                dir_color_depth: Some(path_color::depth_levels()),
-            },
+            &self.bookmark_order,
             &self.ui.clipboard.history.entries,
             &self.ui.scratchpad.text,
-            ScratchpadPrefs {
-                tab: Some(self.ui.scratchpad.tab),
-            },
-            &panes::order_keys(&self.ui.pane_order),
             &self.state_path,
         )
     }
 
     /// Adjust the terminal-pane font size by `delta` points, clamped to a
-    /// sane range, and persist the change. Wired to the "CLI font size"
-    /// drag control on the tab strip.
+    /// sane range. Wired to the "CLI font size" drag control on the tab
+    /// strip.
     pub fn adjust_font_size(&mut self, delta: f32) {
-        let next = (self.font_size + delta).clamp(ui::MIN_FONT_SIZE, ui::MAX_FONT_SIZE);
-        if next != self.font_size {
-            self.font_size = next;
-            let _ = self.save();
-        }
+        self.font_size = (self.font_size + delta).clamp(ui::MIN_FONT_SIZE, ui::MAX_FONT_SIZE);
     }
 
     /// As [Self::adjust_font_size], for the side panels' "GUI font size".
     pub fn adjust_gui_font_size(&mut self, delta: f32) {
-        let next = (self.gui_font_size + delta).clamp(ui::MIN_FONT_SIZE, ui::MAX_FONT_SIZE);
-        if next != self.gui_font_size {
-            self.gui_font_size = next;
-            let _ = self.save();
-        }
+        self.gui_font_size =
+            (self.gui_font_size + delta).clamp(ui::MIN_FONT_SIZE, ui::MAX_FONT_SIZE);
     }
 
     /// Step how many directory levels the path colors take to go from
-    /// purple to yellow (see [path_color::depth_levels]) by `delta`, and
-    /// persist the change. Wired to the "Dir color depth" control in the
-    /// Settings window.
+    /// purple to yellow (see [path_color::depth_levels]) by `delta`. Wired
+    /// to the "Dir color depth" control in the Settings window.
     pub fn adjust_dir_color_depth(&mut self, delta: i32) {
         let cur = path_color::depth_levels();
         let next = (cur as i32 + delta).clamp(
             path_color::MIN_DEPTH_LEVELS as i32,
             path_color::MAX_DEPTH_LEVELS as i32,
         ) as u8;
-        if next != cur {
-            path_color::set_depth_levels(next);
-            let _ = self.save();
-        }
-    }
-
-    /// Switch the window between dark and light, and persist the choice.
-    /// Wired to the theme button on the tab strip.
-    pub fn set_dark_mode(&mut self, ctx: &egui::Context, dark: bool) {
-        self.dark_mode = Some(dark);
-        ctx.set_theme(theme(dark));
-        let _ = self.save();
+        path_color::set_depth_levels(next);
     }
 
     pub fn load(path: PathBuf) -> io::Result<Self> {
         let loaded = save_data::load_state(&path)?;
-        path_color::set_depth_levels(
-            loaded
-                .appearance
-                .dir_color_depth
-                .unwrap_or(path_color::DEFAULT_DEPTH_LEVELS),
-        );
 
         // Restore the saved tabs. Drop any whose directory no longer exists
         // (it may have been deleted or renamed since the last run); if none
@@ -1433,18 +1351,6 @@ impl State {
         let branch = cwd.iter().map(|c| current_branch(c)).collect();
 
         let mut ui = StateUi::default();
-        ui.panel_vis = loaded.panel_vis;
-        ui.pane_order = panes::order_from_keys(&loaded.pane_order);
-        ui.panel_widths = loaded.panel_widths;
-        let prefs = loaded.files_panel;
-        ui.show_hidden_attr = prefs.show_hidden.unwrap_or(ui.show_hidden_attr);
-        ui.show_dotfiles = prefs.show_dotfiles.unwrap_or(ui.show_dotfiles);
-        ui.deep_search_opts.file_names = prefs
-            .deep_search_names
-            .unwrap_or(ui.deep_search_opts.file_names);
-        let splits = loaded.pane_splits;
-        ui.files_details_split = splits.files.unwrap_or(ui.files_details_split);
-        ui.path_details_split = splits.path.unwrap_or(ui.path_details_split);
         ui.active_tab = active_tab;
         ui.cli_input = vec![String::new(); n];
         ui.out = (0..n).map(|_| Output::default()).collect();
@@ -1453,7 +1359,6 @@ impl State {
         ui.nav_forward = (0..n).map(|_| Vec::new()).collect();
         ui.clipboard.history = clipboard::History::from_saved(loaded.clipboard);
         ui.scratchpad.text = loaded.scratchpad;
-        ui.scratchpad.tab = loaded.scratchpad_prefs.tab.unwrap_or_default();
         // The OS clipboard most likely still holds the newest entry. Saying
         // so means the watcher's first look doesn't record it again with a
         // new time; if it holds something else, the watcher corrects this.
@@ -1486,20 +1391,17 @@ impl State {
             state_path: path,
             branch,
             git_branches: None,
-            window_size: loaded.window_size,
-            font_size: loaded.font_size.cli.unwrap_or(ui::DEFAULT_FONT_SIZE),
-            gui_font_size: loaded.font_size.gui.unwrap_or(ui::DEFAULT_GUI_FONT_SIZE),
-            bookmark_label_len: dir_label_len(loaded.dir_label_lens.bookmarks),
-            recent_dir_label_len: dir_label_len(loaded.dir_label_lens.recent_dirs),
-            bookmark_names: loaded.dir_label_lens.bookmark_names.unwrap_or(true),
-            recent_dir_names: loaded.dir_label_lens.recent_dir_names.unwrap_or(true),
-            bookmark_sort: loaded
-                .bookmark_view
-                .sort
-                .unwrap_or(ui::dirs::DEFAULT_BOOKMARK_SORT),
-            bookmark_order: loaded.bookmark_view.order,
-            cmd_history_show_dir: loaded.cmd_history.show_dir.unwrap_or(false),
-            dark_mode: loaded.appearance.dark_mode,
+            // The settings are applied later, from eframe's storage (see
+            // [prefs::load]).
+            font_size: ui::DEFAULT_FONT_SIZE,
+            gui_font_size: ui::DEFAULT_GUI_FONT_SIZE,
+            bookmark_label_len: ui::dirs::DEFAULT_DIR_LABEL_LEN,
+            recent_dir_label_len: ui::dirs::DEFAULT_DIR_LABEL_LEN,
+            bookmark_names: true,
+            recent_dir_names: true,
+            bookmark_sort: ui::dirs::DEFAULT_BOOKMARK_SORT,
+            bookmark_order: loaded.bookmark_order,
+            cmd_history_show_dir: false,
             file_viewers: FileViewers::default(),
             path_panel: PathPanel::default(),
             egui_ctx: None,
@@ -1734,11 +1636,10 @@ impl State {
         self.ui.bookmarks_sorted.get(n).copied()
     }
 
-    /// Order the Bookmarks panel by `sort`, and persist it.
+    /// Order the Bookmarks panel by `sort`.
     pub fn set_bookmark_sort(&mut self, sort: BookmarkSort) {
         self.bookmark_sort = sort;
         self.refresh_bookmarks_filter();
-        let _ = self.save();
     }
 
     /// Move the bookmark the Bookmarks panel shows as number `from` to `to`,
@@ -2625,19 +2526,6 @@ impl eframe::App for State {
         if self.main_window.is_none() {
             self.main_window = drag_out::Window::of(frame);
         }
-        // Track the current window size each frame so `save` (which runs on
-        // every command) and `on_exit` persist whatever size the user has
-        // dragged the window to. `inner_rect` is the content area in logical
-        // points — what we hand back to `with_inner_size` on the next launch.
-        if let Some(rect) = ui.ctx().input(|i| i.viewport().inner_rect) {
-            let size = rect.size();
-            if size.x > 0.0 && size.y > 0.0 {
-                self.window_size = Some(WindowSize {
-                    x: size.x,
-                    y: size.y,
-                });
-            }
-        }
         ui::draw(self, ui);
     }
 
@@ -2647,9 +2535,15 @@ impl eframe::App for State {
         drag_out::raw_input_hook(self.main_window, ctx, raw_input);
     }
 
-    /// Persist on close so a resize made without running any command (which
-    /// would otherwise be the only thing that triggers a save) still sticks.
-    /// Disambiguated to the inherent `save` — `eframe::App` also has a `save`.
+    /// The GUI's settings and layout, on exit and every 30s. eframe saves
+    /// the window's position and size and egui's memory alongside.
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        prefs::save(self, storage);
+    }
+
+    /// Persist the state file on close, so what's waiting on a delay (the
+    /// scratchpad's text) still sticks. Disambiguated to the inherent `save`
+    /// — `eframe::App` also has a `save`.
     fn on_exit(&mut self) {
         let _ = State::save(self);
         // Commands still running would otherwise carry on with nothing to

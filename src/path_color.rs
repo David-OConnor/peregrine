@@ -27,7 +27,8 @@ static DEPTH_LEVELS: AtomicU8 = AtomicU8::new(DEFAULT_DEPTH_LEVELS);
 
 /// How many levels below a root (or `~`) a directory is when its color
 /// reaches the yellow end of the scale. Set by the tab strip's "Dir depth"
-/// control (see `State::adjust_dir_color_depth`) and persisted with the theme.
+/// control (see `State::adjust_dir_color_depth`) and persisted (see
+/// [crate::prefs]).
 pub fn depth_levels() -> u8 {
     DEPTH_LEVELS.load(Ordering::Relaxed)
 }

@@ -7,7 +7,7 @@ param(
 # This file installs the application for the current user, and creates a Start menu entry.
 #
 # Install Peregrine in %LOCALAPPDATA%\Programs without administrator rights.
-# Bookmarks, history, and settings are shared with Shell in %USERPROFILE%\shell_state.ss.
+# Bookmarks and history are shared with Shell in %USERPROFILE%\shell_state.ss.
 #
 # Run it from the folder you extracted the release into, e.g. by double-clicking
 # setup_peregrine.bat, or with:
@@ -105,6 +105,6 @@ New-StartMenuEntry -Destination $InstallDirectory
 
 Write-Host ""
 Write-Host "$NAME_UPPER is installed in $InstallDirectory."
-Write-Host "Bookmarks, history, and settings are shared with Shell in %USERPROFILE%\shell_state.ss."
+Write-Host "Bookmarks and history are shared with Shell in %USERPROFILE%\shell_state.ss."
 Write-Host "You can launch it from the Start menu (e.g., search `"$NAME`"), and/or pin it to the taskbar."
 Write-Host ""

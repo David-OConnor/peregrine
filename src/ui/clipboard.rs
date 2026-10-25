@@ -100,7 +100,7 @@ pub struct ClipboardPane {
 impl ClipboardPane {
     /// egui-winit converts Ctrl+Shift+V presses to Paste (or emits nothing
     /// for a file/empty clipboard), but still forwards the V release.
-    /// `visible` is the pane's [shell::PanelVis] flag, toggled by it.
+    /// `visible` is the pane's [crate::ui::panes::PanelVis] flag, toggled by it.
     fn shortcut(
         &mut self,
         events: &mut Vec<Event>,

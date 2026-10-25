@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Install Peregrine in ~/peregrine and create a desktop entry for the current user.
-# Bookmarks, history, and settings are shared with Shell in ~/shell_state.ss.
+# Bookmarks and history are shared with Shell in ~/shell_state.ss.
 
 NAME_UPPER="Peregrine"
 NAME="peregrine"
@@ -43,5 +43,5 @@ EOF
 chmod +x "$DESKTOP_PATH"
 
 printf '\n%s is installed in %s.\n' "$NAME_UPPER" "$APP_DIR"
-printf 'Bookmarks, history, and settings are shared with Shell in ~/shell_state.ss.\n'
+printf 'Bookmarks and history are shared with Shell in ~/shell_state.ss.\n'
 printf 'You can launch %s from your application launcher and/or add it to favorites.\n' "$NAME_UPPER"

@@ -14,7 +14,7 @@ use shell::DirList;
 
 use crate::{
     render_with_tilde,
-    state::State,
+    state::{self, State},
     ui,
     ui::{dirs, dirs::cleanup_missing_button, project_bar, tab_keys},
 };
@@ -435,8 +435,9 @@ pub fn tabs_bar(state: &mut State, ui: &mut Ui) {
         ui.horizontal(|ui| project_bar::project_bar(state, ui));
     }
 
+    // egui saves the choice, with its memory.
     if let Some(dark) = set_dark {
-        state.set_dark_mode(ui.ctx(), dark);
+        ui.ctx().set_theme(state::theme(dark));
     }
 
     if font_delta != 0.0 {

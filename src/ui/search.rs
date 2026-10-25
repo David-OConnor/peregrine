@@ -319,9 +319,8 @@ pub fn deep_search_bar(state: &mut State, ui: &mut Ui) {
     // leaves exactly this much for it, can't tip it into two.
     let beside = ui.available_width() + 1.0 >= deep_search_min_width(ui);
 
-    // Whether to re-run the search, and whether Filenames / Contents was
-    // switched; unlike the regex toggle, that's saved.
-    let ((mut run_now, mode_changed), resp) = if beside {
+    // Whether to re-run the search.
+    let (mut run_now, resp) = if beside {
         right_to_left_row(ui, |ui| {
             let toggled = deep_search_toggles(ui, opts);
             (toggled, deep_search_box(ui, buf, opts.file_names))
@@ -346,9 +345,6 @@ pub fn deep_search_bar(state: &mut State, ui: &mut Ui) {
         run_now = true;
     }
 
-    if mode_changed {
-        let _ = state.save();
-    }
     if run_now {
         state.start_deep_search(ui.ctx());
     } else if let Some(t) = state.ui.deep_search_edited {
@@ -406,11 +402,11 @@ fn deep_search_box(ui: &mut Ui, buf: &mut String, file_names: bool) -> Response 
 }
 
 /// The Deep search toggles, added right to left: the regex one, then
-/// Contents and Filenames. Returns whether the search should re-run, and
-/// whether Filenames / Contents was switched. Remembers how wide they were
-/// for [deep_search_min_width], and redoes the frame if that changed (on the
-/// first, or with a new font size), as the bar's layout depends on it.
-fn deep_search_toggles(ui: &mut Ui, opts: &mut deep_search::Options) -> (bool, bool) {
+/// Contents and Filenames. Returns whether the search should re-run.
+/// Remembers how wide they were for [deep_search_min_width], and redoes the
+/// frame if that changed (on the first, or with a new font size), as the
+/// bar's layout depends on it.
+fn deep_search_toggles(ui: &mut Ui, opts: &mut deep_search::Options) -> bool {
     let regex = ui
         .add(Button::selectable(opts.regex, ".*"))
         .on_hover_text("Treat the Deep search as a regular expression, not plain text");
@@ -439,7 +435,7 @@ fn deep_search_toggles(ui: &mut Ui, opts: &mut deep_search::Options) -> (bool, b
         ui.ctx().request_discard("Deep search toggles resized");
     }
 
-    (regex.clicked() || mode_changed, mode_changed)
+    regex.clicked() || mode_changed
 }
 
 /// A row as wide as `ui`, filled from the right.

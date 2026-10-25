@@ -19,11 +19,25 @@ use super::{Divider, MIN_SPLIT_HEIGHT, panel_header, plural, scale_panel_fonts, 
 use crate::{
     OutType,
     path_env::{self, DirPrograms, Scope},
+    placement::Placement,
     state::State,
 };
 
 const WINDOW_SIZE: [f32; 2] = [640., 760.];
 const MIN_WINDOW_SIZE: [f32; 2] = [360., 420.];
+
+/// Where the PATH window is. It reopens where it last was, between runs
+/// too, as the file viewers do.
+#[derive(Default)]
+pub struct PathWindow {
+    /// Where it was last seen. Saved between runs.
+    pub placement: Option<Placement>,
+    /// Shown last pass.
+    open: bool,
+    /// Where it opened, while open. Fixed: egui moves a window whose
+    /// builder changes.
+    opened_at: Option<Placement>,
+}
 
 /// What the list marks an entry with.
 struct EntryStatus {
@@ -575,18 +589,35 @@ enum Request {
 /// file viewers' deferred ones, so it can draw straight from `state`.
 pub fn path_window(state: &mut State, ctx: &Context) {
     if !state.ui.panel_vis.path_editor {
+        state.ui.path_window.open = false;
         return;
     }
-    let builder = ViewportBuilder::default()
+
+    let win = &mut state.ui.path_window;
+    if !win.open {
+        win.open = true;
+        win.opened_at = win.placement.map(|p| p.on_screen(ctx));
+    }
+
+    let mut builder = ViewportBuilder::default()
         .with_title("PATH")
         .with_inner_size(WINDOW_SIZE)
         .with_min_inner_size(MIN_WINDOW_SIZE)
         .with_icon(crate::app_icon());
+    if let Some(p) = win.opened_at {
+        builder = builder.with_position(p.pos).with_inner_size(p.size);
+    }
     let id = ViewportId::from_hash_of("path_editor_window");
     ctx.show_viewport_immediate(id, builder, |ui, class| {
         if ui.input(|i| i.viewport().close_requested()) {
             state.ui.panel_vis.path_editor = false;
             return;
+        }
+        // Embedded, the viewport is the main window's.
+        if class != ViewportClass::EmbeddedWindow
+            && let Some(now) = Placement::of(ui.ctx())
+        {
+            state.ui.path_window.placement = Some(now);
         }
         // As in the main window. (Embedded in it, the main window's pass
         // has already taken it.)
@@ -629,9 +660,7 @@ fn path_panel(state: &mut State, ui: &mut Ui) {
         ui,
     );
     // After the list, so the divider is on top of it for the pointer.
-    if divider.end(ui, details_rect, &mut state.ui.path_details_split) {
-        let _ = state.save();
-    }
+    divider.end(ui, details_rect, &mut state.ui.path_details_split);
 
     match request {
         Some(Request::Save) => match state.path_panel.save() {
