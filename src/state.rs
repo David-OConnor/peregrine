@@ -1835,6 +1835,16 @@ impl State {
         hint
     }
 
+    /// `line` as Enter runs it: a `cd` goes where its suggestion does (see
+    /// [HintCache::line_for_enter]).
+    pub fn line_for_enter(&mut self, line: String) -> String {
+        let mut cache = std::mem::take(&mut self.ui.hint_cache);
+        let accepted = cache.line_for_enter(&line, &self.completion_sources());
+        self.ui.hint_cache = cache;
+
+        accepted.unwrap_or(line)
+    }
+
     /// Reset the active tab's recall state back to the live input. Called
     /// after a command is submitted.
     pub fn reset_history_nav(&mut self) {

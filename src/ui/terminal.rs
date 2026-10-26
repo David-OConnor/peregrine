@@ -825,6 +825,7 @@ pub fn term_in(state: &mut State, ui: &mut Ui) {
         } else if running.is_some() {
             state.send_running_line(&input);
         } else {
+            let input = state.line_for_enter(input);
             submit_command(state, &input);
         }
         state.ui.focus_input = true;

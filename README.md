@@ -83,7 +83,7 @@ Commands run in a terminal of their own (a pseudo console on Windows), so intera
 
 Autocomplete works from a mixture of bookmarks, recent commands, and files in the current directory. `cd` also falls back to the OS's standard directories by name, after bookmarks and recent directories, so e.g. `cd program f` goes to `C:\Program Files` and `cd etc` to `/etc` with nothing saved. Autocomplete messages display automatically in gray; press the **right arrow key** to complete the line to one.
 
-When navigating directires using `cd`, the `Tab` key attempts to guess the path to go to. Enter also does the same. todo: Enter, Tab, and right arrow have ambiguities and overlaps here; resolve in behavior, docs, or both.
+When navigating directires using `cd`, the `Tab` key attempts to guess the path to go to. When what's typed isn't a directory, Enter goes where the gray suggestion does, as right arrow then Enter would.
 
 Type `shelp` in the CLI input to list every command and key shortcut.
 
