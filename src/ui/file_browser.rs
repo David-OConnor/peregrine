@@ -67,7 +67,7 @@ pub(super) fn draw(state: &mut State, ui: &mut Ui) {
     let type_to_search = list_has_keys
         && state.ui.create.is_none()
         && !state.ui.focus_input
-        && !ui::grid::has_focus(ui.ctx())
+        && !ui::terminal::program_has_keys(state, ui.ctx())
         && !egui::Popup::is_any_open(ui.ctx())
         && ui.input(|i| {
             !i.pointer.any_pressed()

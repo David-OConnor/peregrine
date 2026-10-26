@@ -211,6 +211,11 @@ impl RunningCmd {
         self.term.full_screen()
     }
 
+    /// Whether the program reads keys as they're typed (see [Term::reads_keys]).
+    pub fn reads_keys(&self) -> bool {
+        self.term.reads_keys()
+    }
+
     /// Send bytes to the program, as typed.
     pub fn send(&mut self, bytes: &[u8]) {
         let _ = self.pty.send(bytes);

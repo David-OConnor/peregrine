@@ -743,9 +743,9 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
 
     // After that command, which runs in the tab it was typed in, and before
     // any widget, so the input box never sees these keys. Not while a
-    // full-screen program has the keyboard: Ctrl+W is vim's, and nano's,
-    // Ctrl+B is tmux's, and Alt + a digit is irssi's and weechat's.
-    if !grid::has_focus(ui.ctx()) {
+    // program has the keyboard: Ctrl+W is vim's, and nano's, Ctrl+B is
+    // tmux's and Claude Code's, and Alt + a digit is irssi's and weechat's.
+    if !terminal::program_has_keys(state, ui.ctx()) {
         tab_keys::handle(state, ui.ctx());
         terminal::toggle_bookmark_key(state, ui.ctx());
         terminal::bookmark_number_keys(state, ui.ctx());

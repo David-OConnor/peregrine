@@ -604,7 +604,10 @@ pub fn term_in(state: &mut State, ui: &mut Ui) {
     // the buffer is empty or a cd recall is already active — otherwise they
     // stay as normal caret movement.
     let input_id = input_id();
-    let focused = ui.memory(|m| m.has_focus(input_id));
+    // While the running program reads keys as typed, they're all its (see
+    // [program_keys]).
+    let keys = state.keys_here();
+    let focused = !keys && ui.memory(|m| m.has_focus(input_id));
     let consume =
         |ui: &mut Ui, key| focused && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, key));
 
@@ -695,6 +698,10 @@ pub fn term_in(state: &mut State, ui: &mut Ui) {
             .color(COLOR_STDERR_OK)
             .small(),
         );
+        return;
+    }
+    if keys {
+        program_keys(state, ui);
         return;
     }
 
@@ -830,6 +837,60 @@ pub fn term_in(state: &mut State, ui: &mut Ui) {
         }
         state.ui.focus_input = true;
     }
+}
+
+/// Stands in for the input box while the running program reads keys as
+/// they're typed (Claude Code, Python's REPL): with focus, it sends each key
+/// straight to the program, which shows what's typed in its own output.
+fn program_keys(state: &mut State, ui: &mut Ui) {
+    let font = TextStyle::Monospace.resolve(ui.style());
+    // As tall as the input box, with its margins.
+    let height = ui.text_style_height(&TextStyle::Monospace) + 4.;
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
+    let response = ui.interact(rect, input_id(), Sense::click());
+    if response.clicked() || std::mem::take(&mut state.ui.focus_input) {
+        response.request_focus();
+    }
+
+    let paste = state.ui.clipboard.pending_text.take();
+    if let Some(cmd) = state.running_here_mut() {
+        let keys = grid::take_keys(cmd.term.screen(), &response, ui, paste);
+        cmd.send(&keys);
+    }
+
+    let focused = response.has_focus();
+    let visuals = ui.visuals();
+    let stroke = if focused {
+        visuals.selection.stroke
+    } else {
+        visuals.widgets.inactive.bg_stroke
+    };
+    ui.painter().rect(
+        rect,
+        visuals.widgets.inactive.corner_radius,
+        visuals.text_edit_bg_color(),
+        stroke,
+        egui::StrokeKind::Inside,
+    );
+    let text = if focused {
+        "Keys go to the program as you type them."
+    } else {
+        "Click here to type to the program."
+    };
+    ui.painter().text(
+        rect.left_center() + vec2(4., 0.),
+        egui::Align2::LEFT_CENTER,
+        text,
+        font,
+        visuals.weak_text_color(),
+    );
+}
+
+/// Whether a program in the active tab has the keyboard, so keys are its
+/// rather than shortcuts: a full-screen one's screen has focus, or the input
+/// box does while one reads keys as typed.
+pub fn program_has_keys(state: &State, ctx: &Context) -> bool {
+    grid::has_focus(ctx) || (state.keys_here() && ctx.memory(|m| m.has_focus(input_id())))
 }
 
 /// Apply `edit` to the active tab's input, moving the input box's caret to

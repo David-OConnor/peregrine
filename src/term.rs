@@ -164,6 +164,15 @@ impl Term {
         screen.alternate_screen() || screen.application_cursor()
     }
 
+    /// Whether a program on the main screen reads keys as they're typed and
+    /// draws its own input (Claude Code, Python's REPL), so keys go straight
+    /// to it rather than through the input box. Told by its turning on
+    /// bracketed paste, as such programs do; Windows' pseudo console doesn't
+    /// pass on the console mode that would say for sure.
+    pub fn reads_keys(&self) -> bool {
+        !self.full_screen() && self.parser.screen().bracketed_paste()
+    }
+
     /// Take in what the program wrote. Rows it scrolls off the screen go
     /// into `out` right away; [Self::render] updates the rest. Returns the
     /// terminal's answers to the program's questions, to send back to it.

@@ -2115,6 +2115,12 @@ impl State {
             || self.live_here().is_some_and(LiveRemote::grid_mode)
     }
 
+    /// Whether the command running in the active tab reads keys as they're
+    /// typed, so the input box sends them straight to it.
+    pub fn keys_here(&self) -> bool {
+        self.running_here().is_some_and(RunningCmd::reads_keys)
+    }
+
     /// Bring each tab's running command's new output into its pane, and wrap
     /// up any that have finished. Called once per frame.
     pub fn pump_running(&mut self) {

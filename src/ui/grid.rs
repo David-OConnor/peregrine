@@ -4,10 +4,11 @@
 //! program while it has focus. Text typed arrives as egui text events; other
 //! keys are encoded as an xterm would (see `shell::ssh::keys`). Ctrl+C,
 //! Ctrl+X and Ctrl+V reach egui as copy, cut and paste, so those are turned
-//! back into what a terminal sends.
+//! back into what a terminal sends. [take_keys] does the same for the input
+//! box while a program on the main screen reads keys as they're typed.
 
 use egui::{
-    Align2, Color32, Event, EventFilter, FontId, Id, Key, Modifiers, Rect, Sense, Stroke,
+    Align2, Color32, Event, EventFilter, FontId, Id, Key, Modifiers, Rect, Response, Sense, Stroke,
     TextStyle, Ui, pos2, vec2,
 };
 use shell::ssh::keys::{TermKey, TermMods, encode_key, encode_paste};
@@ -66,14 +67,28 @@ pub fn show(
     if response.clicked() || take_focus {
         response.request_focus();
     }
-    let focused = response.has_focus();
+    let bytes = take_keys(screen, &response, ui, pending_paste);
+
+    paint(screen, ui, rect, &font, cell, response.has_focus());
+    bytes
+}
+
+/// While `response`'s widget has focus, take the frame's keys for the program
+/// whose screen is `screen`. `pending_paste` is as for [show]. Returns what to
+/// send the program.
+pub fn take_keys(
+    screen: &vt100::Screen,
+    response: &Response,
+    ui: &mut Ui,
+    pending_paste: Option<String>,
+) -> Vec<u8> {
     let mut bytes = Vec::new();
-    if focused {
+    if response.has_focus() {
         // Tab, the arrows and Escape are the program's, not egui's focus
         // navigation.
         ui.memory_mut(|m| {
             m.set_focus_lock_filter(
-                grid_id(),
+                response.id,
                 EventFilter {
                     tab: true,
                     horizontal_arrows: true,
@@ -88,7 +103,6 @@ pub fn show(
         bytes.extend(encode_paste(&text, screen.bracketed_paste()));
     }
 
-    paint(screen, ui, rect, &font, cell, focused);
     bytes
 }
 
