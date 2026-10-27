@@ -4,7 +4,7 @@ use std::{fs, io, path::Path};
 
 use shell::{
     DirList, clone_root, commands, commands::Frontend, find_bookmark, path_from_args, resolve_cd,
-    ssh,
+    resolve_root, ssh,
 };
 
 use crate::{
@@ -63,7 +63,7 @@ pub fn handle_cmd(state: &mut State, cmd: &str, input: &str, args: &str, ctx: &e
                     state.run_remote(&c);
                 }
             }
-            "rm_targets" | "open" | "view" | "edit" => state.push_out(
+            "rm_targets" | "open" | "view" | "edit" | "root" => state.push_out(
                 format!("{cmd}: only runs locally; disconnect first"),
                 OutType::StdErr,
             ),
@@ -252,16 +252,19 @@ pub fn handle_cmd(state: &mut State, cmd: &str, input: &str, args: &str, ctx: &e
             if let Some(target) = target {
                 let before = state.cwd().to_path_buf();
                 state.change_saved_dir(target, DirList::RecentDirs);
-                if state.cwd() != before {
-                    let shown = render_with_tilde(state.cwd(), state.home.as_deref());
-                    let parts = path_color::parts(&shown, Some("~"), true);
-                    state.push_out(
-                        format!("Navigated to {}", path_color::to_ansi(&parts)),
-                        OutType::StdOut,
-                    );
-                }
+                note_navigation(state, &before);
             }
         }
+
+        // The Files panel's Project root button.
+        "root" => match resolve_root(state.cwd()) {
+            Ok(root) => {
+                let before = state.cwd().to_path_buf();
+                state.change_dir(root);
+                note_navigation(state, &before);
+            }
+            Err(e) => state.push_out(format!("root: {e}"), OutType::StdErr),
+        },
 
         "bm" => {
             // As for `del bm`, a number is the one the Bookmarks panel shows.
@@ -302,4 +305,18 @@ pub fn handle_cmd(state: &mut State, cmd: &str, input: &str, args: &str, ctx: &e
             state.start_running(&expanded.line, &cwd, root, ctx);
         }
     }
+}
+
+/// After `cd` or `root`: say where to, if it left `before`.
+fn note_navigation(state: &mut State, before: &Path) {
+    if state.cwd() == before {
+        return;
+    }
+
+    let shown = render_with_tilde(state.cwd(), state.home.as_deref());
+    let parts = path_color::parts(&shown, Some("~"), true);
+    state.push_out(
+        format!("Navigated to {}", path_color::to_ansi(&parts)),
+        OutType::StdOut,
+    );
 }

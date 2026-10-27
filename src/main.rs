@@ -213,7 +213,7 @@ pub fn run_command(state: &mut State, input: &str, ctx: &egui::Context) {
 
     // Track directories we've run real commands from (everything except `cd`).
     // Persist regardless so the new history entry hits disk.
-    if cmd != "cd" {
+    if !matches!(cmd, "cd" | "root") {
         let cwd = state.cwd().to_path_buf();
         state.record_recent_dir(&cwd);
     }

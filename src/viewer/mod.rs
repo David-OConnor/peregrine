@@ -1338,12 +1338,7 @@ fn padding(size: Vec2, viewport: Vec2) -> Vec2 {
 /// Open `path`, a local file linked from `doc`: in another viewer window if
 /// it's a type the viewer shows, otherwise (e.g. a folder) with its
 /// default program.
-fn open_link(
-    doc: &mut Doc,
-    path: PathBuf,
-    to_open: &mut Vec<(PathBuf, bool)>,
-    ctx: &Context,
-) {
+fn open_link(doc: &mut Doc, path: PathBuf, to_open: &mut Vec<(PathBuf, bool)>, ctx: &Context) {
     if !path.exists() {
         doc.notice = Some(format!("Link target not found: {}", path.display()));
     } else if can_view(&path) {

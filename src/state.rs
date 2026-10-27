@@ -9,7 +9,8 @@ use chrono::Utc;
 use shell::{
     BrowserFile, CompletionSources, DirList, HintCache, HistoryItem, InputHint, NavState, OpenTabs,
     RecentDir, RemoteTerminal, apply_completion, complete_input, current_branch, dir_missing,
-    get_home, read_browser_files, remove_missing_recent_dirs, remove_saved_dir, save_data,
+    get_home, project_root, read_browser_files, remove_missing_recent_dirs, remove_saved_dir,
+    save_data,
     ssh::{self, ConnectError, ConnectRequest, secrets},
     stale_dir_list, truncate_branch,
 };
@@ -682,7 +683,7 @@ impl State {
         }
         self.browser_files = read_browser_files(&cwd);
         self.project = Project::detect(&cwd);
-        self.project_root = Project::root(&cwd);
+        self.project_root = project_root(&cwd);
         self.browser_dir = cwd;
         let (attr, dot) = (self.ui.show_hidden_attr, self.ui.show_dotfiles);
         self.browser_files.retain(|f| listing_shows(f, attr, dot));

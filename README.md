@@ -145,6 +145,9 @@ Shortcuts to reduce typing:
 - `view <file>`: Open a file in the viewer
 - `edit <file>`: Open a file in the viewer, in edit mode
 
+### Navigation
+- `root`: Go to the root of the Git, Cargo or Python project you're in. Same as the file browser's **Project root** button.
+
 
 ## Non-obvious functionality
 
