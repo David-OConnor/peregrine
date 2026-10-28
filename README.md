@@ -1,7 +1,7 @@
 # Peregrine
 
 
-An integrated terminal and file browser. For Linux, Windows, and MacOS. I built this for my own file-system and CLI workflows. Wherever I notice a friction point, I update this program to address it. For example, when using a `cd` command to navigate in a terminal, I've made it trivial to access ones I've used before, or to find the right directory using a few characters from dir's name. It also smooths over miscellaneous OS-level functionality which I've encountered pain points in.
+An integrated terminal and file browser. For Linux, Windows, and MacOS. I built this for my own file-system and CLI workflows. Wherever I notice a friction point, I update this program to address it. For example, when using a `cd` command to navigate in a terminal, I've made it easy to access ones I've used before, or to find the right directory using a few characters from dir's name. It also smooths over miscellaneous OS-level functionality which I've encountered pain points in.
 
 *If I may be so bold*: This program likely represents a simple improvement to many people's OS-tool workflows.
 
@@ -50,6 +50,7 @@ You can search in every GUI panel: bookmarks, recent directories, recent command
 ## UI overview
 The UI is divided into *panels*, most of which are organized horizontally in the main window. A few are separate windows. Panes can be hidden and shown using their buttons in the toolbar above them. They each have an "X" button to close them as well. Below is a description of each.
 
+
 ### Bookmarks
 Bookmarked directories. Add the current directory with the **Ctrl + B** hotkey, or with the *Bookmark* star-icon buttons on the *Bookmarks* or *Files* panes. These are listed, and have priority for CLI autocomplete.
 
@@ -73,19 +74,17 @@ Text files open read-only. Use **Edit** at the top of the viewer to edit text or
 
 In View and Edit modes, drag a text selection to the top or bottom edge to scroll and extend it beyond the visible text. Code files also scroll horizontally when selecting past the left or right edge.
 
+Right click to open a menu, similar to your OS's. This has a curated set of functionality, including create or uncompress archives, open the text or image viewer editor (Image editor: Your OS's default, e.g. Paint). 
+
 
 ### Terminal / CLI
-The [Shell](https://github.com/david-oconnor/shell) terminal: It wraps your OS's native (e.g. *Bash* or *Powershell*), and has convenient autocomplete, bookmarks, shortcut commands, color-coding etc.
+The [Shell](https://github.com/david-oconnor/shell) terminal: It wraps your OS's native (e.g. *Bash* or *Powershell*), and has convenient autocomplete, bookmarks, shortcut commands, color-coding etc. 
 
-Most CLI commands from *Shell* work here, but this version includes more functionality, enabled by the GUI.
-
-Commands run in a terminal of their own (a pseudo console on Windows), so interactive programs work as they do in a terminal window: REPLs such as `python` take the lines you type, and full-screen programs (`vim`, `nano`, `edit`, `less`, git's pager) take over the output pane while they run, with the keyboard going to them. Ctrl+C interrupts the running command; the **Stop** button ends it and everything it started.
+Most CLI commands from *Shell* work here, but this version includes more functionality, enabled by the GUI. Type `shelp` in the CLI input to list every command and key shortcut.
 
 Autocomplete works from a mixture of bookmarks, recent commands, and files in the current directory. `cd` also falls back to the OS's standard directories by name, after bookmarks and recent directories, so e.g. `cd program f` goes to `C:\Program Files` and `cd etc` to `/etc` with nothing saved. Autocomplete messages display automatically in gray; press the **right arrow key** to complete the line to one.
 
-When navigating directires using `cd`, the `Tab` key attempts to guess the path to go to. When what's typed isn't a directory, Enter goes where the gray suggestion does, as right arrow then Enter would.
-
-Type `shelp` in the CLI input to list every command and key shortcut.
+When navigating using `cd`, the *Tab* key attempts to guess the path to go to. When what's typed isn't a directory, *Enter* goes where the gray suggestion does, as *Right Arrow* then *Enter* would.
 
 
 ### Recent commands
