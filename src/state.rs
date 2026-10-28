@@ -22,7 +22,7 @@ use crate::{
     completion,
     deep_search::{self, DeepSearch},
     drag_out,
-    files::{Delete, FileDetails, FileSort, SelectionSummary, sort_browser_files},
+    files::{Delete, FileDetails, FileSort, SelectionSummary, ZipJob, sort_browser_files},
     path_color, prefs,
     project::{Branches, Project},
     remote::{LiveRemote, Remote},
@@ -462,6 +462,9 @@ pub struct State {
     pub paste: Option<Paste>,
     /// Confirmed Files-panel deletion running in the background.
     pub deleting: Option<Delete>,
+    /// A Files-panel zip archive being written or extracted (see
+    /// [State::compress_selected] and [State::extract_zip]).
+    pub zip_job: Option<ZipJob>,
     /// Where bookmarks + recent dirs are persisted.
     pub state_path: PathBuf,
     /// Cached git branch for each tab's cwd (parallel to `cwd`). `None`
@@ -541,6 +544,7 @@ impl Default for State {
             deep_search: None,
             paste: None,
             deleting: None,
+            zip_job: None,
             state_path: save_data::default_path()
                 .unwrap_or_else(|| PathBuf::from(save_data::FILENAME)),
             branch: vec![branch],
@@ -1111,10 +1115,13 @@ impl State {
         self.start_paste(srcs, dest.to_path_buf(), !copy, ctx);
     }
 
-    /// Whether a paste, drop or delete is under way, or waiting on the user,
-    /// so another can't start.
+    /// Whether a paste, drop, delete or compress is under way, or waiting on
+    /// the user, so another can't start.
     pub fn file_op_busy(&self) -> bool {
-        self.paste.is_some() || self.deleting.is_some() || self.ui.paste_conflict.is_some()
+        self.paste.is_some()
+            || self.deleting.is_some()
+            || self.zip_job.is_some()
+            || self.ui.paste_conflict.is_some()
     }
 
     /// Copy (or with `moving`, move) `srcs` into `dest` in the background,
@@ -1269,6 +1276,78 @@ impl State {
         self.refresh_browser_files();
     }
 
+    /// Compress the selected Files rows into a zip archive in the Files
+    /// panel's dir, named after the lead row (see [ZipJob::compress]). Runs
+    /// in the background; [Self::pump_zip_job] picks up the outcome. The
+    /// dir moves to the top of Recent dirs.
+    pub fn compress_selected(&mut self, ctx: &egui::Context) {
+        if self.file_op_busy() {
+            self.push_out(
+                "zip: wait for the file operation in progress to finish",
+                OutType::StdErr,
+            );
+            return;
+        }
+
+        self.commit_rename();
+        let paths = self.selected_paths();
+        let lead = self.selected_file.as_ref().map(|d| d.path.clone());
+        let Some(lead) = lead.or_else(|| paths.first().cloned()) else {
+            return;
+        };
+
+        let dir = self.cwd().to_path_buf();
+        self.touch_recent_dir(&dir);
+        self.zip_job = Some(ZipJob::compress(paths, dir, &lead, ctx.clone()));
+    }
+
+    /// Extract the zip archive at `path` into a new folder beside it (see
+    /// [ZipJob::extract]). Runs in the background, as
+    /// [Self::compress_selected] does. The cwd moves to the top of Recent
+    /// dirs.
+    pub fn extract_zip(&mut self, path: PathBuf, ctx: &egui::Context) {
+        if self.file_op_busy() {
+            self.push_out(
+                "unzip: wait for the file operation in progress to finish",
+                OutType::StdErr,
+            );
+            return;
+        }
+
+        let cwd = self.cwd().to_path_buf();
+        self.touch_recent_dir(&cwd);
+        self.zip_job = Some(ZipJob::extract(path, ctx.clone()));
+    }
+
+    /// Once a compress or extract has finished: report a failure, or re-read
+    /// the listing and select what it made. As in Explorer, a new archive is
+    /// then renamed in place, if the Files panel still has the keyboard.
+    /// Called every frame.
+    pub fn pump_zip_job(&mut self) {
+        let Some(result) = self.zip_job.as_mut().and_then(ZipJob::try_finish) else {
+            return;
+        };
+        let extracting = self.zip_job.take().unwrap().extracting;
+
+        let path = match result {
+            Ok(path) => path,
+            Err(e) => {
+                let cmd = if extracting { "unzip" } else { "zip" };
+                self.push_out(format!("{cmd}: {e}"), OutType::StdErr);
+                return;
+            }
+        };
+
+        self.refresh_browser_files();
+        // Not while Deep search results stand in for the listing.
+        if self.shown_files().contains(&path.as_path()) {
+            self.select_file(&path);
+            if !extracting && self.ui.files_active {
+                self.start_rename(&path);
+            }
+        }
+    }
+
     /// Snapshot of the active tab's recall cursors. Returned by value so
     /// callers can build a prompt string without holding a borrow on
     /// `self.ui.history_nav`.
@@ -1389,6 +1468,7 @@ impl State {
             deep_search: None,
             paste: None,
             deleting: None,
+            zip_job: None,
             state_path: path,
             branch,
             git_branches: None,

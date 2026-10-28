@@ -748,7 +748,7 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
     if !terminal::program_has_keys(state, ui.ctx()) {
         tab_keys::handle(state, ui.ctx());
         terminal::toggle_bookmark_key(state, ui.ctx());
-        terminal::bookmark_number_keys(state, ui.ctx());
+        terminal::folder_keys(state, ui.ctx());
         terminal::focus_input_key(state, ui.ctx());
     }
     // Pressed in a file viewer window (see `viewer::FileViewers`).
@@ -764,6 +764,7 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
     // Likewise a Files-panel paste.
     state.pump_paste();
     state.pump_delete(ui.ctx());
+    state.pump_zip_job();
 
     // SSH: finished connection attempts, and remote output. The connection's
     // own tasks request a repaint when there's news; this asks for another

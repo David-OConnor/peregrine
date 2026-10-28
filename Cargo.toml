@@ -1,6 +1,6 @@
 [package]
 name = "peregrine"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 
 [dependencies]
@@ -58,6 +58,10 @@ ignore = "0.4.33"
 
 # Files-panel Delete: use each OS's recoverable Recycle Bin / Trash.
 trash = "5.2.9"
+
+# Files-panel Compress to ZIP and Extract (see `src/files.rs`). Same version
+# and features `software_manager` builds, so this adds nothing new.
+zip = { version = "9.0.5", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 # The main window's handle (its `HWND`, X11 window, or Wayland display and
 # surface), from eframe, for dragging files out of it (see

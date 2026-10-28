@@ -59,6 +59,242 @@ impl Delete {
     }
 }
 
+/// A zip archive being written or extracted on a worker thread (see
+/// [ZipJob::compress] and [ZipJob::extract]).
+pub struct ZipJob {
+    /// Extracting, rather than compressing.
+    pub extracting: bool,
+    /// Returns what it made: the archive, or the folder extracted to.
+    handle: Option<JoinHandle<Result<PathBuf, String>>>,
+}
+
+impl ZipJob {
+    /// Start compressing `srcs`, files and folders in or under `dir`, into a
+    /// new zip archive in `dir` named as Explorer names one: after `lead`, so
+    /// `notes.txt` makes `notes.zip`, or if that's taken, `notes (2).zip`.
+    /// Entries are named by their paths relative to `dir`. `ctx` is repainted
+    /// when it's done. A failed archive is removed.
+    pub fn compress(mut srcs: Vec<PathBuf>, dir: PathBuf, lead: &Path, ctx: egui::Context) -> Self {
+        let stem = if lead.is_dir() {
+            lead.file_name()
+        } else {
+            lead.file_stem()
+        };
+        let name = format!("{}.zip", stem.unwrap_or_default().to_string_lossy());
+
+        // As for [Delete]: a folder and something in it are both selectable
+        // in Deep search results, but it's only added once.
+        srcs.sort_by_key(|p| p.components().count());
+        srcs.dedup();
+
+        let handle = thread::spawn(move || {
+            let archive = crate::clipboard::free_name(&dir, name.as_ref(), false, true);
+            let result = write_zip(&archive, &srcs, &dir);
+            if result.is_err() {
+                let _ = fs::remove_file(&archive);
+            }
+            ctx.request_repaint();
+            result.map(|()| archive)
+        });
+
+        Self {
+            extracting: false,
+            handle: Some(handle),
+        }
+    }
+
+    /// Start extracting the zip archive at `archive` into a new folder beside
+    /// it. Where everything in it is in one folder, that folder is what's
+    /// made, as macOS and Linux file managers do; otherwise it's named after
+    /// the archive. Either way it takes a free name, e.g. `notes (2)`. `ctx`
+    /// is repainted when it's done. A failed extraction's folder is removed.
+    pub fn extract(archive: PathBuf, ctx: egui::Context) -> Self {
+        let handle = thread::spawn(move || {
+            let result = extract_zip(&archive);
+            ctx.request_repaint();
+            result
+        });
+
+        Self {
+            extracting: true,
+            handle: Some(handle),
+        }
+    }
+
+    pub fn try_finish(&mut self) -> Option<Result<PathBuf, String>> {
+        if !self.handle.as_ref()?.is_finished() {
+            return None;
+        }
+        let result = self.handle.take()?.join();
+
+        Some(result.unwrap_or_else(|_| Err("the zip operation crashed".to_owned())))
+    }
+}
+
+/// Whether `path` is named as a zip archive.
+pub fn is_zip(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("zip"))
+}
+
+/// Extract `archive` as [ZipJob::extract] says, returning the folder made.
+fn extract_zip(archive: &Path) -> Result<PathBuf, String> {
+    let err = |e: &dyn std::fmt::Display| format!("{}: {e}", archive.display());
+
+    let file = fs::File::open(archive).map_err(|e| err(&e))?;
+    let mut zip = zip::ZipArchive::new(io::BufReader::new(file)).map_err(|e| err(&e))?;
+
+    // Leaves out the likes of `__MACOSX` and `.DS_Store` in looking for it.
+    let filter = zip::read::root_dir_common_filter;
+    let root = zip.root_dir(filter).map_err(|e| err(&e))?;
+    let name = match &root {
+        Some(root) => root.file_name(),
+        None => archive.file_stem(),
+    };
+    let dir = archive.parent().unwrap_or(Path::new("."));
+    let dest = crate::clipboard::free_name(dir, name.unwrap_or_default(), true, true);
+    fs::create_dir(&dest).map_err(|e| format!("{}: {e}", dest.display()))?;
+
+    let extracted = match root {
+        Some(_) => zip.extract_unwrapped_root_dir(&dest, filter),
+        None => zip.extract(&dest),
+    };
+    if let Err(e) = extracted {
+        // Made just now, so there's nothing else in it.
+        let _ = fs::remove_dir_all(&dest);
+        return Err(err(&e));
+    }
+
+    // Zip stores local times, but `extract` would take them for UTC.
+    for i in 0..zip.len() {
+        let Ok(entry) = zip.by_index_raw(i) else {
+            continue;
+        };
+        let (Some(rel), Some(time)) = (entry.enclosed_name(), entry.last_modified()) else {
+            continue;
+        };
+        let rel = match &root {
+            Some(root) => rel.strip_prefix(root).map(Path::to_path_buf).unwrap_or(rel),
+            None => rel,
+        };
+        if entry.is_file()
+            && let Some(time) = local_time(time)
+            && let Ok(file) = fs::File::options().write(true).open(dest.join(rel))
+        {
+            let _ = file.set_modified(time);
+        }
+    }
+
+    Ok(dest)
+}
+
+/// `t`, a time as zip stores it, in this time zone.
+fn local_time(t: zip::DateTime) -> Option<SystemTime> {
+    let date = chrono::NaiveDate::from_ymd_opt(t.year().into(), t.month().into(), t.day().into())?;
+    let time = date.and_hms_opt(t.hour().into(), t.minute().into(), t.second().into())?;
+
+    Some(time.and_local_timezone(chrono::Local).earliest()?.into())
+}
+
+/// Write `srcs` and everything in them to a new zip archive at `archive`,
+/// named relative to `dir` (see [ZipJob::compress]).
+fn write_zip(archive: &Path, srcs: &[PathBuf], dir: &Path) -> Result<(), String> {
+    let file = fs::File::create_new(archive).map_err(|e| format!("{}: {e}", archive.display()))?;
+    let mut zip = zip::ZipWriter::new(io::BufWriter::new(file));
+
+    // Links are followed, but not into `dir` or a folder being added, so
+    // they can't lead round in a loop, or into the archive itself.
+    let mut within: Vec<PathBuf> = fs::canonicalize(dir).into_iter().collect();
+    let mut added: Vec<&Path> = Vec::new();
+
+    for src in srcs {
+        if added.iter().any(|a| src.starts_with(a)) {
+            continue;
+        }
+        let rel = src
+            .strip_prefix(dir)
+            .ok()
+            .or_else(|| src.file_name().map(Path::new))
+            .unwrap_or(src);
+        let name: Vec<_> = rel.iter().map(|c| c.to_string_lossy()).collect();
+        add_to_zip(&mut zip, src, &name.join("/"), &mut within)?;
+        added.push(src);
+    }
+
+    zip.finish()
+        .and_then(|w| w.into_inner().map_err(|e| e.into_error().into()))
+        .map_err(|e| format!("{}: {e}", archive.display()))?;
+
+    Ok(())
+}
+
+/// Add `path`, a file or folder and everything in it, to `zip` as `name`.
+/// Links are followed, except to a folder in `within` (canonical): one it's
+/// inside.
+fn add_to_zip<W: io::Write + io::Seek>(
+    zip: &mut zip::ZipWriter<W>,
+    path: &Path,
+    name: &str,
+    within: &mut Vec<PathBuf>,
+) -> Result<(), String> {
+    let err = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
+
+    let md = fs::metadata(path).map_err(|e| err(&e))?;
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated)
+        .last_modified_time(zip_time(&md));
+    #[cfg(unix)]
+    let options = {
+        use std::os::unix::fs::PermissionsExt;
+        options.unix_permissions(md.permissions().mode())
+    };
+
+    if md.is_dir() {
+        let canonical = fs::canonicalize(path).map_err(|e| err(&e))?;
+        if within.contains(&canonical) {
+            return Ok(());
+        }
+
+        zip.add_directory(name, options).map_err(|e| err(&e))?;
+        within.push(canonical);
+        for entry in fs::read_dir(path).map_err(|e| err(&e))? {
+            let entry = entry.map_err(|e| err(&e))?;
+            let child = format!("{name}/{}", entry.file_name().to_string_lossy());
+            add_to_zip(zip, &entry.path(), &child, within)?;
+        }
+        within.pop();
+
+        return Ok(());
+    }
+
+    let options = options.large_file(md.len() >= u64::from(u32::MAX));
+    zip.start_file(name, options).map_err(|e| err(&e))?;
+    let mut file = fs::File::open(path).map_err(|e| err(&e))?;
+    io::copy(&mut file, zip).map_err(|e| err(&e))?;
+
+    Ok(())
+}
+
+/// `md`'s modified time, as zip stores it: local time, 1980 to 2107. Out of
+/// that range, the start of 1980.
+fn zip_time(md: &fs::Metadata) -> zip::DateTime {
+    use chrono::{Datelike, Timelike};
+
+    let Ok(t) = md.modified() else {
+        return zip::DateTime::default();
+    };
+    let t = chrono::DateTime::<chrono::Local>::from(t);
+    let Ok(year) = u16::try_from(t.year()) else {
+        return zip::DateTime::default();
+    };
+
+    // The rest always fit in a u8.
+    let [month, day, hour, min, sec] =
+        [t.month(), t.day(), t.hour(), t.minute(), t.second()].map(|n| n as u8);
+
+    zip::DateTime::from_date_and_time(year, month, day, hour, min, sec).unwrap_or_default()
+}
+
 /// What the Files panel's listing is ordered by, picked with the buttons
 /// above it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -477,6 +713,16 @@ pub fn open_with_default_app(path: &Path) -> io::Result<()> {
     shell::quiet_command(program).arg(path).spawn().map(|_| ())
 }
 
+/// Open the image at `path` in Paint. On Windows 11 `mspaint` is an app
+/// alias, found on the PATH.
+#[cfg(windows)]
+pub fn open_in_paint(path: &Path) -> io::Result<()> {
+    shell::quiet_command("mspaint")
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+}
+
 /// Rename `path` to `new_name` within its own directory, as a file manager's
 /// in-place rename does, returning the new path. Surrounding spaces are
 /// trimmed (and on Windows, trailing dots, which it would drop anyway).
@@ -584,7 +830,6 @@ pub fn shortcuts(home: Option<&Path>) -> Vec<Shortcut> {
             hover: "Home directory",
             dir: home.map(Path::to_path_buf),
         },
-        app_data(home),
         Shortcut {
             glyph: "🖥",
             hover: "Desktop",
@@ -595,6 +840,7 @@ pub fn shortcuts(home: Option<&Path>) -> Vec<Shortcut> {
             hover: "Downloads",
             dir: in_home("Downloads"),
         },
+        app_data(home),
         programs(),
     ];
     #[cfg(not(windows))]

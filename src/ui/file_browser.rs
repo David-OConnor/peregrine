@@ -2,9 +2,9 @@ use std::path::{Path, PathBuf};
 
 use eframe::epaint::text::cursor::CCursor;
 use egui::{
-    Align, Area, Button, Color32, DragAndDrop, Event, Frame, Id, Key, Layout, Modal, Modifiers,
-    Panel, Response, RichText, ScrollArea, Sense, Stroke, StrokeKind, TextEdit, TextStyle, Ui,
-    text::CCursorRange,
+    Align, Area, Button, Color32, DragAndDrop, Event, Frame, Id, Key, KeyboardShortcut, Layout,
+    Modal, Modifiers, Panel, Response, RichText, ScrollArea, Sense, Stroke, StrokeKind, TextEdit,
+    TextStyle, Ui, text::CCursorRange,
 };
 
 use crate::{
@@ -18,7 +18,7 @@ use crate::{
     ui::{
         ListAction,
         dirs::{BOOKMARKED_TEXT, bookmarked_fill},
-        path_bar, search,
+        path_bar, search, terminal,
     },
     viewer,
 };
@@ -209,11 +209,12 @@ pub(super) fn draw(state: &mut State, ui: &mut Ui) {
     let can_forward = !state.ui.nav_forward[i].is_empty();
 
     // Common-destination shortcuts (see [files::shortcuts]): 🏠 Home,
-    // 🗃 app data, 🖥 Desktop, 📥 Downloads, 📦 programs, 🖴 root, 🗑 trash.
+    // 🖥 Desktop, 📥 Downloads, 🗃 app data, 📦 programs, 🖴 root, 🗑 trash.
     // Each is only enabled when the target actually exists, so we never `cd`
     // into a missing dir and push a diagnostic. On Windows, 🖴 is a menu of
     // drives and 🗑 opens the Recycle Bin in Explorer. Rows dragged onto ⬆
-    // or a shortcut go to that dir.
+    // or a shortcut go to that dir. The first five have keys too (see
+    // [terminal::folder_keys]).
 
     let shortcuts = files::shortcuts(home.as_deref());
     let mut go_up = false;
@@ -261,11 +262,16 @@ pub(super) fn draw(state: &mut State, ui: &mut Ui) {
             go_to = Some(root.clone());
         }
 
-        for s in shortcuts {
+        for (i, s) in shortcuts.into_iter().enumerate() {
             let dir = s.dir.filter(|d| d.is_dir());
+            let hover = match terminal::folder_shortcut(ui.ctx(), i) {
+                Some(keys) => format!("{} ({})", s.hover, ui.ctx().format_shortcut(&keys)),
+                None => s.hover.to_string(),
+            };
+
             let resp = ui
                 .add_enabled(dir.is_some(), Button::new(s.glyph))
-                .on_hover_text(s.hover);
+                .on_hover_text(hover);
             if let Some(dir) = &dir
                 && let Some(d) = drop_target(ui, &resp, dir)
             {
@@ -994,8 +1000,13 @@ pub(super) enum RowAction {
     /// Shift+click: select from the last row clicked to this one, adding to
     /// what's selected if Ctrl is held too (`true`).
     Range(PathBuf, bool),
-    /// A click on the background: select nothing.
+    /// A right-click: select just this row, unless it's selected already, so
+    /// the menu it opens acts on the selection, as in a file manager.
+    RightClick(PathBuf),
+    /// A click on the background, or right-click: select nothing.
     Deselect,
+    /// An item picked from the right-click menu (see [context_menu]).
+    Menu(MenuItem),
     /// A drag of this row began, taking the rest of the selection with it
     /// if it's selected.
     Drag(PathBuf),
@@ -1015,6 +1026,9 @@ pub(super) fn row_action(
     if is_folder && let Some(drop) = drop_target(ui, resp, path) {
         return Some(RowAction::Drop(drop));
     }
+    if let Some(item) = context_menu(ui, resp, Some((path, is_folder))) {
+        return Some(RowAction::Menu(item));
+    }
     let path = path.to_path_buf();
     if resp.drag_started_by(egui::PointerButton::Primary) {
         return Some(RowAction::Drag(path));
@@ -1024,7 +1038,9 @@ pub(super) fn row_action(
     // folder navigates into it; a file opens with its associated program,
     // just like a desktop file manager. A middle click opens a folder in a
     // new tab.
-    let action = if is_folder && resp.middle_clicked() {
+    let action = if resp.secondary_clicked() {
+        RowAction::RightClick(path)
+    } else if is_folder && resp.middle_clicked() {
         RowAction::List(ListAction::NewTabDir(path))
     } else if resp.double_clicked() {
         RowAction::List(if is_folder {
@@ -1051,15 +1067,121 @@ pub(super) fn row_action(
 
 /// Register the visible part of a Files list's `ui` (a [ScrollArea]'s
 /// contents) for clicks before its rows, so it gets those that miss them:
-/// a plain one selects nothing, as in a file manager.
+/// a plain one selects nothing, as in a file manager, and so does a
+/// right-click, which opens its menu.
 pub(super) fn background_action(ui: &Ui) -> Option<RowAction> {
     let resp = ui.interact(
         ui.clip_rect(),
         ui.id().with("files_background"),
         Sense::click(),
     );
+    if let Some(item) = context_menu(ui, &resp, None) {
+        return Some(RowAction::Menu(item));
+    }
+
     let plain = ui.input(|i| !i.modifiers.command && !i.modifiers.shift);
-    (resp.clicked() && plain).then_some(RowAction::Deselect)
+
+    ((resp.clicked() && plain) || resp.secondary_clicked()).then_some(RowAction::Deselect)
+}
+
+/// What's picked from the Files right-click menu.
+pub(super) enum MenuItem {
+    /// Open the file in a viewer window.
+    View(PathBuf),
+    /// Open the file in a viewer window's editor, or an image in Paint.
+    Edit(PathBuf),
+    /// Open the file with the OS's default program.
+    Open(PathBuf),
+    /// Extract the zip archive into a folder beside it.
+    Extract(PathBuf),
+    NewFolder,
+    NewFile,
+    /// Compress the selected rows into a zip archive.
+    Compress,
+}
+
+/// The right-click menu of `resp`, a Files `row` (its path, and whether it's
+/// a folder) or the background under them. Returns what's picked from it.
+/// As in a file manager, only a row's menu acts on the selection, and the
+/// file items at its top, on that row.
+fn context_menu(ui: &Ui, resp: &Response, row: Option<(&Path, bool)>) -> Option<MenuItem> {
+    let new_folder_keys = KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::N);
+    let new_folder_keys = ui.ctx().format_shortcut(&new_folder_keys);
+    let mut picked = None;
+
+    resp.context_menu(|ui| {
+        let mut item = |ui: &mut Ui, button: Button, item: MenuItem| {
+            let resp = ui.add(button);
+            if resp.clicked() {
+                picked = Some(item);
+            }
+            resp
+        };
+
+        if let Some((path, false)) = row {
+            let file = || path.to_path_buf();
+            if viewer::can_view(path) {
+                item(ui, Button::new("View"), MenuItem::View(file()));
+                if !viewer::is_image(path) {
+                    item(ui, Button::new("Edit"), MenuItem::Edit(file()));
+                } else if cfg!(windows) {
+                    item(ui, Button::new("Edit"), MenuItem::Edit(file())).on_hover_text("In Paint");
+                }
+            } else {
+                item(ui, Button::new("Open"), MenuItem::Open(file()))
+                    .on_hover_text("With its default program");
+            }
+            if files::is_zip(path) {
+                item(ui, Button::new("Extract"), MenuItem::Extract(file()))
+                    .on_hover_text("Into a new folder beside it");
+            }
+            ui.separator();
+        }
+
+        item(
+            ui,
+            Button::new("+📁 New folder").shortcut_text(new_folder_keys),
+            MenuItem::NewFolder,
+        );
+        item(ui, Button::new("+🗋 New file"), MenuItem::NewFile);
+        if row.is_some() {
+            ui.separator();
+            item(ui, Button::new("Compress to ZIP"), MenuItem::Compress);
+        }
+    });
+
+    picked
+}
+
+/// Open `item`'s file as [MenuItem::View], [MenuItem::Edit] or
+/// [MenuItem::Open] says. Its dir moves to the top of Recent dirs, as for a
+/// double-click.
+fn open_from_menu(state: &mut State, item: MenuItem) {
+    let (MenuItem::View(path) | MenuItem::Edit(path) | MenuItem::Open(path)) = &item else {
+        return;
+    };
+    if let Some(dir) = path.parent() {
+        state.touch_recent_dir(dir);
+    }
+
+    match item {
+        MenuItem::View(p) => state.file_viewers.open(p),
+        #[cfg(windows)]
+        MenuItem::Edit(p) if viewer::is_image(&p) => {
+            if let Err(e) = files::open_in_paint(&p) {
+                let msg = format!("open: failed to open {} in Paint: {e}", p.display());
+                state.push_out(msg, OutType::StdErr);
+            }
+        }
+        MenuItem::Edit(p) => state.file_viewers.edit(p),
+        MenuItem::Open(p) => {
+            if let Err(e) = files::open_with_default_app(&p) {
+                let msg = format!("open: failed to open {}: {e}", p.display());
+                state.push_out(msg, OutType::StdErr);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Do what a click, drag or drop on a Files row asked for.
@@ -1083,7 +1205,24 @@ pub(super) fn apply_row_action(state: &mut State, ui: &Ui, action: Option<RowAct
         }
         RowAction::Toggle(p) => state.toggle_file(&p),
         RowAction::Range(p, add) => state.select_range(&p, add),
+        RowAction::RightClick(p) => {
+            if !state.selection.paths.contains(&p) {
+                state.select_file(&p);
+            }
+        }
         RowAction::Deselect => state.clear_file_selection(),
+        RowAction::Menu(item) => {
+            // The click on the menu, over the pane, took the keyboard from it.
+            state.ui.files_active = true;
+            match item {
+                MenuItem::Extract(p) => state.extract_zip(p, ui.ctx()),
+                MenuItem::NewFolder => state.start_create(true),
+                MenuItem::NewFile => state.start_create(false),
+                MenuItem::Compress => state.compress_selected(ui.ctx()),
+                item => open_from_menu(state, item),
+            }
+            ui.ctx().request_repaint();
+        }
         RowAction::Drag(p) => {
             // An unselected row is selected first, as in a file manager: on
             // its own, or with Ctrl, along with the rest.

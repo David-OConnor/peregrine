@@ -3,9 +3,11 @@
 
 An integrated terminal and file browser. For Linux, Windows, and MacOS. I built this for my own file-system and CLI workflows. Wherever I notice a friction point, I update this program to address it. For example, when using a `cd` command to navigate in a terminal, I've made it trivial to access ones I've used before, or to find the right directory using a few characters from dir's name. It also smooths over miscellaneous OS-level functionality which I've encountered pain points in.
 
-*If I may be so bold*: This program likely represents a simple improvement to many people's workflows.
+*If I may be so bold*: This program likely represents a simple improvement to many people's OS-tool workflows.
 
-The initial inspiration: I do not enjoy manually navigating directories (In a terminal with `cd` commands, nor my OS's file browser). In the case of ones I use frequent, there is no reason I must!
+The initial inspiration: I do not enjoy manually navigating directories (In a terminal with `cd` commands, nor my OS's file browser). In the case of ones I use frequent, there is no reason to!
+
+![Demo of the Peregrine UI](/screenshots/demo_0.png)
 
 One description: an **Integrate File Environment or IFE**: like an IDE, but a general tool for files. Of course, most IDEs (Like Jetbrains') include functionality this program has - I still use this because it's light, and is designed to work across the whole system instead of a project.
 
@@ -13,8 +15,6 @@ It's based on the abstraction that navigating a filesystem in a GUI, and executi
 
 This application takes its CLI component and shortcuts from [Shell](https://github.com/david-oconnor/shell), and shares its relevant systems including directory and command history and bookmarks. If you are looking for a smoother terminal without a GUI, use that instead.
 
-
-![Demo of the Peregrine UI](/screenshots/demo_0.png)
 
 ## Install
 This application is distributed as a portable executable.
@@ -30,7 +30,7 @@ If you are navigating to a regularly-used directory via CLI and are doing too mu
 
 
 ## Who this is not for
-If you use a fully CLI workflow, or if your terminal program must be available when you are using an arbitrary computer or via SSH, this is not what you're looking for. If you perform all file operations in a terminal, or all in a GUI, this is not for you - it's for workflows that use both. This is not a shell scripting language, and its CLI functionality runs on top of your OS's native terminal.
+If you use a fully CLI workflow, or if your terminal program must be available when you are using an arbitrary computer or via SSH, this is not what you're looking for. If you perform all file operations in a terminal, or all in a GUI, this will not be useful - it's for workflows that use both. This is not a shell scripting language, and its CLI functionality runs on top of your OS's native terminal.
 
 
 ## Hotkeys of immediate interest
@@ -168,6 +168,12 @@ The About window lists these too. Most are inspired by other programs - especial
 - **Ctrl + Shift + V**: Toggle the clipboard pane
 - **Alt + F12**: Toggle the Terminal pane
 - **Shift + F10**: Run the project, as the project bar's **Run** button does (`cargo run`, or the Python application). If both a Cargo and Python project, runs `cargo run`
+- **Alt + `**: Go to the home directory
+- **Alt + 1** / **Alt + 2**: Go to Desktop / Downloads
+- **Alt + 3**: Go to AppData. `~/Library` on Mac, `~/.local` on Linux
+- **Alt + 4**: Go to Program Files. `/Applications` on Mac, `/usr` on Linux
+
+On Mac, use **Cmd + Option** in place of **Alt**.
 
 ### File browser
 - **Enter** opens a file. (Same as double-clicking) Native viewer for text, markdown, code, and image files. OS-default otherwise.
@@ -227,6 +233,3 @@ On Windows and Linux, **Ctrl + W**, **Ctrl + T**, and **Ctrl + N** stay tab shor
 
 ### Scratchpad
 Notes kept between runs, in a side panel (the **Scratchpad** toggle). **Ctrl + A** selects all the text, as in other editors (**Cmd + A** on Mac, where **Ctrl + A** goes to the line's start). The other Terminal keys above work in it too, on the cursor's line: **Home** / **Ctrl + E** go to its start / end, **Ctrl + K** / **Ctrl + U** delete to them (**Ctrl + K** at a line's end joins the next line on), and **Ctrl + P** / **Ctrl + N** move up / down a line. As in the CLI input, **Ctrl + W**, **Ctrl + T** and **Ctrl + N** stay tab shortcuts on Windows and Linux. **Tab** indents, rather than going to the CLI input.
-
-### Bookmarks
-- **Alt + 0** to **Alt + 9**: Go to that bookmark, by its number in the Bookmarks panel. (Same as `bm 1` etc in the CLI.) On Mac, **Cmd + Option + 0** to **9**

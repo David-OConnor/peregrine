@@ -176,6 +176,14 @@ fn shortcut_groups(mac: bool) -> Vec<(&'static str, Shortcuts)> {
     let cmd = if mac { "Cmd" } else { "Ctrl" };
     // Option + a digit or letter types a symbol on Mac.
     let alt = if mac { "Cmd + Option" } else { "Alt" };
+    // As the Files panel's 🗃 and 📦 buttons.
+    let folders = if cfg!(windows) {
+        "Go to AppData / Program Files"
+    } else if mac {
+        "Go to ~/Library / /Applications"
+    } else {
+        "Go to ~/.local / /usr"
+    };
 
     let anywhere = vec![
         ("Tab".into(), "Focus the CLI input, and clear it"),
@@ -183,10 +191,9 @@ fn shortcut_groups(mac: bool) -> Vec<(&'static str, Shortcuts)> {
             format!("{cmd} + B"),
             "Bookmark the current directory, or remove its bookmark",
         ),
-        (
-            format!("{alt} + 0 to 9"),
-            "Go to that bookmark, by its number in the Bookmarks panel",
-        ),
+        (format!("{alt} + `"), "Go to the home directory"),
+        (format!("{alt} + 1 / 2"), "Go to Desktop / Downloads"),
+        (format!("{alt} + 3 / 4"), folders),
         (
             format!("{cmd} + C / X / V"),
             "Copy, cut, and paste, with clipboard history",

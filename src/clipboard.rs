@@ -648,7 +648,7 @@ fn paste_one(src: &Path, dest_dir: &Path, moving: bool, replace: bool) -> Result
 /// "stem - Copy (2).ext", ... as Explorer names a copy, or for an item
 /// `moving` there, "stem (2).ext", "stem (3).ext", ... Folders keep any dots
 /// in their name whole.
-fn free_name(dir: &Path, name: &OsStr, is_folder: bool, moving: bool) -> PathBuf {
+pub fn free_name(dir: &Path, name: &OsStr, is_folder: bool, moving: bool) -> PathBuf {
     let plain = dir.join(name);
     if fs::symlink_metadata(&plain).is_err() {
         return plain;

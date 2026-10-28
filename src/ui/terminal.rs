@@ -11,7 +11,6 @@ use egui::{
     text_selection::{CCursorRange, TextCursorState, visuals::paint_text_selection},
     vec2,
 };
-use shell::DirList;
 
 use super::{
     COLOR_BRANCH, COLOR_HIS, clipboard, grid,
@@ -19,7 +18,7 @@ use super::{
     scratchpad,
 };
 use crate::{
-    OutType, path_color,
+    OutType, files, path_color,
     path_color::Part,
     remote::Remote,
     state::State,
@@ -367,31 +366,32 @@ pub fn take_shortcut(ctx: &Context, shortcut: KeyboardShortcut) -> bool {
     })
 }
 
-/// Alt + these cd the active tab to the bookmark the Bookmarks panel numbers
-/// 0 through 9, as `bm <n>` or clicking its row does. Cmd+Option on Mac,
-/// where Option + a digit types a symbol.
-const BOOKMARK_NUMBER_KEYS: [Key; 10] = [
-    Key::Num0,
-    Key::Num1,
-    Key::Num2,
-    Key::Num3,
-    Key::Num4,
-    Key::Num5,
-    Key::Num6,
-    Key::Num7,
-    Key::Num8,
-    Key::Num9,
-];
+/// Alt + these cd the active tab to the first five Files panel shortcuts (see
+/// [files::shortcuts]): Home, Desktop, Downloads, app data and programs.
+/// Cmd+Option on Mac, where Option + a key types a symbol.
+const FOLDER_KEYS: [Key; 5] = [Key::Backtick, Key::Num1, Key::Num2, Key::Num3, Key::Num4];
 
-/// Act on the [BOOKMARK_NUMBER_KEYS] pressed this frame, and remove their key
-/// events, as for [toggle_bookmark_key]. Holding one down jumps just once. A
-/// number past the last bookmark does nothing.
-pub fn bookmark_number_keys(state: &mut State, ctx: &Context) {
-    let pattern = if ctx.os() == OperatingSystem::Mac {
+/// The modifiers [FOLDER_KEYS] take on this OS.
+fn folder_mods(ctx: &Context) -> Modifiers {
+    if ctx.os() == OperatingSystem::Mac {
         Modifiers::MAC_CMD | Modifiers::ALT
     } else {
         Modifiers::ALT
-    };
+    }
+}
+
+/// The key for the Files panel shortcut at index `i`, if it has one.
+pub fn folder_shortcut(ctx: &Context, i: usize) -> Option<KeyboardShortcut> {
+    let key = *FOLDER_KEYS.get(i)?;
+
+    Some(KeyboardShortcut::new(folder_mods(ctx), key))
+}
+
+/// Act on the [FOLDER_KEYS] pressed this frame, and remove their key events,
+/// as for [toggle_bookmark_key]. Holding one down goes just once. As with the
+/// buttons, a dir that doesn't exist is skipped.
+pub fn folder_keys(state: &mut State, ctx: &Context) {
+    let pattern = folder_mods(ctx);
 
     let jumps = ctx.input_mut(|i| {
         let mut jumps = Vec::new();
@@ -410,7 +410,7 @@ pub fn bookmark_number_keys(state: &mut State, ctx: &Context) {
             if !modifiers.matches_exact(pattern) {
                 return true;
             }
-            let Some(n) = BOOKMARK_NUMBER_KEYS.iter().position(|k| k == key) else {
+            let Some(n) = FOLDER_KEYS.iter().position(|k| k == key) else {
                 return true;
             };
 
@@ -420,17 +420,20 @@ pub fn bookmark_number_keys(state: &mut State, ctx: &Context) {
             }
             false
         });
-        // Don't also type the digit into the input box.
+        // Don't also type the character into the input box.
         if taken {
             i.events.retain(|e| !matches!(e, Event::Text(_)));
         }
         jumps
     });
+    if jumps.is_empty() {
+        return;
+    }
 
+    let mut shortcuts = files::shortcuts(state.home.as_deref());
     for n in jumps {
-        if let Some(i) = state.bookmark_at(n) {
-            let target = state.dir_bookmarks[i].clone();
-            state.change_saved_dir(target, DirList::Bookmarks);
+        if let Some(dir) = shortcuts[n].dir.take().filter(|d| d.is_dir()) {
+            state.change_dir(dir);
         }
     }
 }
