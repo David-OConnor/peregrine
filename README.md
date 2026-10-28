@@ -229,6 +229,3 @@ On Windows and Linux, **Ctrl + W**, **Ctrl + T**, and **Ctrl + N** stay tab shor
 - **Ctrl + N** / **Ctrl + P**: Next / previous history entry, as ↓ / ↑. (**Ctrl + N** on Mac)
 - **Ctrl + C**: Cancel the current input. Stops the running command instead, if there is one, and copies if text is selected.
 - **Ctrl + D**: Delete the character under the cursor. On an empty line, ends a running program's input; with nothing running, it's `exit`.
-
-### Scratchpad
-Notes kept between runs, in a side panel (the **Scratchpad** toggle). **Ctrl + A** selects all the text, as in other editors (**Cmd + A** on Mac, where **Ctrl + A** goes to the line's start). The other Terminal keys above work in it too, on the cursor's line: **Home** / **Ctrl + E** go to its start / end, **Ctrl + K** / **Ctrl + U** delete to them (**Ctrl + K** at a line's end joins the next line on), and **Ctrl + P** / **Ctrl + N** move up / down a line. As in the CLI input, **Ctrl + W**, **Ctrl + T** and **Ctrl + N** stay tab shortcuts on Windows and Linux. **Tab** indents, rather than going to the CLI input.

@@ -1120,17 +1120,22 @@ fn context_menu(ui: &Ui, resp: &Response, row: Option<(&Path, bool)>) -> Option<
 
         if let Some((path, false)) = row {
             let file = || path.to_path_buf();
-            if viewer::can_view(path) {
-                item(ui, Button::new("View"), MenuItem::View(file()));
+            // Bold whichever of View and Open a double-click does.
+            let label = |text: &str, default: bool| {
+                let text = RichText::new(text);
+                Button::new(if default { text.family(ui::bold_family()) } else { text })
+            };
+            let viewable = viewer::can_view(path);
+            if viewable {
+                item(ui, label("View", true), MenuItem::View(file()));
                 if !viewer::is_image(path) {
                     item(ui, Button::new("Edit"), MenuItem::Edit(file()));
                 } else if cfg!(windows) {
                     item(ui, Button::new("Edit"), MenuItem::Edit(file())).on_hover_text("In Paint");
                 }
-            } else {
-                item(ui, Button::new("Open"), MenuItem::Open(file()))
-                    .on_hover_text("With its default program");
             }
+            item(ui, label("Open", !viewable), MenuItem::Open(file()))
+                .on_hover_text("With its default program");
             if files::is_zip(path) {
                 item(ui, Button::new("Extract"), MenuItem::Extract(file()))
                     .on_hover_text("Into a new folder beside it");
