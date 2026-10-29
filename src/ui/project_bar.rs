@@ -24,7 +24,7 @@ const CARGO_BUTTONS: [(&str, &str); 6] = [
     ("Clippy", "cargo clippy"),
 ];
 
-const BUSY: &str = "A command is already running in this tab: stop it first (Ctrl+C)";
+pub(super) const BUSY: &str = "A command is already running in this tab: stop it first (Ctrl+C)";
 
 /// The green of Run's "play" triangle and the red of Stop's square (see
 /// [run_button]), in light and dark mode, as IDEs color them.
@@ -170,7 +170,10 @@ fn groups(state: &mut State, ui: &mut Ui) {
         let branches = state.git_branches.as_ref();
         let names = branches.map_or(&[][..], |b| &b.names);
         let recent = branches.map_or(&[][..], |b| &b.recent);
+        let root = branches.and_then(|b| b.root.clone());
+        let projects_open = root.is_some() && state.ui.projects.repo() == root.as_deref();
         let mut reload_branches = false;
+        let mut toggle_projects = false;
 
         tinted_group(ui, GIT_TINT, |ui| {
             // The latest first, from the left.
@@ -219,11 +222,25 @@ fn groups(state: &mut State, ui: &mut Ui) {
                     line = Some(Ok(cmd.to_owned()));
                 }
             }
+
+            if root.is_some() {
+                ui.separator();
+                toggle_projects = ui
+                    .add(Button::selectable(projects_open, "Projects"))
+                    .on_hover_text(
+                        "List the repos in the workspace this one was cloned from, \
+                         to clone beside it or pull",
+                    )
+                    .clicked();
+            }
             ui.strong("Git:");
         });
 
         if reload_branches {
             state.git_branches = None;
+        }
+        if toggle_projects && let Some(root) = root {
+            state.ui.projects.toggle(root, ui.ctx());
         }
     }
 

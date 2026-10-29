@@ -21,6 +21,7 @@ pub mod panes;
 mod path_bar;
 pub mod path_panel;
 mod project_bar;
+pub mod projects;
 mod remote;
 pub mod scratchpad;
 mod search;
@@ -789,6 +790,7 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
     path_panel::path_window(state, ui.ctx());
 
     about::show(state, ui.ctx());
+    projects::show(state, ui.ctx());
     settings::show(state, ui.ctx());
     dirs::stale_dir_popup(state, ui.ctx());
     file_browser::delete_popup(state, ui.ctx());

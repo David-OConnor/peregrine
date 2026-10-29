@@ -80,6 +80,20 @@ pub fn git_branch(dir: &Path, name: &str) -> Result<String, String> {
     })
 }
 
+/// The line the Projects window's Clone runs: clone `url` to `dest`.
+pub fn git_clone(url: &str, dest: &Path) -> String {
+    format!(
+        "git clone {} {}",
+        quote(url),
+        quote(&dest.to_string_lossy())
+    )
+}
+
+/// The line the Projects window's Pull runs, in the repo at `dir`.
+pub fn git_pull(dir: &Path) -> String {
+    format!("git -C {} pull", quote(&dir.to_string_lossy()))
+}
+
 /// How recently a branch must have been committed to or checked out for the
 /// Git group to give it a button (see [Branches::recent]).
 const RECENT_BRANCH_DAYS: i64 = 7;
@@ -102,6 +116,8 @@ const BRANCH_REFLOG_TAIL: u64 = 4 * 1024;
 pub struct Branches {
     /// The dir they were read for.
     pub dir: PathBuf,
+    /// The repo's top dir; `None` when `dir`'s in none.
+    pub root: Option<PathBuf>,
     /// Every local branch, and every remote one by the name `git switch`
     /// takes for it (`feature` for `origin/feature`): sorted, each once.
     pub names: Vec<String>,
@@ -128,6 +144,7 @@ impl Branches {
             .filter_map(|r| r.split_once('/').map(|(_, name)| name.to_owned()))
             .filter(|name| name != "HEAD");
 
+        branches.root = Some(repo.root.clone());
         branches.recent = recent_branches(&repo, &local);
         branches.names = local.into_iter().chain(remote).collect();
         branches.names.sort();
@@ -138,6 +155,8 @@ impl Branches {
 
 /// Where a repo keeps its files.
 struct GitDirs {
+    /// The worktree's top dir, holding `.git`.
+    root: PathBuf,
     /// This worktree's own: its `HEAD`, and that's reflog.
     git: PathBuf,
     /// Those its worktrees share: the refs, and their reflogs. `git`, but
@@ -152,6 +171,7 @@ impl GitDirs {
             .ancestors()
             .map(|d| d.join(".git"))
             .find(|p| p.exists())?;
+        let root = dot.parent()?.to_path_buf();
         let git = if dot.is_dir() {
             dot
         } else {
@@ -159,13 +179,13 @@ impl GitDirs {
             // dir it's in.
             let text = fs::read_to_string(&dot).ok()?;
             let path = text.trim().strip_prefix("gitdir:")?.trim();
-            dot.parent()?.join(path)
+            root.join(path)
         };
         let common = match fs::read_to_string(git.join("commondir")) {
             Ok(text) => git.join(text.trim()),
             Err(_) => git.clone(),
         };
-        Some(Self { git, common })
+        Some(Self { root, git, common })
     }
 }
 

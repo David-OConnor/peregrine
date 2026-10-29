@@ -26,6 +26,7 @@ mod terminal;
 mod ui;
 mod util;
 mod viewer;
+mod workspace;
 
 use std::{
     path::{Path, PathBuf},

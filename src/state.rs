@@ -48,6 +48,8 @@ pub struct StateUi {
     /// The Settings window, opened from the tab strip's gear button. Not
     /// persisted.
     pub settings: bool,
+    /// The project bar's Projects window. Not persisted.
+    pub projects: ui::projects::ProjectsWindow,
     /// Checking for, downloading, and installing a newer release, from the
     /// About window. Not persisted.
     pub updater: software_manager::Updater,
@@ -273,6 +275,7 @@ impl Default for StateUi {
             about: false,
             about_folder_error: None,
             settings: false,
+            projects: Default::default(),
             updater: Default::default(),
             cli_input: vec![String::new()],
             out: vec![Output::default()],

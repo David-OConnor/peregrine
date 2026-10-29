@@ -42,6 +42,11 @@ shell = { path = "../shell" }
 # itself.
 software_manager = { path = "../software_manager", default-features = false }
 
+# The project bar's Projects window lists a GitHub or GitLab workspace's repos
+# from their APIs (see `src/workspace.rs`). Same version and features
+# `software_manager` builds, so this adds nothing new.
+ureq = { version = "3.4.2", features = ["json"] }
+
 # Terminal emulator for full-screen programs (vim, nano, less, top) run over
 # SSH: the remote's output is parsed into a screen of cells the GUI draws
 # (see `src/remote.rs`, `src/ui/remote_grid.rs`).
