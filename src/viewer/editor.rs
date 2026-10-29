@@ -15,6 +15,7 @@ use egui::{
 };
 
 use super::{Kind, MAX_BYTES, gutter, search, selection, syntax};
+use crate::ui::scratchpad::{self, ScratchpadTab};
 
 /// Let a burst of typing settle before starting another highlighting task.
 const HIGHLIGHT_DELAY: Duration = Duration::from_millis(100);
@@ -167,10 +168,12 @@ impl Editor {
 
     /// Fill the window with egui's native selection, clipboard, navigation,
     /// undo/redo and Tab indentation, with the viewer's gutter and find bar.
+    /// Tab inserts a tab, or 4 spaces if `tab` is [ScratchpadTab::Spaces].
     pub(super) fn show(
         &mut self,
         ui: &mut Ui,
         kind: Kind,
+        tab: ScratchpadTab,
         search: &mut search::Search,
         window: ViewportId,
     ) {
@@ -180,6 +183,9 @@ impl Editor {
                     if let Event::Paste(text) = event {
                         *text = text.replace("\r\n", "\n");
                     }
+                }
+                if tab == ScratchpadTab::Spaces {
+                    scratchpad::tab_to_spaces(&mut i.events);
                 }
             });
         }
@@ -408,7 +414,7 @@ mod tests {
         let file = TestFile::new(b"original");
         let ctx = Context::default();
         let mut inner = Inner::default();
-        inner.open_now(&ctx, file.0.clone());
+        inner.open_now(&ctx, file.0.clone(), false);
         let doc = &mut inner.docs[0];
         assert!(doc.editor.is_none());
         doc.start_editing(&ctx);
@@ -417,7 +423,7 @@ mod tests {
         doc.last_poll = Instant::now() - super::super::RELOAD_POLL;
         doc.reload_if_changed(&ctx);
         assert_eq!(doc.editor.as_ref().unwrap().text, "draft");
-        inner.open_now(&ctx, file.0.clone());
+        inner.open_now(&ctx, file.0.clone(), false);
         let doc = &mut inner.docs[0];
         assert_eq!(doc.editor.as_ref().unwrap().text, "draft");
         for action in [
@@ -470,10 +476,13 @@ mod tests {
                     ..Default::default()
                 },
                 |ui| {
-                    doc.editor
-                        .as_mut()
-                        .unwrap()
-                        .show(ui, Kind::Text, &mut doc.search, window);
+                    doc.editor.as_mut().unwrap().show(
+                        ui,
+                        Kind::Text,
+                        doc.tab,
+                        &mut doc.search,
+                        window,
+                    );
                 },
             )
         };
@@ -511,10 +520,14 @@ mod tests {
             ],
         )
         .drop_without_applying_deltas();
-        assert_eq!(doc.editor.as_ref().unwrap().text, "saved\n\t");
+        // Tab inserts 4 spaces until set to insert a tab.
+        assert_eq!(doc.editor.as_ref().unwrap().text, "saved\n    ");
+        doc.tab = ScratchpadTab::Tab;
+        frame(&mut doc, vec![key(Key::Tab, Modifiers::NONE)]).drop_without_applying_deltas();
+        assert_eq!(doc.editor.as_ref().unwrap().text, "saved\n    \t");
         assert!(ctx.memory(|m| m.has_focus(id(window))));
         assert!(doc.save(&ctx));
-        assert_eq!(fs::read(&file.0).unwrap(), b"saved\r\n\t");
+        assert_eq!(fs::read(&file.0).unwrap(), b"saved\r\n    \t");
         assert!(!doc.dirty());
     }
 
@@ -554,7 +567,7 @@ mod tests {
         let viewers = super::super::FileViewers::default();
         {
             let mut inner = viewers.lock();
-            inner.open_now(&ctx, file.0.clone());
+            inner.open_now(&ctx, file.0.clone(), false);
             inner.docs[0].start_editing(&ctx);
             replace(inner.docs[0].editor.as_mut().unwrap(), "unsaved draft");
         }
