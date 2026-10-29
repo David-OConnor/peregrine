@@ -138,6 +138,7 @@ Shortcuts to reduce typing:
 - `run`: `cargo run`
 - `build`: `cargo build`
 - `fmt`: `cargo +nightly fmt`
+- `rust new <name>`: `cargo new <name>`, plus a `.gitignore` that also ignores `Cargo.lock` and `.idea`, a `rustfmt.toml`, and a placeholder `README.md`. Options such as `--lib` are passed through.
 
 
 ### File viewer

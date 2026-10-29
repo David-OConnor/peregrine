@@ -63,7 +63,7 @@ pub fn handle_cmd(state: &mut State, cmd: &str, input: &str, args: &str, ctx: &e
                     state.run_remote(&c);
                 }
             }
-            "rm_targets" | "open" | "view" | "edit" | "root" => state.push_out(
+            "rm_targets" | "open" | "view" | "edit" | "root" | "rust" => state.push_out(
                 format!("{cmd}: only runs locally; disconnect first"),
                 OutType::StdErr,
             ),
@@ -133,6 +133,14 @@ pub fn handle_cmd(state: &mut State, cmd: &str, input: &str, args: &str, ctx: &e
             // bounded `-n 200` snapshot in this mode. On non-Linux the
             // shared impl emits a friendly "only supported on Linux" error.
             commands::logs(args, false, &mut |kind, msg| {
+                state.push_out(msg, out_type_for(kind));
+            });
+        }
+
+        // `rust new`: `cargo new`, then our own .gitignore, rustfmt.toml and README.
+        "rust" => {
+            let cwd = state.cwd().to_path_buf();
+            commands::rust(args, &cwd, &mut |kind, msg| {
                 state.push_out(msg, out_type_for(kind));
             });
         }
