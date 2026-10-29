@@ -3,7 +3,7 @@
 
 use egui::{
     Align, Button, Color32, EventFilter, Frame, Id, IntoAtoms, Key, KeyboardShortcut, Layout,
-    Modifiers, Popup, RichText, TextEdit, TextStyle, Ui,
+    Modifiers, OpenUrl, Popup, RichText, TextEdit, TextStyle, Ui,
     text::{CCursor, CCursorRange},
 };
 
@@ -98,7 +98,8 @@ fn tinted_group(ui: &mut Ui, tint: Tint, add_contents: impl FnOnce(&mut Ui)) {
 
 /// Right-aligned in the rest of `ui`'s row: Git while the dir's in a repo (as
 /// the prompt's branch shows), with a button for each branch active lately
-/// (see [project::Branches::recent]), Cargo, Python, each on a band of its brand's
+/// (see [project::Branches::recent]) and one opening the repo's web page (see
+/// [web_button]), Cargo, Python, each on a band of its brand's
 /// color (see [tinted_group]). Each button runs its line as if typed, so
 /// it's echoed, kept in history, and runs in the background like any other,
 /// with `python` the venv's. Not while connected over SSH, where typed lines
@@ -170,6 +171,7 @@ fn groups(state: &mut State, ui: &mut Ui) {
         let branches = state.git_branches.as_ref();
         let names = branches.map_or(&[][..], |b| &b.names);
         let recent = branches.map_or(&[][..], |b| &b.recent);
+        let web_url = branches.and_then(|b| b.web_url.as_deref());
         let root = branches.and_then(|b| b.root.clone());
         let projects_open = root.is_some() && state.ui.projects.repo() == root.as_deref();
         let mut reload_branches = false;
@@ -233,6 +235,7 @@ fn groups(state: &mut State, ui: &mut Ui) {
                     )
                     .clicked();
             }
+            web_button(ui, web_url);
             ui.strong("Git:");
         });
 
@@ -405,6 +408,23 @@ fn run_button(ui: &mut Ui, idle: bool, hover: &str, shortcut: bool, stop: &mut b
             .on_hover_text("End the command and everything it started (Ctrl+C)")
             .clicked();
         false
+    }
+}
+
+/// The Git group's 🌐 button, opening the repo's page on its host (`url`;
+/// see [project::web_url]) in the browser. It runs no command, so it's left
+/// enabled while one's running.
+fn web_button(ui: &mut Ui, url: Option<&str>) {
+    let clicked = ui
+        .add_enabled(url.is_some(), Button::new("🌐"))
+        .on_hover_text(format!(
+            "Open this repo's page in the browser: {}",
+            url.unwrap_or_default()
+        ))
+        .on_disabled_hover_text("This repo has no remote with a web page")
+        .clicked();
+    if clicked && let Some(url) = url {
+        ui.ctx().open_url(OpenUrl::new_tab(url));
     }
 }
 

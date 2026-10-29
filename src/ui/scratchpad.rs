@@ -42,8 +42,9 @@ const FORMATS: [&str; 2] = ["txt", "md"];
 /// handles, takes as many off the start of the line.)
 const INDENT: &str = "    ";
 
-/// What Tab can do in the text, with each button's label and hover text.
-const TAB_MODES: [(ScratchpadTab, &str, &str); 3] = [
+/// What Tab can do in the text, with each button's label and hover text. The
+/// viewer's editor offers the first two: its window has no CLI input.
+pub(crate) const TAB_MODES: [(ScratchpadTab, &str, &str); 3] = [
     (ScratchpadTab::Tab, "Tab", "Tab inserts a tab character"),
     (ScratchpadTab::Spaces, "4 spaces", "Tab inserts 4 spaces"),
     (
@@ -58,7 +59,8 @@ pub(super) fn edit_id() -> Id {
     Id::new("scratchpad_text")
 }
 
-/// What Tab does in the scratchpad.
+/// What Tab does in the scratchpad, or in the viewer's editor, which never
+/// sets [Self::FocusTerm].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ScratchpadTab {
     /// Inserts a tab character.
@@ -147,7 +149,11 @@ pub(super) fn draw(state: &mut State, ui: &mut Ui) {
     let ctx = ui.ctx().clone();
     let id = edit_id();
 
-    if let Some(tab) = tab_mode_control(ui, state.ui.scratchpad.tab) {
+    // Wrapping when the panel is narrow.
+    let tab = ui
+        .horizontal_wrapped(|ui| tab_mode_control(ui, state.ui.scratchpad.tab, &TAB_MODES))
+        .inner;
+    if let Some(tab) = tab {
         state.ui.scratchpad.tab = tab;
         // Back to the text, from the button.
         ctx.memory_mut(|m| m.request_focus(id));
@@ -211,15 +217,7 @@ pub(super) fn draw(state: &mut State, ui: &mut Ui) {
             // Focus term, Tab is gone by now; see
             // `terminal::focus_input_key`.)
             if spaces {
-                for event in &mut i.events {
-                    if matches!(
-                        event,
-                        Event::Key { key: Key::Tab, pressed: true, modifiers, .. }
-                            if modifiers.is_none()
-                    ) {
-                        *event = Event::Text(INDENT.to_owned());
-                    }
-                }
+                tab_to_spaces(&mut i.events);
             }
             // Ctrl+A (Cmd+A on Mac) selects all, as in other text boxes,
             // rather than going to the line's start as in the CLI input. (On
@@ -270,20 +268,37 @@ pub(super) fn draw(state: &mut State, ui: &mut Ui) {
 }
 
 /// The `Tab key: Tab | 4 spaces | Focus term` selector at the top of the
-/// panel (see [TAB_MODES]), wrapping when the panel is narrow. Returns the
-/// mode picked, if it changed.
-fn tab_mode_control(ui: &mut Ui, current: ScratchpadTab) -> Option<ScratchpadTab> {
+/// panel, or the viewer editor's toolbar, offering `modes` (see
+/// [TAB_MODES]). For a horizontal layout. Returns the mode picked, if it
+/// changed.
+pub(crate) fn tab_mode_control(
+    ui: &mut Ui,
+    current: ScratchpadTab,
+    modes: &[(ScratchpadTab, &str, &str)],
+) -> Option<ScratchpadTab> {
     let mut tab = current;
 
-    ui.horizontal_wrapped(|ui| {
-        ui.label("Tab key:");
-        for (mode, label, hover) in TAB_MODES {
-            ui.selectable_value(&mut tab, mode, label)
-                .on_hover_text(hover);
-        }
-    });
+    ui.label("Tab key:");
+    for &(mode, label, hover) in modes {
+        ui.selectable_value(&mut tab, mode, label)
+            .on_hover_text(hover);
+    }
 
     (tab != current).then_some(tab)
+}
+
+/// Turns each Tab press in `events` without modifiers into [INDENT] typed,
+/// which a focused text box puts in at its caret.
+pub(crate) fn tab_to_spaces(events: &mut [Event]) {
+    for event in events {
+        if matches!(
+            event,
+            Event::Key { key: Key::Tab, pressed: true, modifiers, .. }
+                if modifiers.is_none()
+        ) {
+            *event = Event::Text(INDENT.to_owned());
+        }
+    }
 }
 
 /// The row of buttons above the text. `has_text` and `has_selection` enable

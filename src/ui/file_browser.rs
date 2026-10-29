@@ -214,9 +214,10 @@ pub(super) fn draw(state: &mut State, ui: &mut Ui) {
     // into a missing dir and push a diagnostic. On Windows, 🖴 is a menu of
     // drives and 🗑 opens the Recycle Bin in Explorer. Rows dragged onto ⬆
     // or a shortcut go to that dir. The first five have keys too (see
-    // [terminal::folder_keys]).
+    // [terminal::folder_keys]). The one for the dir already shown is green.
 
     let shortcuts = files::shortcuts(home.as_deref());
+    let cwd = state.cwd();
     let mut go_up = false;
     let mut go_back = false;
     let mut go_forward = false;
@@ -269,8 +270,9 @@ pub(super) fn draw(state: &mut State, ui: &mut Ui) {
                 None => s.hover.to_string(),
             };
 
+            let here = dir.as_deref().is_some_and(|d| same_dir(d, cwd));
             let resp = ui
-                .add_enabled(dir.is_some(), Button::new(s.glyph))
+                .add_enabled(dir.is_some(), Button::new(shortcut_label(ui, s.glyph, here)))
                 .on_hover_text(hover);
             if let Some(dir) = &dir
                 && let Some(d) = drop_target(ui, &resp, dir)
@@ -287,7 +289,8 @@ pub(super) fn draw(state: &mut State, ui: &mut Ui) {
             // Read afresh each frame the menu is open, so a USB stick
             // plugged in meanwhile shows up. A drive with no media is still
             // listed, as in Explorer; picking it reports the `cd` error.
-            ui.menu_button("🖴", |ui| {
+            // Green at a drive's root, the only dirs with no parent.
+            ui.menu_button(shortcut_label(ui, "🖴", parent.is_none()), |ui| {
                 for d in files::drives() {
                     if ui.button(format!("{} {}", d.glyph, d.name)).clicked() {
                         go_to = Some(d.root);
@@ -633,6 +636,26 @@ pub(super) fn draw(state: &mut State, ui: &mut Ui) {
 
     drag_preview(ui);
     drag_out(state, ui);
+}
+
+/// A shortcut button's glyph, in green when `current`: when its dir is the
+/// one already shown.
+fn shortcut_label(ui: &Ui, glyph: &str, current: bool) -> RichText {
+    let text = RichText::new(glyph);
+    if !current {
+        return text;
+    }
+    text.color(if ui.visuals().dark_mode {
+        CURRENT_SHORTCUT_DARK
+    } else {
+        CURRENT_SHORTCUT_LIGHT
+    })
+}
+
+/// Whether `a` and `b` name the same dir. Windows ignores case, so a typed
+/// `cd downloads` leaves the cwd spelled that way and still counts.
+fn same_dir(a: &Path, b: &Path) -> bool {
+    a == b || (cfg!(windows) && a.as_os_str().eq_ignore_ascii_case(b.as_os_str()))
 }
 
 fn delete_button(label: &str) -> Button<'_> {
@@ -1620,6 +1643,10 @@ fn name_box(
 
 // Executable-file color in the file-browser column.
 pub const COLOR_EXECUTABLE: Color32 = Color32::from_rgb(120, 220, 120);
+/// The shortcut button for the dir already shown: bright green, darkened on
+/// a light background so it stays readable.
+const CURRENT_SHORTCUT_DARK: Color32 = Color32::from_rgb(60, 255, 60);
+const CURRENT_SHORTCUT_LIGHT: Color32 = Color32::from_rgb(0, 160, 0);
 /// The Files list splits into as many columns as fit at least this many
 /// monospace characters each (so the threshold follows the GUI font size).
 /// See [ui::file_browser] and [ui::list_columns].

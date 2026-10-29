@@ -109,9 +109,10 @@ const HEAD_REFLOG_TAIL: u64 = 64 * 1024;
 const BRANCH_REFLOG_TAIL: u64 = 4 * 1024;
 
 /// The branches of the repo a dir is in, for the Git group's Branch box to
-/// complete and its branch buttons. Read straight from the repo's files, not
-/// by running `git`, so it's cheap to read again whenever the branch might
-/// have changed (see `State::git_branches`).
+/// complete and its branch buttons, and its web page, for its 🌐 button.
+/// Read straight from the repo's files, not by running `git`, so it's cheap
+/// to read again whenever the branch might have changed (see
+/// `State::git_branches`).
 #[derive(Default)]
 pub struct Branches {
     /// The dir they were read for.
@@ -124,6 +125,9 @@ pub struct Branches {
     /// The local branches committed to, created or checked out in the last
     /// [RECENT_BRANCH_DAYS] days, most recent first.
     pub recent: Vec<String>,
+    /// The repo's page on its host, from its remote (see [remote_url] and
+    /// [web_url]). None when it has no remote, or only a local one.
+    pub web_url: Option<String>,
 }
 
 impl Branches {
@@ -149,8 +153,122 @@ impl Branches {
         branches.names = local.into_iter().chain(remote).collect();
         branches.names.sort();
         branches.names.dedup();
+        branches.web_url = remote_url(&repo).as_deref().and_then(web_url);
         branches
     }
+}
+
+/// The URL of the remote the repo's web page is found from: the current
+/// branch's upstream's, else `origin`'s, else the first one listed. Read from
+/// the repo's `config` by hand, so `insteadOf` rewrites and includes aren't
+/// followed.
+fn remote_url(repo: &GitDirs) -> Option<String> {
+    let config = fs::read_to_string(repo.common.join("config")).ok()?;
+    let head = fs::read_to_string(repo.git.join("HEAD")).unwrap_or_default();
+    let branch = head.trim().strip_prefix("ref: refs/heads/");
+
+    // `[section "subsection"]` headers, each followed by `key = value` lines.
+    // Section names and keys are matched without regard to case.
+    let mut section = ("", "");
+    let mut upstream = None;
+    // `(remote, url)`, in the order listed.
+    let mut urls = Vec::new();
+    for line in config.lines().map(str::trim) {
+        if let Some(header) = line.strip_prefix('[') {
+            let header = header.split(']').next().unwrap_or_default();
+            let (name, sub) = header.split_once(' ').unwrap_or((header, ""));
+            section = (name, sub.trim().trim_matches('"'));
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let (key, value) = (key.trim(), value.trim().trim_matches('"'));
+        if section.0.eq_ignore_ascii_case("remote") && key.eq_ignore_ascii_case("url") {
+            urls.push((section.1, value));
+        } else if section.0.eq_ignore_ascii_case("branch")
+            && key.eq_ignore_ascii_case("remote")
+            && Some(section.1) == branch
+        {
+            upstream = Some(value);
+        }
+    }
+
+    [upstream, Some("origin")]
+        .into_iter()
+        .flatten()
+        .find_map(|r| urls.iter().find(|(name, _)| *name == r))
+        .or(urls.first())
+        .map(|(_, url)| url.to_string())
+}
+
+/// The web page of the repo at the remote `url`, where GitHub, GitLab,
+/// Bitbucket, Codeberg and most other hosts serve it:
+/// `https://<host>/<path>`, without the path's `.git`. An `http` remote's
+/// stays `http`, for a server without TLS. Any user name or password is left
+/// out, as is an SSH or Git daemon port, which isn't the web server's. Azure
+/// DevOps' SSH remotes, and GitHub's and GitLab's on port 443, are mapped to
+/// their sites. None for a local path.
+///
+/// A host's pages needn't be where its remotes suggest, but they are for
+/// nearly every repo.
+pub fn web_url(url: &str) -> Option<String> {
+    let url = url.trim();
+    // Whether the remote's served over the web, its `[user@]host[:port]`, and
+    // the repo's path on it.
+    let (web, authority, path) = match url.split_once("://") {
+        Some((scheme, rest)) => {
+            let web = match scheme.to_ascii_lowercase().as_str() {
+                "http" => Some("http"),
+                "https" => Some("https"),
+                "ssh" | "git" | "git+ssh" | "ssh+git" => None,
+                // `file://`, or a remote helper's.
+                _ => return None,
+            };
+            let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+            (web, authority, path)
+        }
+        // SSH's scp-like `[user@]host:path`, told from a local path by a
+        // colon before any slash, and from a Windows one by a host longer
+        // than a drive letter.
+        None => {
+            let (authority, path) = url.split_once(':')?;
+            if authority.len() < 2 || authority.contains(['/', '\\']) {
+                return None;
+            }
+            (None, authority, path)
+        }
+    };
+
+    let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    let host = match web {
+        Some(_) => host,
+        None => host.split_once(':').map_or(host, |(h, _)| h),
+    };
+    let path = path.trim_matches('/');
+    let path = path
+        .strip_suffix(".git")
+        .unwrap_or(path)
+        .trim_end_matches('/');
+    if host.is_empty() || path.is_empty() {
+        return None;
+    }
+
+    // Azure DevOps' SSH paths are `v3/<org>/<project>/<repo>`.
+    let v3: Vec<&str> = path
+        .strip_prefix("v3/")
+        .map_or_else(Vec::new, |p| p.splitn(3, '/').collect());
+    Some(match (host.to_ascii_lowercase().as_str(), &v3[..]) {
+        ("ssh.dev.azure.com", [org, project, repo]) => {
+            format!("https://dev.azure.com/{org}/{project}/_git/{repo}")
+        }
+        ("vs-ssh.visualstudio.com", [org, project, repo]) => {
+            format!("https://{org}.visualstudio.com/{project}/_git/{repo}")
+        }
+        ("ssh.github.com", _) => format!("https://github.com/{path}"),
+        ("altssh.gitlab.com", _) => format!("https://gitlab.com/{path}"),
+        _ => format!("{}://{host}/{path}", web.unwrap_or("https")),
+    })
 }
 
 /// Where a repo keeps its files.
@@ -524,6 +642,59 @@ mod tests {
     }
 
     #[test]
+    fn remote_urls_give_their_web_pages() {
+        let page = "https://github.com/owner/repo";
+        for url in [
+            "https://github.com/owner/repo",
+            "https://github.com/owner/repo.git",
+            "https://github.com/owner/repo/",
+            "https://user:token@github.com/owner/repo.git",
+            "git@github.com:owner/repo.git",
+            "ssh://git@github.com/owner/repo.git",
+            "ssh://git@ssh.github.com:443/owner/repo.git",
+            "git://github.com/owner/repo.git",
+        ] {
+            assert_eq!(web_url(url).as_deref(), Some(page), "{url}");
+        }
+
+        for (url, page) in [
+            (
+                "git@gitlab.com:group/subgroup/repo.git",
+                "https://gitlab.com/group/subgroup/repo",
+            ),
+            (
+                "ssh://git@git.example.com:2222/team/repo.git",
+                "https://git.example.com/team/repo",
+            ),
+            (
+                "http://git.example.com:8080/team/repo.git",
+                "http://git.example.com:8080/team/repo",
+            ),
+            (
+                "git@ssh.dev.azure.com:v3/org/project/repo",
+                "https://dev.azure.com/org/project/_git/repo",
+            ),
+            (
+                "https://org@dev.azure.com/org/project/_git/repo",
+                "https://dev.azure.com/org/project/_git/repo",
+            ),
+        ] {
+            assert_eq!(web_url(url).as_deref(), Some(page), "{url}");
+        }
+
+        for local in [
+            "/srv/git/repo.git",
+            "../repo",
+            "C:/repos/repo",
+            r"C:\repos\repo",
+            "file:///srv/git/repo.git",
+            "",
+        ] {
+            assert_eq!(web_url(local), None, "{local}");
+        }
+    }
+
+    #[test]
     fn branches_are_read_from_the_repo_files() {
         let root = std::env::temp_dir().join("peregrine_project_branches");
         let _ = fs::remove_dir_all(&root);
@@ -558,12 +729,31 @@ mod tests {
             + &log_line(now - 50, "checkout: moving from main to feature/x");
         fs::write(git.join("logs").join("HEAD"), head).unwrap();
 
+        // `main` tracks `upstream`, so its page is that remote's.
+        fs::write(git.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        let config = "[core]\n\tbare = false\n\
+             [remote \"origin\"]\n\turl = git@github.com:me/fork.git\n\
+             [Remote \"upstream\"]\n\tURL = \"https://github.com/them/repo.git\"\n\
+             [branch \"main\"]\n\tremote = upstream\n\tmerge = refs/heads/main\n";
+        fs::write(git.join("config"), config).unwrap();
+
         let branches = Branches::read(&root.join("sub"));
         assert_eq!(
             branches.names,
             ["feature/x", "main", "old", "packed", "remote-only"]
         );
         assert_eq!(branches.recent, ["feature/x", "main"]);
+        assert_eq!(
+            branches.web_url.as_deref(),
+            Some("https://github.com/them/repo")
+        );
+
+        // A branch without an upstream gets `origin`'s.
+        fs::write(git.join("HEAD"), "ref: refs/heads/old\n").unwrap();
+        assert_eq!(
+            Branches::read(&root).web_url.as_deref(),
+            Some("https://github.com/me/fork")
+        );
 
         assert!(
             Branches::read(&std::env::temp_dir().join("no_such_repo_dir"))

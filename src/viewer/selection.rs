@@ -291,6 +291,7 @@ mod tests {
     use super::*;
     use crate::{
         markdown::{self, Details},
+        ui::scratchpad::ScratchpadTab,
         viewer::{Kind, editor, search, show_text, syntax},
     };
 
@@ -342,7 +343,7 @@ mod tests {
                 time += 1. / 60.;
                 ctx.run_ui(raw(time, events), |ui| {
                     if editing {
-                        editor.show(ui, kind, &mut search, window);
+                        editor.show(ui, kind, ScratchpadTab::Spaces, &mut search, window);
                     } else {
                         show_text(ui, &text, kind, 151, &mut layout, &mut search, window);
                     }

@@ -35,7 +35,10 @@ use crate::{
     files::{format_size, open_with_default_app},
     markdown::{self, Block, Details, is_markdown},
     placement::Placement,
-    ui::terminal::{TOGGLE_BOOKMARK, take_shortcut},
+    ui::{
+        scratchpad::{self, ScratchpadTab},
+        terminal::{TOGGLE_BOOKMARK, take_shortcut},
+    },
 };
 
 mod editor;
@@ -208,6 +211,9 @@ struct Doc {
     search: search::Search,
     /// Present only in edit mode; automatic reloads leave it alone.
     editor: Option<editor::Editor>,
+    /// What Tab inserts in edit mode, picked in the toolbar: a tab, or 4
+    /// spaces as the window opens.
+    tab: ScratchpadTab,
     /// An action waiting for Save / Discard / Cancel on an unsaved draft.
     pending: Option<Action>,
     selection: selection::Markdown,
@@ -282,6 +288,7 @@ impl Doc {
             notice: None,
             search: search::Search::default(),
             editor: None,
+            tab: ScratchpadTab::Spaces,
             pending: None,
             selection: selection::Markdown::default(),
             opened_at: None,
@@ -976,7 +983,7 @@ impl Inner {
             .frame(Frame::central_panel(ui.style()).inner_margin(margin))
             .show(ui, |ui| {
                 if let Some(editor) = &mut doc.editor {
-                    editor.show(ui, doc.kind, &mut doc.search, id);
+                    editor.show(ui, doc.kind, doc.tab, &mut doc.search, id);
                     return;
                 }
                 match &doc.content {
@@ -1178,6 +1185,15 @@ fn toolbar(doc: &mut Doc, ui: &mut Ui, window: ViewportId) {
                 }
                 if doc.dirty() {
                     ui.colored_label(ui.visuals().warn_fg_color, "Unsaved edits");
+                }
+                ui.separator();
+                // Tab and 4 spaces, not Focus term: the CLI input is in the
+                // main window.
+                let modes = &scratchpad::TAB_MODES[..2];
+                if let Some(tab) = scratchpad::tab_mode_control(ui, doc.tab, modes) {
+                    doc.tab = tab;
+                    // Back to the text, from the button.
+                    ui.ctx().memory_mut(|m| m.request_focus(editor::id(window)));
                 }
             }
             ui.separator();
