@@ -7,7 +7,6 @@ use std::{
     io::Read,
     path::Path,
     sync::Arc,
-    time::{Duration, Instant},
 };
 
 use egui::{
@@ -16,9 +15,6 @@ use egui::{
 
 use super::{Kind, MAX_BYTES, gutter, search, selection, syntax};
 use crate::ui::scratchpad::{self, ScratchpadTab};
-
-/// Let a burst of typing settle before starting another highlighting task.
-const HIGHLIGHT_DELAY: Duration = Duration::from_millis(100);
 
 #[derive(Clone, Copy)]
 enum Encoding {
@@ -115,7 +111,6 @@ pub(super) struct Editor {
     dirty: bool,
     lines: usize,
     layout: syntax::Source,
-    highlight_after: Instant,
     focus: bool,
 }
 
@@ -136,7 +131,6 @@ impl Editor {
             crlf,
             dirty: false,
             layout: syntax::Source::default(),
-            highlight_after: Instant::now(),
             focus: true,
         })
     }
@@ -202,7 +196,6 @@ impl Editor {
             text,
             snapshot,
             layout,
-            highlight_after,
             ..
         } = self;
         let output = ui
@@ -220,21 +213,16 @@ impl Editor {
                         // With no frame, this reserved shape stays behind the text.
                         let behind = ui.painter().add(Shape::Noop);
                         let output = {
+                            // An edit re-highlights only the lines it changes;
+                            // the rest keep their colors meanwhile.
                             let mut layouter = |ui: &Ui, buffer: &dyn TextBuffer, width| {
                                 if snapshot.as_ref() != buffer.as_str() {
                                     *snapshot = Arc::from(buffer.as_str());
-                                    layout.clear();
-                                    *highlight_after = Instant::now() + HIGHLIGHT_DELAY;
-                                }
-                                let delay =
-                                    highlight_after.saturating_duration_since(Instant::now());
-                                if !delay.is_zero() {
-                                    ui.ctx().request_repaint_after(delay);
                                 }
                                 layout.galley(
                                     ui,
                                     snapshot,
-                                    language.filter(|_| delay.is_zero()),
+                                    language,
                                     if code { f32::INFINITY } else { width },
                                 )
                             };
@@ -300,7 +288,10 @@ fn read_bytes(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::{
+        sync::atomic::{AtomicU64, Ordering},
+        time::Instant,
+    };
 
     use egui::{Key, Modifiers, RawInput, os::OperatingSystem};
 

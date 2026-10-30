@@ -192,8 +192,8 @@ struct Doc {
     blocks: Vec<Block>,
     /// Which of those `<details>` sections are open, by index.
     details_open: Vec<bool>,
-    /// Source or plain text laid out (source highlighted by a background
-    /// task); invalidated on reload.
+    /// Source or plain text laid out (source highlighted incrementally); a
+    /// reload re-highlights only the lines that changed.
     layout: syntax::Source,
     /// How many lines text `content` has: what the line numbers count up to.
     lines: usize,
@@ -314,7 +314,6 @@ impl Doc {
         }
         let read = read_text(&self.path);
         self.selection = selection::Markdown::default();
-        self.layout.clear();
         self.truncated = read.as_ref().ok().and_then(|(_, size)| *size);
         self.lines = read.as_ref().map_or(0, |(text, _)| {
             text.bytes().filter(|&b| b == b'\n').count() + 1
