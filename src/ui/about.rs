@@ -326,6 +326,15 @@ fn shortcut_groups(mac: bool) -> Vec<(&'static str, Shortcuts)> {
             "Left / Right".into(),
             "Previous / next image in the directory",
         ),
+        (format!("{cmd} + W"), "Close the current tab"),
+        (
+            "Ctrl + Tab / Ctrl + Shift + Tab".into(),
+            "Next / previous tab",
+        ),
+        (
+            format!("{cmd} + 1 to 8 / {cmd} + 9"),
+            "Jump to that tab / the last tab",
+        ),
     ];
 
     let editor = vec![

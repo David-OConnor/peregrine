@@ -68,7 +68,7 @@ You can rename a file by selecting it, then clicking its name again. Double-clic
 
 Drag files and folders onto a folder (or the ⬆ and shortcut buttons) to move them there; hold Ctrl to copy. Drag them out of the window to drop them on Explorer or Nautilus, the desktop, a web page's upload box, or any other program that takes files from a file manager (Windows, and Linux on X11 or Wayland).
 
-Opening most popular text-based file formats (.txt, Markdown, TOML, most code files) or image (.png, .jpg, .bmp) file in the browser will open an integrated viewer; you can then open in your OS's default handler from there. In the image viewer, Ctrl+scroll zooms and dragging pans.
+Opening most popular text-based file formats (.txt, Markdown, TOML, most code files) or image (.png, .jpg, .bmp) file in the browser will open an integrated viewer; you can then open in your OS's default handler from there. In the image viewer, Ctrl+scroll zooms and dragging pans. The viewer is one window with a tab per file: files opened while it's open (from the browser, its right-click menu, links in Markdown, or the `view` and `edit` commands) get new tabs in it, and a file that's already open comes to the front. Close a tab with its **x**, or by middle-clicking it.
 
 Text files open read-only. Use **Edit** at the top of the viewer to edit text or Markdown source with syntax highlighting, line numbers, find and replace, selection, copy/paste, undo/redo, and Tab indentation. **Save** (Ctrl+S, or Cmd+S on Mac) writes the changes; **Discard edits** returns to View mode and loads the file from disk. Switching to **View**, reloading, or closing with unsaved edits offers Save, Discard, or Cancel. Files over 1 MB and files with invalid or binary text remain available in the viewer; use the OS's default handler to edit them.
 
@@ -195,12 +195,16 @@ On Mac, use **Cmd** in place of **Ctrl**.
 - **Escape** (in the find box): Clear the search
 - **F5**: Reload the file
 - **Left** and **Right** arrow keys (image viewer): Previous and next image in the directory
+- **Ctrl + W**: Close the current tab
+- **Ctrl + Tab** or **Ctrl + PageDown** / **Ctrl + Shift + Tab** or **Ctrl + PageUp**: Next / previous tab. **Ctrl** on every OS
+- **Ctrl + 1** to **Ctrl + 8**: Jump to that tab. **Ctrl + 9**: the last tab
 
 ### Editor
 The file viewer's Edit mode. On Mac, use **Cmd** in place of **Ctrl**.
 
 - **Ctrl + S**: Save changes. **Ctrl + Z** undoes; **Ctrl + Shift + Z** redoes
 - **Ctrl + R**: Replace. **Enter** (in the replace box) replaces the current match
+- **Escape** (in the text, find box or replace box): Clear the search and hide the replace box, returning to the text
 - **Ctrl + Y**: Delete the line
 
 ### Tabs

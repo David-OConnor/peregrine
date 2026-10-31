@@ -1,4 +1,4 @@
-//! Find in a text, source or Markdown viewer window: the bar under its
+//! Find in a text, source or Markdown viewer tab: the bar under its
 //! toolbar, the keys that drive it, and the matches it highlights. In Edit
 //! mode, it can replace them too.
 //!
@@ -13,8 +13,8 @@ use std::{ops::Range, str::Chars, sync::Arc};
 
 use egui::{
     Align, Button, Color32, Context, Event, Galley, Id, Key, LayerId, Modifiers, Order, Pos2,
-    Rangef, Rect, RichText, Shape, Stroke, StrokeKind, TextEdit, Ui, UiBuilder, ViewportId,
-    epaint::TextShape, layers::ShapeIdx, os::OperatingSystem, pos2, text::CharIndex, vec2,
+    Rangef, Rect, RichText, Shape, Stroke, StrokeKind, TextEdit, Ui, UiBuilder, epaint::TextShape,
+    layers::ShapeIdx, os::OperatingSystem, pos2, text::CharIndex, vec2,
 };
 
 use crate::ui::line_edit;
@@ -34,7 +34,7 @@ const CURRENT_STROKE: Color32 = Color32::from_rgb(255, 140, 0);
 /// nothing drawn there can be seen or clicked.
 const OFFSCREEN: Pos2 = pos2(-50_000., 0.);
 
-/// One viewer window's find bar and its matches.
+/// One viewer tab's find bar and its matches.
 #[derive(Default)]
 pub(super) struct Search {
     query: String,
@@ -290,12 +290,12 @@ fn highlight(rect: Rect, current: bool) -> Shape {
     }
 }
 
-fn box_id(window: ViewportId) -> Id {
-    Id::new(("viewer_find", window))
+fn box_id(doc: Id) -> Id {
+    Id::new(("viewer_find", doc))
 }
 
-fn replace_box_id(window: ViewportId) -> Id {
-    Id::new(("viewer_replace", window))
+fn replace_box_id(doc: Id) -> Id {
+    Id::new(("viewer_replace", doc))
 }
 
 impl Search {
@@ -349,9 +349,20 @@ impl Search {
     }
 
     /// Act on the find keys pressed in this window this pass, and remove
-    /// their key events, with Replace's if `editing`. Call before the bar is
-    /// drawn.
-    pub(super) fn keys(&mut self, ctx: &Context, editing: bool) {
+    /// their key events, with Replace's and Escape's if `editing` `doc`.
+    /// Call before the bar is drawn.
+    pub(super) fn keys(&mut self, ctx: &Context, doc: Id, editing: bool) {
+        // Escape from the text, or the find or replace box, which egui has
+        // already unfocused: close find and replace, back in the text.
+        let left = [super::editor::id(doc), box_id(doc), replace_box_id(doc)];
+        if editing
+            && ctx.memory(|m| left.iter().any(|&id| m.had_focus_last_frame(id)))
+            && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
+        {
+            self.query.clear();
+            self.replacing = false;
+            ctx.memory_mut(|m| m.request_focus(super::editor::id(doc)));
+        }
         // As VS Code: Alt+C, or Cmd+Option+C on Mac, where Option+C types ç.
         let case_key = if ctx.os() == OperatingSystem::Mac {
             Modifiers::MAC_CMD | Modifiers::ALT
@@ -392,8 +403,8 @@ impl Search {
     /// The find bar: query box, clear, case and separator toggles, previous
     /// and next, and the match count. If `editing`, a Replace toggle, which
     /// shows the replace box under them.
-    pub(super) fn bar(&mut self, ui: &mut Ui, window: ViewportId, editing: bool) {
-        let id = box_id(window);
+    pub(super) fn bar(&mut self, ui: &mut Ui, doc: Id, editing: bool) {
+        let id = box_id(doc);
         if self.focus {
             // Select the query, so typing replaces it.
             line_edit::select_all(ui.ctx(), id, &self.query);
@@ -483,14 +494,14 @@ impl Search {
             }
         });
         if editing && self.replacing {
-            self.replace_bar(ui, window, count);
+            self.replace_bar(ui, doc, count);
         }
     }
 
     /// The replace box, under the find box, and its Replace and Replace all
     /// buttons, for `count` matches.
-    fn replace_bar(&mut self, ui: &mut Ui, window: ViewportId, count: usize) {
-        let id = replace_box_id(window);
+    fn replace_bar(&mut self, ui: &mut Ui, doc: Id, count: usize) {
+        let id = replace_box_id(doc);
         if self.focus_replace {
             line_edit::select_all(ui.ctx(), id, &self.replacement);
         }
@@ -632,7 +643,7 @@ impl Search {
         ui: &Ui,
         top_left: Pos2,
         layout: Layout,
-        window: ViewportId,
+        doc: Id,
         show: impl FnOnce(&mut Ui),
     ) {
         let Some(needle) = self.needle() else {
@@ -644,7 +655,7 @@ impl Search {
             let Layout::Markdown { width, .. } = &layout else {
                 return;
             };
-            let found = measure(ui, *width, window, &needle, show);
+            let found = measure(ui, *width, doc, &needle, show);
             self.remeasure = stale;
             self.set_found(ui.ctx(), found, needle, layout);
         }
@@ -689,16 +700,10 @@ impl Search {
 /// unclipped so all of its text paints, then find `needle` in that text.
 /// It's drawn on a layer of its own, whose shapes are taken back before
 /// they're ever shown.
-fn measure(
-    ui: &Ui,
-    width: f32,
-    window: ViewportId,
-    needle: &Needle,
-    show: impl FnOnce(&mut Ui),
-) -> Found {
+fn measure(ui: &Ui, width: f32, doc: Id, needle: &Needle, show: impl FnOnce(&mut Ui)) -> Found {
     let mut rects = Vec::new();
     let mut count = 0;
-    for text in measure_text(ui, width, window, show) {
+    for text in measure_text(ui, width, doc, show) {
         if count >= MAX_MATCHES {
             break;
         }
@@ -716,11 +721,11 @@ fn measure(
 pub(super) fn measure_text(
     ui: &Ui,
     width: f32,
-    window: ViewportId,
+    doc: Id,
     show: impl FnOnce(&mut Ui),
 ) -> Vec<TextShape> {
     let ctx = ui.ctx();
-    let id = Id::new(("viewer_find_measure", window));
+    let id = Id::new(("viewer_find_measure", doc));
     let layer = LayerId::new(Order::Background, id);
     let mut measure = Ui::new(
         ctx.clone(),
@@ -796,5 +801,60 @@ mod tests {
         search.replace = Some(Replace::All);
         assert_eq!(search.take_replace(&mut text), None);
         assert_eq!(text, "foo bar 雪 foo bar bar foo bar");
+    }
+
+    #[test]
+    fn escape_in_edit_mode_closes_find_and_replace_back_in_the_text() {
+        use egui::RawInput;
+
+        use super::super::{Doc, Inner, Kind, editor};
+
+        let path = std::env::temp_dir().join(format!(
+            "peregrine-search-escape-{}.txt",
+            std::process::id()
+        ));
+        std::fs::write(&path, "foo bar foo").unwrap();
+        let ctx = Context::default();
+        let doc = Id::new("doc");
+        let mut inner = Inner::default();
+        inner
+            .docs
+            .push(Doc::new(&ctx, doc, path.clone(), Kind::Text));
+        inner.docs[0].start_editing(&ctx);
+        let mut time = 0.;
+        let mut frame = |inner: &mut Inner, events| {
+            time += 1.;
+            ctx.run_ui(
+                RawInput {
+                    time: Some(time),
+                    events,
+                    ..Default::default()
+                },
+                |ui| inner.show_window(ui),
+            )
+            .drop_without_applying_deltas();
+        };
+        let escape = Event::Key {
+            key: Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        };
+        frame(&mut inner, vec![]);
+        for from in [editor::id(doc), box_id(doc), replace_box_id(doc)] {
+            let search = &mut inner.docs[0].search;
+            search.query = "foo".into();
+            search.replacing = true;
+            ctx.memory_mut(|m| m.request_focus(from));
+            frame(&mut inner, vec![]);
+            assert!(ctx.memory(|m| m.has_focus(from)));
+            frame(&mut inner, vec![escape.clone()]);
+            let search = &inner.docs[0].search;
+            assert!(search.query.is_empty());
+            assert!(!search.replacing);
+            assert!(ctx.memory(|m| m.has_focus(editor::id(doc))));
+        }
+        let _ = std::fs::remove_file(&path);
     }
 }

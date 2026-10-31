@@ -1,7 +1,8 @@
 //! Browser- and IDE-style tab shortcuts: new, close, reopen closed, next,
 //! previous, and jump to a tab by number. They're taken out of the frame's
 //! input before any widget runs, so the CLI input box doesn't also act on
-//! them (egui's text edit deletes a word on Ctrl+W, for one).
+//! them (egui's text edit deletes a word on Ctrl+W, for one). The file
+//! viewer window takes them too, for its own tabs (see `crate::viewer`).
 //!
 //! `Modifiers::COMMAND` is Ctrl on Windows and Linux, and Cmd on Mac.
 
@@ -26,7 +27,7 @@ const TAB_NUMBER_KEYS: [Key; 8] = [
 
 /// A tab command from the keyboard.
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum TabAction {
+pub enum TabAction {
     New,
     Close,
     Reopen,
@@ -65,7 +66,7 @@ fn apply(state: &mut State, action: TabAction) {
 /// Remove the key presses in `events` that are tab shortcuts, returning what
 /// they ask for in order. Holding a key down keeps stepping through tabs,
 /// but doesn't open or close a run of them.
-fn take_actions(events: &mut Vec<Event>, mac: bool) -> Vec<TabAction> {
+pub fn take_actions(events: &mut Vec<Event>, mac: bool) -> Vec<TabAction> {
     let mut actions = Vec::new();
 
     events.retain(|event| {

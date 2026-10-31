@@ -1,10 +1,11 @@
-//! File viewer windows. Double-clicking a Markdown, source, plain-text or image file
-//! in the Files panel opens it in its own native window (an egui deferred
-//! viewport): Markdown rendered by `egui_commonmark` (see `crate::markdown`),
+//! The file viewer window. Double-clicking a Markdown, source, plain-text or
+//! image file in the Files panel opens it in a native window of its own (an
+//! egui deferred viewport), or in a new tab of that window if it's already
+//! open: Markdown rendered by `egui_commonmark` (see `crate::markdown`),
 //! source highlighted by `syntect`, plain text as is, images decoded by the
-//! `image` crate. Each window re-reads its file when it changes on disk, so it
-//! can sit beside an editor as a live preview. Text files open read-only;
-//! the toolbar can switch them to a small editor (see `editor`).
+//! `image` crate. The tab in front re-reads its file when it changes on disk,
+//! so the window can sit beside an editor as a live preview. Text files open
+//! read-only; the toolbar can switch them to a small editor (see `editor`).
 
 use std::{
     ffi::OsStr,
@@ -20,10 +21,10 @@ use std::{
 };
 
 use egui::{
-    Button, CentralPanel, Color32, ColorImage, Context, Frame, Id, Key, Margin, Modal, Modifiers,
-    Panel, Rect, RichText, ScrollArea, Sense, Shape, TextEdit, TextStyle, TextureFilter,
+    Atom, Button, CentralPanel, Color32, ColorImage, Context, Frame, Id, Key, Margin, Modal,
+    Modifiers, Panel, Rect, RichText, ScrollArea, Sense, Shape, TextEdit, TextStyle, TextureFilter,
     TextureHandle, TextureOptions, Ui, UiBuilder, Vec2, ViewportBuilder, ViewportCommand,
-    ViewportId, emath::GuiRounding, pos2, scroll_area, vec2,
+    ViewportId, emath::GuiRounding, os::OperatingSystem, pos2, scroll_area, vec2,
 };
 use egui_commonmark::CommonMarkCache;
 use image::{
@@ -37,6 +38,7 @@ use crate::{
     placement::Placement,
     ui::{
         scratchpad::{self, ScratchpadTab},
+        tab_keys::{self, TabAction},
         terminal::{TOGGLE_BOOKMARK, take_shortcut},
     },
 };
@@ -73,18 +75,25 @@ const IMAGE_TEXTURE: TextureOptions = TextureOptions {
 /// of a side panel, and quick to upload.
 const PREVIEW_MAX_SIDE: u32 = 2048;
 
-/// How often an open window checks its file's modification time.
+/// How often the tab in front checks its file's modification time. The
+/// others check when they come to the front.
 const RELOAD_POLL: Duration = Duration::from_secs(1);
 
-/// How much of a file a window reads. Every window draws on the UI thread,
-/// so laying out a huge log would stall the whole app; the rest is left to
+/// How much of a file a tab reads. The viewer draws on the UI thread, so
+/// laying out a huge log would stall the whole app; the rest is left to
 /// "Open with OS default".
 const MAX_BYTES: u64 = 1 << 20;
 
 const WINDOW_SIZE: [f32; 2] = [820., 900.];
 const MIN_WINDOW_SIZE: [f32; 2] = [300., 200.];
-/// New windows open at the last window's size, but no smaller than this.
+/// The window opens at its last size, but no smaller than this.
 const MIN_REMEMBERED_SIZE: Vec2 = vec2(500., 400.);
+
+/// The viewer window's viewport. There's only ever one: files open in its
+/// tabs.
+fn window_id() -> ViewportId {
+    ViewportId::from_hash_of("file_viewer")
+}
 
 /// Whether `path` is a file type the viewer shows, so a double-click views it
 /// here rather than handing it to the OS's default program.
@@ -112,7 +121,7 @@ pub fn is_image(path: &Path) -> bool {
         .is_some_and(|e| IMAGE_EXTENSIONS.contains(&e.as_str()))
 }
 
-/// How a window renders its file.
+/// How a tab renders its file.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Kind {
     Markdown,
@@ -146,8 +155,8 @@ impl Kind {
     }
 }
 
-/// The open viewer windows. Shared with each window's render callback, which
-/// egui calls outside the main window's pass, hence the `Arc<Mutex>`.
+/// The viewer window and its tabs. Shared with the window's render callback,
+/// which egui calls outside the main window's pass, hence the `Arc<Mutex>`.
 /// Everything runs on the UI thread, so the lock is never contended.
 #[derive(Default)]
 pub struct FileViewers {
@@ -156,31 +165,45 @@ pub struct FileViewers {
 
 #[derive(Default)]
 struct Inner {
+    /// The window's tabs, left to right. The window is open while there are
+    /// any.
     docs: Vec<Doc>,
-    /// Files to open (or focus and reload, if already open) at the end of the
-    /// main window's next pass. Queued rather than opened directly so the
-    /// Files panel and links clicked in a viewer window share one path.
-    /// `true` opens it in edit mode.
+    /// Index into `docs` of the tab in front.
+    active: usize,
+    /// The tab in front last pass, to notice another one coming forward.
+    shown: Option<Id>,
+    /// Files to open (or bring to the front and reload, if already open) at
+    /// the end of the main window's next pass. Queued rather than opened
+    /// directly so the Files panel and links clicked in the viewer share one
+    /// path. `true` opens it in edit mode.
     to_open: Vec<(PathBuf, bool)>,
-    /// Where a viewer window last moved or resized to: new ones open there.
+    /// Where the window opened. Fixed while it's open: egui moves a window
+    /// whose builder changes.
+    opened_at: Option<Placement>,
+    /// Where the window last moved or resized to: it opens there next time.
     /// Saved between runs.
     placement: Option<Placement>,
-    /// One Markdown cache for every window: building it loads syntect's
-    /// syntax and theme sets, so it's created on the first Markdown open, not
-    /// at startup.
+    /// One Markdown cache for every tab: building it loads syntect's syntax
+    /// and theme sets, so it's created on the first Markdown open, not at
+    /// startup.
     cache: Option<CommonMarkCache>,
-    /// Source of unique viewport ids.
+    /// Source of unique tab ids.
     next_id: u64,
-    /// [TOGGLE_BOOKMARK] was pressed in a viewer window, for the main
+    /// [TOGGLE_BOOKMARK] was pressed in the viewer window, for the main
     /// window's next pass to act on (see [FileViewers::take_bookmark_key]).
     bookmark_key: bool,
-    /// The main window was closed while a viewer still has unsaved edits.
+    /// The viewer window was closed while tabs have unsaved edits.
+    close_pending: bool,
+    /// The main window was closed while tabs have unsaved edits.
     quit_pending: bool,
 }
 
-/// One viewer window.
+/// One viewer tab: a file, and how it's shown.
 struct Doc {
-    id: ViewportId,
+    /// Unique to the tab. egui keeps widget state (scroll positions, the find
+    /// box, the editor's caret) in context-wide memory, so ids salted with it
+    /// give each tab its own.
+    id: Id,
     path: PathBuf,
     kind: Kind,
     /// The file's contents, or why they couldn't be read.
@@ -203,7 +226,8 @@ struct Doc {
     /// Modification time of the file as last read, to notice edits.
     modified: Option<SystemTime>,
     last_poll: Instant,
-    /// Cleared when the user closes the window; the main pass then drops it.
+    /// Cleared when the user closes the tab; it's dropped at the start of the
+    /// next pass.
     open: bool,
     /// A one-off message in the toolbar, e.g. a link whose target is missing.
     notice: Option<String>,
@@ -212,16 +236,11 @@ struct Doc {
     /// Present only in edit mode; automatic reloads leave it alone.
     editor: Option<editor::Editor>,
     /// What Tab inserts in edit mode, picked in the toolbar: a tab, or 4
-    /// spaces as the window opens.
+    /// spaces as the file opens.
     tab: ScratchpadTab,
     /// An action waiting for Save / Discard / Cancel on an unsaved draft.
     pending: Option<Action>,
     selection: selection::Markdown,
-    /// Where the window opened. Fixed: egui moves a window whose builder
-    /// changes.
-    opened_at: Option<Placement>,
-    /// Where the window was last seen, to notice it moving or resizing.
-    placement: Option<Placement>,
 }
 
 #[derive(Clone, Copy)]
@@ -232,7 +251,7 @@ enum Action {
     OpenExternal,
 }
 
-/// What a window shows.
+/// What a tab shows.
 enum Content {
     /// Markdown, source or plain text: at most [MAX_BYTES] of the file.
     Text(Arc<str>),
@@ -244,7 +263,7 @@ enum Content {
 /// An image decode running on a background thread; see [spawn_decode].
 struct Decoding {
     rx: Receiver<Result<Decoded, String>>,
-    /// Set when the file changed, or the window moved on to another image,
+    /// Set when the file changed, or the tab moved on to another image,
     /// after this decode began: its result is dropped and the current file
     /// decoded afresh.
     stale: bool,
@@ -258,18 +277,18 @@ struct Picture {
     size: [u32; 2],
 }
 
-/// How an image window is zoomed.
+/// How an image tab is zoomed.
 #[derive(Default)]
 struct Zoom {
     /// Screen pixels per image pixel, as the user set it. `None` fits the
-    /// image to the window: shrunk if it's bigger, actual size if not.
+    /// image to the tab: shrunk if it's bigger, actual size if not.
     set: Option<f32>,
     /// The scale the image was last drawn at, for the toolbar.
     shown: f32,
 }
 
 impl Doc {
-    fn new(ctx: &Context, id: ViewportId, path: PathBuf, kind: Kind) -> Self {
+    fn new(ctx: &Context, id: Id, path: PathBuf, kind: Kind) -> Self {
         let mut doc = Self {
             id,
             path,
@@ -291,8 +310,6 @@ impl Doc {
             tab: ScratchpadTab::Spaces,
             pending: None,
             selection: selection::Markdown::default(),
-            opened_at: None,
-            placement: None,
         };
         doc.reload(ctx);
         doc
@@ -345,7 +362,7 @@ impl Doc {
     fn start_decode(&mut self, ctx: &Context) {
         let max_side = ctx.input(|i| i.max_texture_side) as u32;
         self.decoding = Some(Decoding {
-            rx: spawn_decode(ctx, self.id, self.path.clone(), max_side),
+            rx: spawn_decode(ctx, window_id(), self.path.clone(), max_side),
             stale: false,
         });
     }
@@ -389,16 +406,18 @@ impl Doc {
         self.zoom = Zoom::default();
         self.notice = None;
         self.reload(ctx);
-        // The main window's pass sets titles too, but it may be idle.
-        ctx.send_viewport_cmd_to(self.id, ViewportCommand::Title(self.title()));
     }
 
-    fn title(&self) -> String {
-        let name = self
-            .path
+    fn name(&self) -> String {
+        self.path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| self.path.display().to_string());
+            .unwrap_or_else(|| self.path.display().to_string())
+    }
+
+    /// The window's title while this tab is in front.
+    fn title(&self) -> String {
+        let name = self.name();
         let changed = if self.dirty() { " *" } else { "" };
         let mode = if self.editor.is_some() {
             "Edit"
@@ -410,6 +429,15 @@ impl Doc {
 
     fn dirty(&self) -> bool {
         self.editor.as_ref().is_some_and(editor::Editor::dirty)
+    }
+
+    /// Save's label: Overwrite once it found the file changed on disk.
+    fn save_label(&self) -> &'static str {
+        if self.editor.as_ref().is_some_and(editor::Editor::conflict) {
+            "Overwrite"
+        } else {
+            "Save"
+        }
     }
 
     /// Whether edit mode is available: the whole of a text file is loaded.
@@ -502,7 +530,7 @@ impl Doc {
                 ui.colored_label(ui.visuals().error_fg_color, error);
             }
             ui.horizontal(|ui| {
-                save = ui.button("Save").clicked();
+                save = ui.button(self.save_label()).clicked();
                 discard = ui.button("Discard edits").clicked();
                 cancel = ui.button("Cancel").clicked();
             });
@@ -642,7 +670,7 @@ fn decode_image(path: &Path, max_side: u32) -> ImageResult<Decoded> {
 }
 
 /// The Files panel's preview of the selected image, under its details.
-/// Decoded in the background like a viewer window's image, but scaled down
+/// Decoded in the background like a viewer tab's image, but scaled down
 /// to at most [PREVIEW_MAX_SIDE].
 #[derive(Default)]
 pub struct ImagePreview {
@@ -664,7 +692,7 @@ impl ImagePreview {
         if current != file {
             self.file = file.map(|(p, m)| (p.to_path_buf(), m));
             self.picture = None;
-            // One decode at a time, as in a viewer window, so arrowing
+            // One decode at a time, as in a viewer tab, so arrowing
             // through a folder of photos doesn't pile up threads: one already
             // running is redone when it finishes.
             match &mut self.decoding {
@@ -755,8 +783,9 @@ impl ImagePreview {
 }
 
 impl FileViewers {
-    /// Open `path` in a viewer window, or focus and reload its window if it's
-    /// already open. Takes effect in [Self::show], later this pass.
+    /// Open `path` in a new tab of the viewer window, opening the window if
+    /// need be; or if it's already open in a tab, bring that to the front and
+    /// reload it. Takes effect in [Self::show], later this pass.
     pub fn open(&self, path: PathBuf) {
         self.lock().to_open.push((path, false));
     }
@@ -766,59 +795,57 @@ impl FileViewers {
         self.lock().to_open.push((path, true));
     }
 
-    /// Keep each open window alive. Call once per pass of the main window:
-    /// egui closes any viewport that isn't shown in its parent's pass.
+    /// Keep the viewer window alive while it has tabs. Call once per pass of
+    /// the main window: egui closes any viewport that isn't shown in its
+    /// parent's pass.
     pub fn show(&self, ctx: &Context) {
-        let windows: Vec<(ViewportId, String, Option<Placement>)> = {
+        let (title, opened_at) = {
             let mut inner = self.lock();
+            inner.drop_closed();
             for (path, edit) in std::mem::take(&mut inner.to_open) {
                 inner.open_now(ctx, path, edit);
             }
-            inner.docs.retain(|d| d.open);
             if ctx.input(|i| i.viewport().close_requested()) && inner.docs.iter().any(Doc::dirty) {
                 ctx.send_viewport_cmd(ViewportCommand::CancelClose);
                 inner.quit_pending = true;
             }
             inner.confirm_quit(ctx);
-            inner
-                .docs
-                .iter()
-                .map(|d| (d.id, d.title(), d.opened_at))
-                .collect()
+            let Some(doc) = inner.docs.get(inner.active) else {
+                return;
+            };
+            (doc.title(), inner.opened_at)
         };
 
         // The lock is released first: without native multi-window support
         // egui runs the callback right here, embedded in the main window.
-        for (id, title, opened_at) in windows {
-            let mut builder = ViewportBuilder::default()
-                .with_title(title)
-                .with_inner_size(WINDOW_SIZE)
-                .with_min_inner_size(MIN_WINDOW_SIZE)
-                .with_icon(crate::app_icon());
-            if let Some(p) = opened_at {
-                builder = builder
-                    .with_position(p.pos)
-                    .with_inner_size(p.size.max(MIN_REMEMBERED_SIZE));
-            }
-            let inner = Arc::clone(&self.inner);
-            ctx.show_viewport_deferred(id, builder, move |ui, _class| {
-                lock(&inner).show_window(ui, id);
-            });
+        let mut builder = ViewportBuilder::default()
+            .with_title(title)
+            .with_inner_size(WINDOW_SIZE)
+            .with_min_inner_size(MIN_WINDOW_SIZE)
+            .with_icon(crate::app_icon());
+        if let Some(p) = opened_at {
+            builder = builder
+                .with_position(p.pos)
+                .with_inner_size(p.size.max(MIN_REMEMBERED_SIZE));
         }
+        let inner = Arc::clone(&self.inner);
+        ctx.show_viewport_deferred(window_id(), builder, move |ui, _class| {
+            lock(&inner).show_window(ui);
+        });
     }
 
-    /// Whether [TOGGLE_BOOKMARK] was pressed in a viewer window since last
-    /// asked, so it works from these windows as from the main one.
+    /// Whether [TOGGLE_BOOKMARK] was pressed in the viewer window since last
+    /// asked, so it works from there as from the main one.
     pub fn take_bookmark_key(&self) -> bool {
         std::mem::take(&mut self.lock().bookmark_key)
     }
 
-    /// Where new windows open: where one was last moved or resized to.
+    /// Where the window opens: where it was last moved or resized to.
     pub fn placement(&self) -> Option<Placement> {
         self.lock().placement
     }
 
-    /// Set where new windows open, e.g. as saved by the last run.
+    /// Set where the window opens, e.g. as saved by the last run.
     pub fn set_placement(&self, placement: Option<Placement>) {
         self.lock().placement = placement;
     }
@@ -839,108 +866,183 @@ impl Inner {
         if !self.quit_pending {
             return;
         }
-        let mut save = false;
-        let mut discard = false;
-        let mut cancel = false;
-        let modal = Modal::new(Id::new("viewer_unsaved_quit")).show(ctx, |ui| {
-            ui.set_max_width(480.);
-            ui.heading("Save changes before quitting?");
-            for doc in self.docs.iter().filter(|d| d.dirty()) {
-                ui.label(doc.path.display().to_string());
-                if let Some(error) = &doc.notice {
-                    ui.colored_label(ui.visuals().error_fg_color, error);
-                }
+        match confirm_unsaved(
+            ctx,
+            Id::new("viewer_unsaved_quit"),
+            &mut self.docs,
+            "Save changes before quitting?",
+            "Discard edits and quit",
+        ) {
+            Some(true) => {
+                self.quit_pending = false;
+                ctx.send_viewport_cmd(ViewportCommand::Close);
             }
-            ui.horizontal(|ui| {
-                save = ui.button("Save all").clicked();
-                discard = ui.button("Discard edits and quit").clicked();
-                cancel = ui.button("Cancel").clicked();
-            });
-        });
-        if save {
-            let mut saved = true;
-            for doc in self.docs.iter_mut().filter(|d| d.dirty()) {
-                saved &= doc.save(ctx);
-            }
-            if !saved {
-                return;
-            }
+            Some(false) => self.quit_pending = false,
+            None => {}
         }
-        if save || discard {
-            for doc in &mut self.docs {
-                doc.editor = None;
-            }
-            self.quit_pending = false;
-            ctx.send_viewport_cmd(ViewportCommand::Close);
-        } else if cancel || modal.should_close() {
-            self.quit_pending = false;
+    }
+
+    /// As [Self::confirm_quit], for the viewer window being closed.
+    fn confirm_close(&mut self, ctx: &Context) {
+        if !self.close_pending {
+            return;
         }
+        match confirm_unsaved(
+            ctx,
+            Id::new("viewer_unsaved_close"),
+            &mut self.docs,
+            "Save changes before closing?",
+            "Discard edits and close",
+        ) {
+            Some(true) => self.close_all(ctx),
+            Some(false) => self.close_pending = false,
+            None => {}
+        }
+    }
+
+    /// Close every tab, and with them the window.
+    fn close_all(&mut self, ctx: &Context) {
+        for doc in &mut self.docs {
+            doc.open = false;
+        }
+        self.close_pending = false;
+        // Its pass stops showing the window.
+        ctx.request_repaint_of(ViewportId::ROOT);
+    }
+
+    /// Drop the tabs closed since last pass. The tab in front stays there;
+    /// if it closed, the one after it takes its place, or the one before
+    /// if it was last.
+    fn drop_closed(&mut self) {
+        let before = self.docs[..self.active.min(self.docs.len())]
+            .iter()
+            .filter(|d| !d.open)
+            .count();
+        self.docs.retain(|d| d.open);
+        self.active = (self.active - before).min(self.docs.len().saturating_sub(1));
     }
 
     fn open_now(&mut self, ctx: &Context, path: PathBuf, edit: bool) {
         let kind = Kind::of(&path);
         // Compare canonical paths so `./README.md` and `docs/../README.md`
-        // find the same window.
+        // find the same tab.
         let path = fs::canonicalize(&path).map(strip_verbatim).unwrap_or(path);
-        if let Some(doc) = self.docs.iter_mut().find(|d| d.path == path && d.open) {
+        if self.docs.is_empty() {
+            self.opened_at = self.placement.map(|p| p.on_screen(ctx));
+        } else {
+            ctx.send_viewport_cmd_to(window_id(), ViewportCommand::Focus);
+            ctx.request_repaint_of(window_id());
+        }
+        if let Some(i) = self.docs.iter().position(|d| d.path == path && d.open) {
+            let doc = &mut self.docs[i];
             if doc.editor.is_none() {
                 doc.reload(ctx);
                 if edit && doc.can_edit() {
                     doc.start_editing(ctx);
                 }
             }
-            ctx.send_viewport_cmd_to(doc.id, ViewportCommand::Focus);
+            self.active = i;
             return;
         }
-        let id = ViewportId::from_hash_of(("file_viewer", self.next_id));
+        let id = Id::new(("file_viewer_tab", self.next_id));
         self.next_id += 1;
         let mut doc = Doc::new(ctx, id, path, kind);
-        doc.opened_at = self.placement.map(|p| p.on_screen(ctx));
         if edit && doc.can_edit() {
             doc.start_editing(ctx);
         }
         self.docs.push(doc);
+        self.active = self.docs.len() - 1;
     }
 
-    /// Render the window for viewport `id`. Runs in that viewport's own pass.
-    fn show_window(&mut self, ui: &mut Ui, id: ViewportId) {
-        let Self {
-            docs,
-            to_open,
-            cache,
-            bookmark_key,
-            placement,
-            ..
-        } = self;
-        let Some(doc) = docs.iter_mut().find(|d| d.id == id) else {
-            return;
-        };
-        let ctx = ui.ctx().clone();
-        let title = doc.title();
+    /// Act on the tab shortcuts (see [tab_keys]) pressed in the window this
+    /// pass, and remove their key events.
+    fn take_tab_keys(&mut self, ctx: &Context) {
+        let mac = ctx.os() == OperatingSystem::Mac;
+        let n = self.docs.len();
+        for action in ctx.input_mut(|i| tab_keys::take_actions(&mut i.events, mac)) {
+            match action {
+                TabAction::Close => self.docs[self.active].request(ctx, Action::Close),
+                TabAction::Next => self.active = (self.active + 1) % n,
+                TabAction::Prev => self.active = (self.active + n - 1) % n,
+                // A number past the last tab does nothing, as in a browser.
+                TabAction::Select(i) if i < n => self.active = i,
+                TabAction::Last => self.active = n - 1,
+                // Files open from the main window; there's no empty tab.
+                TabAction::Select(_) | TabAction::New | TabAction::Reopen => {}
+            }
+        }
+    }
 
-        // Only a change counts, so the last window moved or resized wins,
-        // not whichever happens to draw last.
-        if let Some(now) = Placement::of(&ctx)
-            && doc.placement != Some(now)
-        {
-            doc.placement = Some(now);
-            *placement = Some(now);
+    /// Render the viewer window: its tab strip, and the tab in front. Runs in
+    /// the window's own pass.
+    fn show_window(&mut self, ui: &mut Ui) {
+        let ctx = ui.ctx().clone();
+
+        if let Some(now) = Placement::of(&ctx) {
+            self.placement = Some(now);
         }
 
         // The main window acts on it, in its next pass.
         if take_shortcut(&ctx, TOGGLE_BOOKMARK) {
-            *bookmark_key = true;
+            self.bookmark_key = true;
             ctx.request_repaint_of(ViewportId::ROOT);
         }
 
         if ctx.input(|i| i.viewport().close_requested()) {
-            if doc.dirty() {
+            if self.docs.iter().any(Doc::dirty) {
                 ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+                self.close_pending = true;
+            } else {
+                self.close_all(&ctx);
             }
-            doc.request(&ctx, Action::Close);
-            if !doc.open {
-                return;
+        }
+        self.drop_closed();
+        let Some(doc) = self.docs.get(self.active) else {
+            return;
+        };
+        let title = doc.title();
+
+        if !self.close_pending && doc.pending.is_none() {
+            self.take_tab_keys(&ctx);
+        }
+        let clicked = Panel::top(Id::new("viewer_tabs"))
+            .resizable(false)
+            .show(ui, |ui| tab_bar(ui, &self.docs, self.active))
+            .inner;
+        match clicked {
+            Some(TabClick::Select(i)) => self.active = i,
+            Some(TabClick::Close(i)) => {
+                let doc = &mut self.docs[i];
+                // To its Save / Discard / Cancel, if it has unsaved edits.
+                if doc.dirty() {
+                    self.active = i;
+                }
+                doc.request(&ctx, Action::Close);
             }
+            None => {}
+        }
+        self.drop_closed();
+        if self.docs.is_empty() {
+            return;
+        }
+
+        let Self {
+            docs,
+            active,
+            shown,
+            to_open,
+            cache,
+            ..
+        } = self;
+        let doc = &mut docs[*active];
+        let id = doc.id;
+        if shown.replace(id) != Some(id) {
+            // Brought to the front: straight back to typing, if editing. The
+            // tab strip was drawn before the change, so draw it again.
+            if doc.editor.is_some() {
+                ctx.memory_mut(|m| m.request_focus(editor::id(id)));
+            }
+            ctx.request_repaint();
         }
 
         if doc.pending.is_none() && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::F5)) {
@@ -961,17 +1063,17 @@ impl Inner {
             }
         }
         if doc.kind != Kind::Image && doc.pending.is_none() {
-            doc.search.keys(&ctx, doc.editor.is_some());
+            doc.search.keys(&ctx, doc.id, doc.editor.is_some());
         }
         doc.receive_image(&ctx);
         // Keep polling for edits while the window is idle.
         ctx.request_repaint_after(RELOAD_POLL);
 
         // Panel and scroll state live in context-wide memory, so salt their
-        // ids with the viewport's: each window keeps its own scroll position.
+        // ids with the tab's: each tab keeps its own scroll position.
         Panel::top(Id::new(("viewer_toolbar", id)))
             .resizable(false)
-            .show(ui, |ui| toolbar(doc, ui, id));
+            .show(ui, |ui| toolbar(doc, ui));
 
         let mut margin = Margin::symmetric(16, 8);
         if matches!(doc.kind, Kind::Code(_) | Kind::Text) || doc.editor.is_some() {
@@ -1074,11 +1176,124 @@ impl Inner {
         if new_title != title {
             ctx.send_viewport_cmd(ViewportCommand::Title(new_title));
         }
+        self.confirm_close(&ctx);
     }
 }
 
+/// Ask about every doc in `docs` with unsaved edits, in a modal headed
+/// `heading`: Save all, discard (labelled `discard`), or Cancel. `Some(true)`
+/// once they're saved or their edits are dropped, `Some(false)` if
+/// cancelled, `None` while it waits, or if a save failed (the error shows
+/// under its file).
+fn confirm_unsaved(
+    ctx: &Context,
+    id: Id,
+    docs: &mut [Doc],
+    heading: &str,
+    discard: &str,
+) -> Option<bool> {
+    let mut save = false;
+    let mut discarded = false;
+    let mut cancel = false;
+    let modal = Modal::new(id).show(ctx, |ui| {
+        ui.set_max_width(480.);
+        ui.heading(heading);
+        for doc in docs.iter().filter(|d| d.dirty()) {
+            ui.label(doc.path.display().to_string());
+            if let Some(error) = &doc.notice {
+                ui.colored_label(ui.visuals().error_fg_color, error);
+            }
+        }
+        ui.horizontal(|ui| {
+            save = ui.button("Save all").clicked();
+            discarded = ui.button(discard).clicked();
+            cancel = ui.button("Cancel").clicked();
+        });
+    });
+    if save {
+        let mut saved = true;
+        for doc in docs.iter_mut().filter(|d| d.dirty()) {
+            saved &= doc.save(ctx);
+        }
+        if !saved {
+            return None;
+        }
+    }
+    if save || discarded {
+        for doc in docs {
+            doc.editor = None;
+        }
+        Some(true)
+    } else if cancel || modal.should_close() {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// What was clicked in the tab strip.
+enum TabClick {
+    Select(usize),
+    Close(usize),
+}
+
+/// The strip of tabs across the top of the window, `docs[active]` in front.
+/// Each is labelled with its file's name (see [tab_names]), plus ` *` while
+/// it has unsaved edits, and shows the file's path on hover. Clicking a tab
+/// brings it to the front; its `x`, or middle-clicking it, closes it.
+fn tab_bar(ui: &mut Ui, docs: &[Doc], active: usize) -> Option<TabClick> {
+    let mut clicked = None;
+    let close_size = Vec2::splat(ui.text_style_height(&TextStyle::Button));
+    let close_hover = format!(
+        "Close tab ({} or middle click)",
+        ui.ctx().format_shortcut(&tab_keys::CLOSE_TAB)
+    );
+    ui.horizontal_wrapped(|ui| {
+        for (i, (doc, name)) in docs.iter().zip(tab_names(docs)).enumerate() {
+            let label = if doc.dirty() { name + " *" } else { name };
+            // Room for the `x`, which goes over the tab: its click wins.
+            let close_id = Id::new(("viewer_tab_close", doc.id));
+            let tab = Button::selectable(i == active, (label, Atom::custom(close_id, close_size)))
+                .atom_ui(ui);
+            let close = tab.rect(close_id);
+            let tab = tab.response.on_hover_text(doc.path.display().to_string());
+            if tab.clicked() {
+                clicked = Some(TabClick::Select(i));
+            }
+            if tab.middle_clicked() {
+                clicked = Some(TabClick::Close(i));
+            }
+            if let Some(rect) = close
+                && ui
+                    .place(rect, Button::new("x").small().frame_when_inactive(false))
+                    .on_hover_text(&close_hover)
+                    .clicked()
+            {
+                clicked = Some(TabClick::Close(i));
+            }
+        }
+    });
+    clicked
+}
+
+/// Each tab's label: its file's name, after its folder's where another tab
+/// has a file of the same name, e.g. `viewer/mod.rs` and `ui/mod.rs`.
+fn tab_names(docs: &[Doc]) -> Vec<String> {
+    let names: Vec<String> = docs.iter().map(Doc::name).collect();
+    docs.iter()
+        .zip(&names)
+        .map(|(doc, name)| {
+            let shared = names.iter().filter(|n| *n == name).count() > 1;
+            match doc.path.parent().and_then(Path::file_name) {
+                Some(dir) if shared => format!("{}/{name}", dir.to_string_lossy()),
+                _ => name.clone(),
+            }
+        })
+        .collect()
+}
+
 /// Show source or plain text, its `lines` lines numbered down its left like
-/// an editor's, in viewer window `window`, with `search`'s matches
+/// an editor's, in the viewer tab with id `doc`, with `search`'s matches
 /// highlighted. Source scrolls sideways; plain text wraps to the window
 /// instead.
 fn show_text(
@@ -1088,7 +1303,7 @@ fn show_text(
     lines: usize,
     layout: &mut syntax::Source,
     search: &mut search::Search,
-    window: ViewportId,
+    doc: Id,
 ) {
     search.find_in_text(ui.ctx(), text);
     let language = match kind {
@@ -1104,7 +1319,7 @@ fn show_text(
     let output = ui
         .scope_builder(UiBuilder::new().max_rect(body), |ui| {
             scroll
-                .id_salt(("viewer_scroll", window))
+                .id_salt(("viewer_scroll", doc))
                 .animated(false)
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
@@ -1121,7 +1336,7 @@ fn show_text(
                     // An immutable TextBuffer keeps the current view read-only
                     // while retaining a selection outside the visible rows.
                     let output = TextEdit::multiline(&mut buffer)
-                        .id(Id::new(("viewer_text", window)))
+                        .id(Id::new(("viewer_text", doc)))
                         .font(TextStyle::Monospace)
                         .cursor_at_end(false)
                         .desired_width(f32::INFINITY)
@@ -1145,8 +1360,7 @@ fn show_text(
 
 /// Path, notices, and the Reload / Open externally buttons, plus previous /
 /// next and zoom controls for an image, or the find bar under them for text.
-/// In viewer window `window`.
-fn toolbar(doc: &mut Doc, ui: &mut Ui, window: ViewportId) {
+fn toolbar(doc: &mut Doc, ui: &mut Ui) {
     ui.horizontal_wrapped(|ui| {
         if doc.kind != Kind::Image {
             let editing = doc.editor.is_some();
@@ -1168,7 +1382,7 @@ fn toolbar(doc: &mut Doc, ui: &mut Ui, window: ViewportId) {
             }
             if editing {
                 if ui
-                    .add_enabled(doc.dirty(), Button::new("Save"))
+                    .add_enabled(doc.dirty(), Button::new(doc.save_label()))
                     .on_hover_text("Save changes (Ctrl+S; Cmd+S on Mac)")
                     .clicked()
                 {
@@ -1192,7 +1406,7 @@ fn toolbar(doc: &mut Doc, ui: &mut Ui, window: ViewportId) {
                 if let Some(tab) = scratchpad::tab_mode_control(ui, doc.tab, modes) {
                     doc.tab = tab;
                     // Back to the text, from the button.
-                    ui.ctx().memory_mut(|m| m.request_focus(editor::id(window)));
+                    ui.ctx().memory_mut(|m| m.request_focus(editor::id(doc.id)));
                 }
             }
             ui.separator();
@@ -1234,7 +1448,7 @@ fn toolbar(doc: &mut Doc, ui: &mut Ui, window: ViewportId) {
         ui.label(RichText::new(doc.path.display().to_string()).weak());
     });
     if doc.kind != Kind::Image {
-        doc.search.bar(ui, window, doc.editor.is_some());
+        doc.search.bar(ui, doc.id, doc.editor.is_some());
     }
     if let Some(size) = doc.truncated {
         let msg = format!(
@@ -1281,9 +1495,9 @@ fn zoom_controls(ui: &mut Ui, picture: &Picture, zoom: &mut Zoom) {
     ui.separator();
 }
 
-/// Draw `picture` centred in viewer window `window`, at `zoom`. Ctrl+scroll
+/// Draw `picture` centred in the viewer tab with id `doc`, at `zoom`. Ctrl+scroll
 /// (or pinch) zooms about the pointer; scrolling or dragging pans.
-fn show_image(ui: &mut Ui, picture: &Picture, zoom: &mut Zoom, window: ViewportId) {
+fn show_image(ui: &mut Ui, picture: &Picture, zoom: &mut Zoom, doc: Id) {
     let ppp = ui.ctx().pixels_per_point();
     // Its size in points at 100%: one image pixel per screen pixel.
     let actual = vec2(picture.size[0] as f32, picture.size[1] as f32) / ppp;
@@ -1293,7 +1507,7 @@ fn show_image(ui: &mut Ui, picture: &Picture, zoom: &mut Zoom, window: ViewportI
         .min(1.);
     let mut scale = zoom.set.unwrap_or(fit);
 
-    let scroll_salt = ("viewer_scroll", window);
+    let scroll_salt = ("viewer_scroll", doc);
     let mut scroll = ScrollArea::both()
         .id_salt(scroll_salt)
         .auto_shrink([false, false]);
@@ -1350,7 +1564,7 @@ fn padding(size: Vec2, viewport: Vec2) -> Vec2 {
     ((viewport - size) / 2.).max(Vec2::ZERO)
 }
 
-/// Open `path`, a local file linked from `doc`: in another viewer window if
+/// Open `path`, a local file linked from `doc`: in a tab of its own if
 /// it's a type the viewer shows, otherwise (e.g. a folder) with its
 /// default program.
 fn open_link(doc: &mut Doc, path: PathBuf, to_open: &mut Vec<(PathBuf, bool)>, ctx: &Context) {
@@ -1373,5 +1587,143 @@ fn strip_verbatim(path: PathBuf) -> PathBuf {
     match s.strip_prefix(r"\\?\") {
         Some(rest) if !rest.starts_with("UNC\\") => PathBuf::from(rest),
         _ => path,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use egui::{Event, RawInput};
+
+    use super::*;
+
+    /// A folder of small text files, removed when dropped.
+    struct TestDir(PathBuf);
+
+    impl TestDir {
+        fn new(files: &[&str]) -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let dir = std::env::temp_dir().join(format!(
+                "peregrine-viewer-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            for file in files {
+                let path = dir.join(file);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(path, file).unwrap();
+            }
+            Self(dir)
+        }
+
+        /// A viewer window with `files` open in tabs, in order.
+        fn open(&self, ctx: &Context, files: &[&str]) -> Inner {
+            let mut inner = Inner::default();
+            for file in files {
+                inner.open_now(ctx, self.0.join(file), false);
+            }
+            inner
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn names(inner: &Inner) -> Vec<String> {
+        tab_names(&inner.docs)
+    }
+
+    fn front(inner: &Inner) -> String {
+        inner.docs[inner.active].name()
+    }
+
+    #[test]
+    fn files_open_in_tabs_and_an_open_one_comes_to_the_front() {
+        let dir = TestDir::new(&["a.txt", "b.txt"]);
+        let ctx = Context::default();
+        let mut inner = dir.open(&ctx, &["a.txt", "b.txt"]);
+        assert_eq!(names(&inner), ["a.txt", "b.txt"]);
+        assert_eq!(front(&inner), "b.txt");
+
+        inner.open_now(&ctx, dir.0.join(".").join("a.txt"), true);
+        assert_eq!(names(&inner), ["a.txt", "b.txt"]);
+        assert_eq!(front(&inner), "a.txt");
+        assert!(inner.docs[0].editor.is_some());
+    }
+
+    #[test]
+    fn closing_tabs_keeps_the_front_one_or_takes_its_neighbour() {
+        let dir = TestDir::new(&["a.txt", "b.txt", "c.txt", "d.txt"]);
+        let ctx = Context::default();
+        let mut inner = dir.open(&ctx, &["a.txt", "b.txt", "c.txt", "d.txt"]);
+        inner.active = 2;
+        let close = |inner: &mut Inner, i: Option<usize>| {
+            let i = i.unwrap_or(inner.active);
+            inner.docs[i].open = false;
+            inner.drop_closed();
+        };
+
+        close(&mut inner, Some(0));
+        assert_eq!(names(&inner), ["b.txt", "c.txt", "d.txt"]);
+        assert_eq!(front(&inner), "c.txt");
+        // The one after it comes forward...
+        close(&mut inner, None);
+        assert_eq!(front(&inner), "d.txt");
+        // ...or the one before, for the last tab.
+        close(&mut inner, None);
+        assert_eq!(names(&inner), ["b.txt"]);
+        assert_eq!(front(&inner), "b.txt");
+        close(&mut inner, None);
+        assert!(inner.docs.is_empty());
+        assert_eq!(inner.active, 0);
+    }
+
+    #[test]
+    fn tab_shortcuts_switch_and_close_tabs() {
+        let dir = TestDir::new(&["a.txt", "b.txt", "c.txt"]);
+        let ctx = Context::default();
+        let mut inner = dir.open(&ctx, &["a.txt", "b.txt", "c.txt"]);
+        let mut time = 0.;
+        let mut press = |inner: &mut Inner, key: Key, shift: bool| {
+            time += 1.;
+            let mut modifiers = Modifiers::CTRL | Modifiers::COMMAND;
+            modifiers.shift = shift;
+            let key = Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            };
+            let input = RawInput {
+                time: Some(time),
+                events: vec![key],
+                ..Default::default()
+            };
+            ctx.run_ui(input, |ui| inner.show_window(ui))
+                .drop_without_applying_deltas();
+        };
+
+        press(&mut inner, Key::Tab, false);
+        assert_eq!(front(&inner), "a.txt");
+        press(&mut inner, Key::Tab, true);
+        assert_eq!(front(&inner), "c.txt");
+        press(&mut inner, Key::Num2, false);
+        assert_eq!(front(&inner), "b.txt");
+        press(&mut inner, Key::W, false);
+        assert_eq!(names(&inner), ["a.txt", "c.txt"]);
+        assert_eq!(front(&inner), "c.txt");
+    }
+
+    #[test]
+    fn tabs_on_files_of_the_same_name_show_their_folders() {
+        let dir = TestDir::new(&["ui/mod.rs", "viewer/mod.rs", "viewer/editor.rs"]);
+        let ctx = Context::default();
+        let inner = dir.open(&ctx, &["ui/mod.rs", "viewer/mod.rs", "viewer/editor.rs"]);
+        assert_eq!(names(&inner), ["ui/mod.rs", "viewer/mod.rs", "editor.rs"]);
     }
 }

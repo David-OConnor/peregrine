@@ -11,7 +11,7 @@ use std::{
 
 use egui::{
     Context, Event, Id, Key, Modifiers, Rect, ScrollArea, Shape, TextBuffer, TextEdit, Ui,
-    UiBuilder, ViewportId,
+    UiBuilder,
     text::{CCursor, CCursorRange},
 };
 
@@ -101,8 +101,8 @@ impl Encoding {
     }
 }
 
-pub(super) fn id(window: ViewportId) -> Id {
-    Id::new(("viewer_editor", window))
+pub(super) fn id(doc: Id) -> Id {
+    Id::new(("viewer_editor", doc))
 }
 
 pub(super) struct Editor {
@@ -114,6 +114,9 @@ pub(super) struct Editor {
     encoding: Encoding,
     crlf: bool,
     dirty: bool,
+    /// Save found the file changed by another program, and took in what's
+    /// there now: the next Save overwrites it, unless it changes again.
+    conflict: bool,
     lines: usize,
     layout: syntax::Source,
     focus: bool,
@@ -135,6 +138,7 @@ impl Editor {
             encoding,
             crlf,
             dirty: false,
+            conflict: false,
             layout: syntax::Source::default(),
             focus: true,
         })
@@ -144,13 +148,32 @@ impl Editor {
         self.dirty
     }
 
+    /// Whether the next Save overwrites another program's change; see [Self::save].
+    pub(super) fn conflict(&self) -> bool {
+        self.conflict
+    }
+
+    /// Write the draft, unless the file changed on disk since it was read or
+    /// last saved: then warn instead, and overwrite on the next Save.
     pub(super) fn save(&mut self, path: &Path) -> Result<(), String> {
         if !self.dirty {
             return Ok(());
         }
         // Comparing contents also catches a replacement with the same mtime.
-        if read_bytes(path, self.disk.len() as u64 + 1)? != self.disk {
-            return Err("The file changed on disk. Your edits are kept. Copy them before reloading or discarding.".into());
+        // A deleted file reads as empty, so Save can recreate it.
+        let deleted = path.try_exists().is_ok_and(|exists| !exists);
+        let read = |limit| {
+            if deleted {
+                Ok(Vec::new())
+            } else {
+                read_bytes(path, limit)
+            }
+        };
+        if read(self.disk.len() as u64 + 1)? != self.disk {
+            // All of it, for the next Save to compare.
+            self.disk = read(u64::MAX)?;
+            self.conflict = true;
+            return Err("The file changed on disk. Your edits are kept: Overwrite (Ctrl+S) to replace it with them, or Reload to discard them.".into());
         }
         let text = if self.crlf {
             self.text.replace('\n', "\r\n")
@@ -162,6 +185,7 @@ impl Editor {
         self.disk = bytes;
         self.original.clone_from(&self.text);
         self.dirty = false;
+        self.conflict = false;
         Ok(())
     }
 
@@ -183,13 +207,13 @@ impl Editor {
         kind: Kind,
         tab: ScratchpadTab,
         search: &mut search::Search,
-        window: ViewportId,
+        doc: Id,
     ) {
         let ctx = ui.ctx().clone();
         // Edits made before the box is drawn, so it shows them. Its undo
         // takes them back as it does typing.
         let mut caret = search.take_replace(&mut self.text);
-        if ctx.memory(|m| m.has_focus(id(window))) {
+        if ctx.memory(|m| m.has_focus(id(doc))) {
             let deletes = ui.input_mut(|i| {
                 for event in &mut i.events {
                     if let Event::Paste(text) = event {
@@ -202,7 +226,7 @@ impl Editor {
                 i.count_and_consume_key(Modifiers::COMMAND, Key::Y)
             });
             if deletes > 0 {
-                let mut range = TextEdit::load_state(&ctx, id(window))
+                let mut range = TextEdit::load_state(&ctx, id(doc))
                     .and_then(|s| s.cursor.char_range())
                     .unwrap_or_default();
                 for _ in 0..deletes {
@@ -213,7 +237,7 @@ impl Editor {
             }
         }
         if let Some(caret) = caret {
-            line_edit::set_caret(&ctx, id(window), caret);
+            line_edit::set_caret(&ctx, id(doc), caret);
             self.changed(&ctx);
             search.text_changed();
         }
@@ -240,7 +264,7 @@ impl Editor {
                     ScrollArea::vertical()
                 };
                 scroll
-                    .id_salt(("viewer_editor_scroll", window))
+                    .id_salt(("viewer_editor_scroll", doc))
                     .animated(false)
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
@@ -261,7 +285,7 @@ impl Editor {
                                 )
                             };
                             TextEdit::multiline(text)
-                                .id(id(window))
+                                .id(id(doc))
                                 .code_editor()
                                 .cursor_at_end(false)
                                 .desired_width(f32::INFINITY)
@@ -292,8 +316,8 @@ impl Editor {
         }
     }
 
-    pub(super) fn reset_state(ctx: &Context, window: ViewportId) {
-        TextEdit::store_state(ctx, id(window), Default::default());
+    pub(super) fn reset_state(ctx: &Context, doc: Id) {
+        TextEdit::store_state(ctx, id(doc), Default::default());
     }
 }
 
@@ -364,7 +388,7 @@ mod tests {
         time::Instant,
     };
 
-    use egui::{Key, Modifiers, RawInput, os::OperatingSystem};
+    use egui::{Key, Modifiers, RawInput, ViewportId, os::OperatingSystem};
 
     use super::{
         super::{Action, Content, Doc, Inner},
@@ -448,7 +472,7 @@ mod tests {
     }
 
     #[test]
-    fn external_change_and_write_error_keep_draft() {
+    fn external_change_warns_then_save_again_overwrites() {
         let file = TestFile::new(b"original");
         let mut editor = Editor::load(&file.0).unwrap();
         replace(&mut editor, "my draft");
@@ -462,11 +486,38 @@ mod tests {
         assert_eq!(fs::read(&file.0).unwrap(), b"external");
         assert_eq!(editor.text, "my draft");
         assert!(editor.dirty());
+        assert!(editor.conflict());
+        // A longer change since the warning warns again.
+        fs::write(&file.0, b"external, again").unwrap();
+        assert!(editor.save(&file.0).is_err());
+        assert_eq!(fs::read(&file.0).unwrap(), b"external, again");
+        editor.save(&file.0).unwrap();
+        assert_eq!(fs::read(&file.0).unwrap(), b"my draft");
+        assert!(!editor.dirty());
+        assert!(!editor.conflict());
 
+        // Likewise for a file deleted meanwhile: Save again recreates it.
+        replace(&mut editor, "recreated");
         fs::remove_file(&file.0).unwrap();
         assert!(editor.save(&file.0).is_err());
+        assert!(!file.0.exists());
+        editor.save(&file.0).unwrap();
+        assert_eq!(fs::read(&file.0).unwrap(), b"recreated");
+    }
+
+    #[test]
+    fn write_error_keeps_draft() {
+        let file = TestFile::new(b"original");
+        let mut editor = Editor::load(&file.0).unwrap();
+        replace(&mut editor, "my draft");
+        let writable = fs::metadata(&file.0).unwrap().permissions();
+        let mut read_only = writable.clone();
+        read_only.set_readonly(true);
+        fs::set_permissions(&file.0, read_only).unwrap();
+        assert!(editor.save(&file.0).is_err());
         assert!(editor.dirty());
-        fs::write(&file.0, b"original").unwrap();
+        assert!(!editor.conflict());
+        fs::set_permissions(&file.0, writable).unwrap();
         editor.save(&file.0).unwrap();
         assert_eq!(fs::read(&file.0).unwrap(), b"my draft");
     }
@@ -521,8 +572,7 @@ mod tests {
         let file = TestFile::new("hello 雪\r\n".as_bytes());
         let ctx = Context::default();
         ctx.set_os(OperatingSystem::Windows);
-        let window = ViewportId::ROOT;
-        let mut doc = Doc::new(&ctx, window, file.0.clone(), Kind::Text);
+        let mut doc = Doc::new(&ctx, Id::new("doc"), file.0.clone(), Kind::Text);
         doc.start_editing(&ctx);
         let mut time = 0.;
         let mut frame = |doc: &mut Doc, events| {
@@ -543,7 +593,7 @@ mod tests {
                         Kind::Text,
                         doc.tab,
                         &mut doc.search,
-                        window,
+                        doc.id,
                     );
                 },
             )
@@ -587,7 +637,7 @@ mod tests {
         doc.tab = ScratchpadTab::Tab;
         frame(&mut doc, vec![key(Key::Tab, Modifiers::NONE)]).drop_without_applying_deltas();
         assert_eq!(doc.editor.as_ref().unwrap().text, "saved\n    \t");
-        assert!(ctx.memory(|m| m.has_focus(id(window))));
+        assert!(ctx.memory(|m| m.has_focus(id(doc.id))));
         assert!(doc.save(&ctx));
         assert_eq!(fs::read(&file.0).unwrap(), b"saved\r\n    \t");
         assert!(!doc.dirty());
@@ -621,8 +671,7 @@ mod tests {
         let file = TestFile::new(b"one\ntwo\nthree");
         let ctx = Context::default();
         ctx.set_os(OperatingSystem::Windows);
-        let window = ViewportId::ROOT;
-        let mut doc = Doc::new(&ctx, window, file.0.clone(), Kind::Text);
+        let mut doc = Doc::new(&ctx, Id::new("doc"), file.0.clone(), Kind::Text);
         doc.start_editing(&ctx);
         let mut time = 0.;
         let mut frame = |doc: &mut Doc, events| {
@@ -639,7 +688,7 @@ mod tests {
                         Kind::Text,
                         doc.tab,
                         &mut doc.search,
-                        window,
+                        doc.id,
                     );
                 },
             )
@@ -668,12 +717,11 @@ mod tests {
     fn save_shortcut_includes_edits_in_the_same_input_batch() {
         let file = TestFile::new(b"original");
         let ctx = Context::default();
-        let window = ViewportId::ROOT;
         let mut inner = Inner::default();
-        let mut doc = Doc::new(&ctx, window, file.0.clone(), Kind::Text);
+        let mut doc = Doc::new(&ctx, Id::new("doc"), file.0.clone(), Kind::Text);
         doc.start_editing(&ctx);
         inner.docs.push(doc);
-        ctx.run_ui(RawInput::default(), |ui| inner.show_window(ui, window))
+        ctx.run_ui(RawInput::default(), |ui| inner.show_window(ui))
             .drop_without_applying_deltas();
         ctx.run_ui(
             RawInput {
@@ -685,7 +733,7 @@ mod tests {
                 ],
                 ..Default::default()
             },
-            |ui| inner.show_window(ui, window),
+            |ui| inner.show_window(ui),
         )
         .drop_without_applying_deltas();
         assert_eq!(fs::read(&file.0).unwrap(), b"saved draft");
@@ -724,5 +772,46 @@ mod tests {
         );
         assert_eq!(fs::read(&file.0).unwrap(), b"original");
         output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn closing_the_viewer_window_asks_before_dropping_unsaved_tabs() {
+        let draft = TestFile::new(b"original");
+        let clean = TestFile::new(b"clean");
+        let ctx = Context::default();
+        let mut inner = Inner::default();
+        inner.open_now(&ctx, draft.0.clone(), true);
+        inner.open_now(&ctx, clean.0.clone(), false);
+        replace(inner.docs[0].editor.as_mut().unwrap(), "unsaved draft");
+        let close = || {
+            let mut input = RawInput::default();
+            input
+                .viewports
+                .get_mut(&ViewportId::ROOT)
+                .unwrap()
+                .events
+                .push(egui::ViewportEvent::Close);
+            input
+        };
+
+        let output = ctx.run_ui(close(), |ui| inner.show_window(ui));
+        assert!(
+            output.viewport_output[&ViewportId::ROOT]
+                .commands
+                .contains(&egui::ViewportCommand::CancelClose)
+        );
+        output.drop_without_applying_deltas();
+        // Every tab stays open until Save all, Discard, or Cancel.
+        assert!(inner.close_pending);
+        assert_eq!(inner.docs.len(), 2);
+        assert!(inner.docs.iter().all(|d| d.open));
+
+        // Without unsaved edits, the window closes with all its tabs.
+        inner.close_pending = false;
+        inner.docs[0].editor = None;
+        ctx.run_ui(close(), |ui| inner.show_window(ui))
+            .drop_without_applying_deltas();
+        assert!(inner.docs.is_empty());
+        assert_eq!(fs::read(&draft.0).unwrap(), b"original");
     }
 }

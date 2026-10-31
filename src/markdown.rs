@@ -1,4 +1,4 @@
-//! Markdown rendering for the file viewer windows (see `crate::viewer`), by
+//! Markdown rendering for the file viewer (see `crate::viewer`), by
 //! `egui_commonmark`, plus what it doesn't handle itself: `<details>`
 //! sections, and links to local files.
 
@@ -8,8 +8,7 @@ use std::{
 };
 
 use egui::{
-    CollapsingHeader, Context, OutputCommand, RichText, Ui, ViewportId,
-    collapsing_header::CollapsingState,
+    CollapsingHeader, Context, Id, OutputCommand, RichText, Ui, collapsing_header::CollapsingState,
 };
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use pulldown_cmark::{Event, Options, Parser, Tag};
@@ -36,19 +35,19 @@ pub enum Details<'a> {
 }
 
 /// Render the Markdown document `text`, split into `blocks` by
-/// [split_details], in viewer window `window`. `path` is the file it was read
-/// from: relative image paths load from its folder.
+/// [split_details], in the viewer tab with id `doc`. `path` is the file it was
+/// read from: relative image paths load from its folder.
 pub fn show(
     ui: &mut Ui,
     text: &str,
     blocks: &[Block],
     path: &Path,
     cache: &mut CommonMarkCache,
-    window: ViewportId,
+    doc: Id,
     details: &mut Details,
 ) {
     ui.style_mut().url_in_tooltip = true;
-    show_blocks(ui, blocks, text, cache, &image_base(path), window, details);
+    show_blocks(ui, blocks, text, cache, &image_base(path), doc, details);
 }
 
 /// The prefix `egui_commonmark` puts on image paths without a scheme, so
@@ -289,14 +288,14 @@ fn html_to_text(html: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Render `blocks`, pieces of the document `text`, in viewer window `window`.
+/// Render `blocks`, pieces of the document `text`, in the viewer tab with id `doc`.
 fn show_blocks(
     ui: &mut Ui,
     blocks: &[Block],
     text: &str,
     cache: &mut CommonMarkCache,
     image_base: &str,
-    window: ViewportId,
+    doc: Id,
     details: &mut Details,
 ) {
     for (i, block) in blocks.iter().enumerate() {
@@ -316,7 +315,7 @@ fn show_blocks(
                 index,
                 body,
             } => {
-                let salt = ("md_details", window, *index);
+                let salt = ("md_details", doc, *index);
                 let id = ui.make_persistent_id(salt);
                 let mut header = CollapsingHeader::new(RichText::new(summary).strong())
                     .id_salt(salt)
@@ -328,7 +327,7 @@ fn show_blocks(
                     header = header.open(Some(open));
                 }
                 header.show(ui, |ui| {
-                    show_blocks(ui, body, text, cache, image_base, window, details)
+                    show_blocks(ui, body, text, cache, image_base, doc, details)
                 });
                 if let Details::Shown(states) = details {
                     if states.len() <= *index {

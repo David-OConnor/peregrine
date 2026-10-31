@@ -26,7 +26,7 @@ mod remote;
 pub mod scratchpad;
 mod search;
 mod settings;
-mod tab_keys;
+pub mod tab_keys;
 mod tabs;
 pub mod terminal;
 

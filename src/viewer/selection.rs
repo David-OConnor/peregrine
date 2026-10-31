@@ -6,7 +6,7 @@ use std::{ops::Range, time::Duration};
 
 use egui::{
     CursorIcon, Event, Id, Key, Modifiers, PointerButton, Pos2, Rangef, Rect, Response, Sense, Ui,
-    Vec2, ViewportId, epaint::TextShape, vec2,
+    Vec2, epaint::TextShape, vec2,
 };
 
 use super::search::{self, Layout};
@@ -74,14 +74,14 @@ impl Markdown {
         ui: &Ui,
         top_left: Pos2,
         layout: Layout,
-        window: ViewportId,
+        doc: Id,
         show: impl FnOnce(&mut Ui),
     ) {
         if !ui.is_enabled() || !ui.ctx().memory(|m| m.is_above_modal_layer(ui.layer_id())) {
             self.dragging = false;
             return;
         }
-        let selection_id = Id::new(("viewer_markdown_selection", window));
+        let selection_id = Id::new(("viewer_markdown_selection", doc));
         let response = ui.interact(
             Rect::from_min_size(ui.clip_rect().min, Vec2::ZERO),
             selection_id,
@@ -101,7 +101,7 @@ impl Markdown {
         let select_all = (!ui.ctx().egui_wants_keyboard_input() || response.has_focus())
             && ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::A));
         if self.texts.is_empty() && ((pressed && inside) || select_all) {
-            self.texts = search::measure_text(ui, ui.available_width(), window, show);
+            self.texts = search::measure_text(ui, ui.available_width(), doc, show);
             // Fenced code's copy buttons are UI chrome, not document text.
             self.texts.retain(|text| {
                 !matches!(text.galley.text(), "🗐" | "✔")
@@ -334,7 +334,7 @@ mod tests {
             (true, Kind::Code("rs")),
         ] {
             let ctx = Context::default();
-            let window = ViewportId::ROOT;
+            let doc = Id::new("doc");
             let mut layout = syntax::Source::default();
             let mut search = search::Search::default();
             let mut editor = editor::Editor::load(&path).unwrap();
@@ -343,9 +343,9 @@ mod tests {
                 time += 1. / 60.;
                 ctx.run_ui(raw(time, events), |ui| {
                     if editing {
-                        editor.show(ui, kind, ScratchpadTab::Spaces, &mut search, window);
+                        editor.show(ui, kind, ScratchpadTab::Spaces, &mut search, doc);
                     } else {
-                        show_text(ui, &text, kind, 151, &mut layout, &mut search, window);
+                        show_text(ui, &text, kind, 151, &mut layout, &mut search, doc);
                     }
                 })
                 .drop_without_applying_deltas();
@@ -353,9 +353,9 @@ mod tests {
             frame(vec![]);
             frame(vec![]);
             let id = if editing {
-                editor::id(window)
+                editor::id(doc)
             } else {
-                Id::new(("viewer_text", window))
+                Id::new(("viewer_text", doc))
             };
             let rect = ctx.read_response(id).unwrap().rect;
             let start = rect.min + vec2(3., 4.);
@@ -430,7 +430,7 @@ mod tests {
         let mut cache = CommonMarkCache::default();
         let mut details_open = Vec::new();
         let path = Path::new("selection.md");
-        let window = ViewportId::ROOT;
+        let doc = Id::new("doc");
         let mut time = 0.;
         let mut frame = |selection: &mut Markdown, events| {
             time += 1. / 60.;
@@ -448,19 +448,19 @@ mod tests {
                             &blocks,
                             path,
                             &mut cache,
-                            window,
+                            doc,
                             &mut Details::Shown(&mut details_open),
                         );
                         let layout =
                             Layout::markdown(&text, width, ui.min_rect().height(), &details_open);
-                        selection.show(ui, top_left, layout, window, |ui| {
+                        selection.show(ui, top_left, layout, doc, |ui| {
                             markdown::show(
                                 ui,
                                 &text,
                                 &blocks,
                                 path,
                                 &mut cache,
-                                window,
+                                doc,
                                 &mut Details::Measured(&details_open),
                             );
                         });
