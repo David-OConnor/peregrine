@@ -961,7 +961,7 @@ impl Inner {
             }
         }
         if doc.kind != Kind::Image && doc.pending.is_none() {
-            doc.search.keys(&ctx);
+            doc.search.keys(&ctx, doc.editor.is_some());
         }
         doc.receive_image(&ctx);
         // Keep polling for edits while the window is idle.
@@ -1234,7 +1234,7 @@ fn toolbar(doc: &mut Doc, ui: &mut Ui, window: ViewportId) {
         ui.label(RichText::new(doc.path.display().to_string()).weak());
     });
     if doc.kind != Kind::Image {
-        doc.search.bar(ui, window);
+        doc.search.bar(ui, window, doc.editor.is_some());
     }
     if let Some(size) = doc.truncated {
         let msg = format!(

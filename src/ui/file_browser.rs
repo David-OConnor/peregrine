@@ -272,7 +272,10 @@ pub(super) fn draw(state: &mut State, ui: &mut Ui) {
 
             let here = dir.as_deref().is_some_and(|d| same_dir(d, cwd));
             let resp = ui
-                .add_enabled(dir.is_some(), Button::new(shortcut_label(ui, s.glyph, here)))
+                .add_enabled(
+                    dir.is_some(),
+                    Button::new(shortcut_label(ui, s.glyph, here)),
+                )
                 .on_hover_text(hover);
             if let Some(dir) = &dir
                 && let Some(d) = drop_target(ui, &resp, dir)
@@ -1146,7 +1149,11 @@ fn context_menu(ui: &Ui, resp: &Response, row: Option<(&Path, bool)>) -> Option<
             // Bold whichever of View and Open a double-click does.
             let label = |text: &str, default: bool| {
                 let text = RichText::new(text);
-                Button::new(if default { text.family(ui::bold_family()) } else { text })
+                Button::new(if default {
+                    text.family(ui::bold_family())
+                } else {
+                    text
+                })
             };
             let viewable = viewer::can_view(path);
             if viewable {

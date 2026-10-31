@@ -1,5 +1,6 @@
 //! Find in a text, source or Markdown viewer window: the bar under its
-//! toolbar, the keys that drive it, and the matches it highlights.
+//! toolbar, the keys that drive it, and the matches it highlights. In Edit
+//! mode, it can replace them too.
 //!
 //! Source and plain text are searched as one string, and their matches
 //! located in its laid-out galley each pass. Markdown is drawn by
@@ -13,14 +14,10 @@ use std::{ops::Range, str::Chars, sync::Arc};
 use egui::{
     Align, Button, Color32, Context, Event, Galley, Id, Key, LayerId, Modifiers, Order, Pos2,
     Rangef, Rect, RichText, Shape, Stroke, StrokeKind, TextEdit, Ui, UiBuilder, ViewportId,
-    epaint::TextShape,
-    layers::ShapeIdx,
-    os::OperatingSystem,
-    pos2,
-    text::{CCursor, CCursorRange, CharIndex},
-    vec2,
-    widgets::text_edit::TextEditState,
+    epaint::TextShape, layers::ShapeIdx, os::OperatingSystem, pos2, text::CharIndex, vec2,
 };
+
+use crate::ui::line_edit;
 
 /// Stop counting here, so a one-letter query in a big file stays quick.
 const MAX_MATCHES: usize = 100_000;
@@ -63,6 +60,22 @@ pub(super) struct Search {
     remeasure: bool,
     /// Editing can reuse an allocation's address; don't rely on it alone.
     text_changed: bool,
+    /// Show the replace box, under the find bar, in Edit mode.
+    replacing: bool,
+    replacement: String,
+    /// Focus the replace box, with its text selected.
+    focus_replace: bool,
+    /// Asked for in the bar, for the editor to make before it's drawn.
+    replace: Option<Replace>,
+    /// After a replacement: make the first match from this char current.
+    after: Option<usize>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Replace {
+    /// The current match, then step to the next.
+    Current,
+    All,
 }
 
 /// The matches found.
@@ -281,6 +294,10 @@ fn box_id(window: ViewportId) -> Id {
     Id::new(("viewer_find", window))
 }
 
+fn replace_box_id(window: ViewportId) -> Id {
+    Id::new(("viewer_replace", window))
+}
+
 impl Search {
     fn needle(&self) -> Option<Needle> {
         Needle::new(&self.query, self.case_sensitive, self.ignore_separators)
@@ -332,8 +349,9 @@ impl Search {
     }
 
     /// Act on the find keys pressed in this window this pass, and remove
-    /// their key events. Call before the bar is drawn.
-    pub(super) fn keys(&mut self, ctx: &Context) {
+    /// their key events, with Replace's if `editing`. Call before the bar is
+    /// drawn.
+    pub(super) fn keys(&mut self, ctx: &Context, editing: bool) {
         // As VS Code: Alt+C, or Cmd+Option+C on Mac, where Option+C types ç.
         let case_key = if ctx.os() == OperatingSystem::Mac {
             Modifiers::MAC_CMD | Modifiers::ALT
@@ -343,6 +361,15 @@ impl Search {
         ctx.input_mut(|i| {
             if i.consume_key(Modifiers::COMMAND, Key::F) {
                 self.focus = true;
+            }
+            if editing && i.consume_key(Modifiers::COMMAND, Key::R) {
+                self.replacing = true;
+                // What to find first, if there's nothing yet.
+                if self.query.is_empty() {
+                    self.focus = true;
+                } else {
+                    self.focus_replace = true;
+                }
             }
             // Shifted first: an unshifted shortcut matches shifted keys too.
             if i.consume_key(Modifiers::SHIFT, Key::F3)
@@ -363,15 +390,13 @@ impl Search {
     }
 
     /// The find bar: query box, clear, case and separator toggles, previous
-    /// and next, and the match count.
-    pub(super) fn bar(&mut self, ui: &mut Ui, window: ViewportId) {
+    /// and next, and the match count. If `editing`, a Replace toggle, which
+    /// shows the replace box under them.
+    pub(super) fn bar(&mut self, ui: &mut Ui, window: ViewportId, editing: bool) {
         let id = box_id(window);
         if self.focus {
             // Select the query, so typing replaces it.
-            let mut state = TextEditState::load(ui.ctx(), id).unwrap_or_default();
-            let all = CCursorRange::two(CCursor::new(0), CCursor::new(self.query.chars().count()));
-            state.cursor.set_char_range(Some(all));
-            state.store(ui.ctx(), id);
+            line_edit::select_all(ui.ctx(), id, &self.query);
         }
         let count = self.found.len();
         // Not while the first search for a new query is pending, so "No
@@ -416,6 +441,15 @@ impl Search {
             {
                 self.query.clear();
             }
+            if editing
+                && ui
+                    .toggle_value(&mut self.replacing, "Replace")
+                    .on_hover_text("Show or hide the replace box (Ctrl+R)")
+                    .clicked()
+                && self.replacing
+            {
+                self.focus_replace = true;
+            }
 
             ui.separator();
             ui.toggle_value(&mut self.case_sensitive, "Aa")
@@ -448,6 +482,83 @@ impl Search {
                 ui.label(RichText::new("No results").color(ui.visuals().error_fg_color));
             }
         });
+        if editing && self.replacing {
+            self.replace_bar(ui, window, count);
+        }
+    }
+
+    /// The replace box, under the find box, and its Replace and Replace all
+    /// buttons, for `count` matches.
+    fn replace_bar(&mut self, ui: &mut Ui, window: ViewportId, count: usize) {
+        let id = replace_box_id(window);
+        if self.focus_replace {
+            line_edit::select_all(ui.ctx(), id, &self.replacement);
+        }
+        ui.horizontal(|ui| {
+            let edit = TextEdit::singleline(&mut self.replacement)
+                .id(id)
+                .hint_text("Replace with")
+                .desired_width(BOX_WIDTH)
+                // Enter replaces, keeping focus.
+                .return_key(None);
+            let response = ui.add(edit);
+            if std::mem::take(&mut self.focus_replace) {
+                response.request_focus();
+            }
+            if response.has_focus() && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter))
+            {
+                self.replace = Some(Replace::Current);
+            }
+            if ui
+                .add_enabled(count > 0, Button::new("Replace"))
+                .on_hover_text("Replace the current match, and go to the next (Enter)")
+                .clicked()
+            {
+                self.replace = Some(Replace::Current);
+            }
+            if ui
+                .add_enabled(count > 0, Button::new("Replace all"))
+                .on_hover_text("Replace every match")
+                .clicked()
+            {
+                self.replace = Some(Replace::All);
+            }
+        });
+    }
+
+    /// Make the replacement asked for in the bar, if any, in `text`: the
+    /// editor's, which the matches were found in. Returns the char after the
+    /// last replacement, if any was made.
+    pub(super) fn take_replace(&mut self, text: &mut String) -> Option<usize> {
+        let replace = self.replace.take()?;
+        let needle = self.needle()?;
+        // Found again, as Replace all goes past MAX_MATCHES.
+        let mut ranges = find(text, &needle, usize::MAX);
+        if replace == Replace::Current {
+            ranges = vec![ranges.get(self.current)?.clone()];
+        }
+        if ranges.is_empty() {
+            return None;
+        }
+
+        let len = self.replacement.chars().count();
+        let mut replaced = String::with_capacity(text.len());
+        let mut chars = text.chars();
+        let (mut at, mut end) = (0, 0);
+        for range in ranges {
+            replaced.extend(chars.by_ref().take(range.start - at));
+            replaced.push_str(&self.replacement);
+            chars.nth(range.len() - 1);
+            end += range.start - at + len;
+            at = range.end;
+        }
+        replaced.extend(chars);
+        *text = replaced;
+        // On to the next match, past the text put in, even if that matches.
+        if replace == Replace::Current {
+            self.after = Some(end);
+        }
+        Some(end)
     }
 
     /// Source or plain text: find the query in `text`, if either changed.
@@ -461,8 +572,14 @@ impl Search {
         let (start, len) = Layout::address(text);
         let layout = Layout::Text(start, len);
         if self.stale(&needle, &layout) || changed {
-            let found = Found::Chars(find(text, &needle, MAX_MATCHES));
-            self.set_found(ctx, found, needle, layout);
+            let found = find(text, &needle, MAX_MATCHES);
+            if let Some(after) = self.after.take()
+                && !found.is_empty()
+            {
+                self.current = found.partition_point(|r| r.start < after) % found.len();
+                self.reveal = true;
+            }
+            self.set_found(ctx, Found::Chars(found), needle, layout);
         }
     }
 
@@ -643,5 +760,41 @@ fn collect_text<'a>(shape: &'a Shape, out: &mut Vec<&'a TextShape>) {
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replace_current_steps_on_and_replace_all_takes_every_match() {
+        let ctx = Context::default();
+        let mut search = Search {
+            query: "Foo".into(),
+            replacement: "foo bar".into(),
+            ..Default::default()
+        };
+        let mut text = String::from("foo 雪 FOO foo");
+        search.find_in_text(&ctx, &Arc::from(text.as_str()));
+        search.current = 1;
+
+        search.replace = Some(Replace::Current);
+        assert_eq!(search.take_replace(&mut text), Some(13));
+        assert_eq!(text, "foo 雪 foo bar foo");
+        // The next match is current, not the one just put in.
+        search.text_changed();
+        search.find_in_text(&ctx, &Arc::from(text.as_str()));
+        assert_eq!(search.current, 2);
+
+        search.replace = Some(Replace::All);
+        assert_eq!(search.take_replace(&mut text), Some(29));
+        assert_eq!(text, "foo bar 雪 foo bar bar foo bar");
+        // Nothing asked for, or nothing to find: no change.
+        assert_eq!(search.take_replace(&mut text), None);
+        search.query.clear();
+        search.replace = Some(Replace::All);
+        assert_eq!(search.take_replace(&mut text), None);
+        assert_eq!(text, "foo bar 雪 foo bar bar foo bar");
     }
 }

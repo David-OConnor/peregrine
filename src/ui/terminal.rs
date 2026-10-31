@@ -443,6 +443,16 @@ fn input_id() -> Id {
     Id::new("cli_input")
 }
 
+/// Pasted text as the input box takes it: one command per line, ending in
+/// `\n` whatever the clipboard used, and no trailing newline, so the caret
+/// lands at the end of the last command.
+fn paste_lines(text: &str) -> String {
+    text.replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .trim_end_matches('\n')
+        .to_string()
+}
+
 /// Tab, from anywhere in the window, empties the CLI input and moves the
 /// keyboard to it, in place of egui's moving focus to the next widget. Not
 /// in the input itself, where Tab autocompletes, in the Scratchpad, where it
@@ -536,6 +546,7 @@ pub fn term_in(state: &mut State, ui: &mut Ui) {
         .running_here()
         .map(|cmd| cmd.line.clone())
         .or(remote_busy.clone());
+    let queued = state.ui.queued_lines[active].len();
     let mut stop = false;
     let mut interrupt = false;
     let mut cancel = false;
@@ -581,11 +592,11 @@ pub fn term_in(state: &mut State, ui: &mut Ui) {
                     .clicked();
             }
             Some(line) => {
-                ui.label(
-                    RichText::new(format!("running: {line}"))
-                        .color(COLOR_STDERR_OK)
-                        .monospace(),
-                );
+                let label = match queued {
+                    0 => format!("running: {line}"),
+                    n => format!("running: {line} (+{n} queued)"),
+                };
+                ui.label(RichText::new(label).color(COLOR_STDERR_OK).monospace());
                 let hover = if remote_busy.is_some() {
                     "Interrupt the remote command (Ctrl+C)"
                 } else {
@@ -640,7 +651,8 @@ pub fn term_in(state: &mut State, ui: &mut Ui) {
                 && r.primary.index
                     == egui::text::CharIndex(state.ui.cli_input[active].chars().count())
         });
-    let hint = if focused && caret_at_end && running.is_none() {
+    let multi_line = state.ui.cli_input[active].contains('\n');
+    let hint = if focused && caret_at_end && running.is_none() && !multi_line {
         state.input_hint()
     } else {
         None
@@ -680,6 +692,10 @@ pub fn term_in(state: &mut State, ui: &mut Ui) {
     if cancel_input {
         state.ui.cli_input[active].clear();
         state.reset_history_nav();
+    }
+    // Stopping a multi-line input's command stops the rest of it too.
+    if cancel_input || stop || interrupt {
+        state.ui.queued_lines[active].clear();
     }
     if stop || interrupt {
         if remote_busy.is_some() {
@@ -737,15 +753,27 @@ pub fn term_in(state: &mut State, ui: &mut Ui) {
 
     // Input box sits on its own row, directly beneath the prompt line above.
     // It's multi-line so a long command wraps onto extra rows (and the panel
-    // grows to fit) instead of scrolling off to the right, but it's still one
-    // logical line: Enter never inserts a newline (`return_key(None)`), and
-    // pasted newlines are flattened to spaces below. `lock_focus` stops egui
-    // from using Tab for widget-to-widget focus navigation, since we use it
-    // for path autocompletion.
+    // grows to fit) instead of scrolling off to the right. Enter never
+    // inserts a newline (`return_key(None)`), but a paste can: each of its
+    // lines is a command of its own, shown on its own row, and Enter runs
+    // them in turn, as a terminal does. `lock_focus` stops egui from using
+    // Tab for widget-to-widget focus navigation, since we use it for path
+    // autocompletion.
+    let mut paste_here = focused;
     if let Some(text) = state.ui.clipboard.pending_text.take() {
         ui.ctx().memory_mut(|m| m.request_focus(input_id));
         ui.ctx()
             .input_mut(|i| i.events.push(egui::Event::Paste(text)));
+        paste_here = true;
+    }
+    if paste_here {
+        ui.input_mut(|i| {
+            for event in &mut i.events {
+                if let egui::Event::Paste(text) = event {
+                    *text = paste_lines(text);
+                }
+            }
+        });
     }
     let output = TextEdit::multiline(&mut state.ui.cli_input[active])
         .id(input_id)
@@ -772,11 +800,11 @@ pub fn term_in(state: &mut State, ui: &mut Ui) {
         );
     }
 
-    // Same flattening a single-line edit applies to pastes. It's
-    // char-for-char, so the edit's caret position stays valid.
+    // A `\r` that got past [paste_lines] ends a line too. Char-for-char, so
+    // the edit's caret position stays valid.
     let buf = &mut state.ui.cli_input[active];
-    if buf.contains(['\r', '\n']) {
-        *buf = buf.replace(['\r', '\n'], " ");
+    if buf.contains('\r') {
+        *buf = buf.replace('\r', "\n");
     }
 
     if state.ui.focus_input {
@@ -831,9 +859,25 @@ pub fn term_in(state: &mut State, ui: &mut Ui) {
         // echoes it when the program wants it echoed (not a password, say),
         // so it isn't echoed here.
         if remote_busy.is_some() {
-            state.send_remote_line(&input);
+            for line in input.split('\n') {
+                state.send_remote_line(line);
+            }
         } else if running.is_some() {
-            state.send_running_line(&input);
+            for line in input.split('\n') {
+                state.send_running_line(line);
+            }
+        } else if input.contains('\n') {
+            // Pasted lines run as written, without the `cd` suggestion a
+            // typed line takes. The rest wait for each one before to finish.
+            let mut lines = input
+                .split('\n')
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(str::to_string);
+            if let Some(first) = lines.next() {
+                state.ui.queued_lines[active].extend(lines);
+                submit_command(state, &first);
+            }
         } else {
             let input = state.line_for_enter(input);
             submit_command(state, &input);
@@ -951,3 +995,20 @@ const COLOR_STDERR: Color32 = Color32::from_rgb(240, 110, 110);
 // Amber: stderr from a command that succeeded (warnings, progress), so red
 // is reserved for failures.
 pub const COLOR_STDERR_OK: Color32 = Color32::from_rgb(240, 180, 70);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn paste_keeps_lines() {
+        let pasted =
+            "git remote add origin url\r\ngit branch -M main\r\ngit push -u origin main\r\n";
+        assert_eq!(
+            paste_lines(pasted),
+            "git remote add origin url\ngit branch -M main\ngit push -u origin main"
+        );
+        assert_eq!(paste_lines("a\rb\n\n"), "a\nb");
+        assert_eq!(paste_lines("ls"), "ls");
+    }
+}

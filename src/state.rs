@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashSet, VecDeque},
     env, io,
     path::{Path, PathBuf},
     sync::Arc,
@@ -68,6 +68,9 @@ pub struct StateUi {
     /// `submit_command` and taken at the start of the next frame, so the echo
     /// paints before a built-in that blocks (`sync`, say) starts.
     pub pending_cmd: Option<String>,
+    /// By tab: the rest of a multi-line input (a pasted script, say), run a
+    /// line at a time as the tab goes idle. See [State::run_queued].
+    pub queued_lines: Vec<VecDeque<String>>,
     /// The input after a Tab that left several candidates. A second Tab on
     /// the same input lists them, as the CLI does.
     pub tab_list_pending: Option<String>,
@@ -282,6 +285,7 @@ impl Default for StateUi {
             active_tab: 0,
             focus_input: true,
             pending_cmd: None,
+            queued_lines: vec![VecDeque::new()],
             tab_list_pending: None,
             hint_cache: Default::default(),
             kill_ring: Default::default(),
@@ -1436,6 +1440,7 @@ impl State {
         let mut ui = StateUi::default();
         ui.active_tab = active_tab;
         ui.cli_input = vec![String::new(); n];
+        ui.queued_lines = vec![VecDeque::new(); n];
         ui.out = (0..n).map(|_| Output::default()).collect();
         ui.history_nav = (0..n).map(|_| NavState::new()).collect();
         ui.nav_back = (0..n).map(|_| Vec::new()).collect();
@@ -1539,6 +1544,7 @@ impl State {
 
         self.cwd.insert(i, tab.cwd);
         self.ui.cli_input.insert(i, tab.cli_input);
+        self.ui.queued_lines.insert(i, VecDeque::new());
         self.ui.out.insert(i, tab.out);
         self.ui.history_nav.insert(i, NavState::new());
         self.ui.nav_back.insert(i, tab.nav_back);
@@ -1584,6 +1590,7 @@ impl State {
         }
         shift(&mut self.cwd, from, to);
         shift(&mut self.ui.cli_input, from, to);
+        shift(&mut self.ui.queued_lines, from, to);
         shift(&mut self.ui.out, from, to);
         shift(&mut self.ui.history_nav, from, to);
         shift(&mut self.ui.nav_back, from, to);
@@ -1611,6 +1618,7 @@ impl State {
             nav_forward: self.ui.nav_forward.remove(idx),
         };
         self.ui.history_nav.remove(idx);
+        self.ui.queued_lines.remove(idx);
         self.branch.remove(idx);
         // Tear down any SSH session attached to the closed tab.
         if let Some(Remote::Live(live)) = self.remote.remove(idx) {
@@ -2242,6 +2250,24 @@ impl State {
                 self.refresh_browser_files();
             }
         }
+    }
+
+    /// The active tab's next queued line (see [StateUi::queued_lines]), once
+    /// the tab is idle: nothing about to run, running, or connecting. A
+    /// background tab's queue waits until it's selected again, since commands
+    /// run in the active tab.
+    pub fn next_queued(&mut self) -> Option<String> {
+        let busy = self.ui.pending_cmd.is_some()
+            || self.running_here().is_some()
+            || match self.remote_here() {
+                Some(Remote::Connecting(_)) => true,
+                Some(remote) => remote.live().is_some_and(LiveRemote::busy),
+                None => false,
+            };
+        if busy {
+            return None;
+        }
+        self.ui.queued_lines[self.ui.active_tab].pop_front()
     }
 
     /// The active tab's SSH connection, if any.

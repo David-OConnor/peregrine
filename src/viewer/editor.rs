@@ -10,11 +10,16 @@ use std::{
 };
 
 use egui::{
-    Context, Event, Id, Rect, ScrollArea, Shape, TextBuffer, TextEdit, Ui, UiBuilder, ViewportId,
+    Context, Event, Id, Key, Modifiers, Rect, ScrollArea, Shape, TextBuffer, TextEdit, Ui,
+    UiBuilder, ViewportId,
+    text::{CCursor, CCursorRange},
 };
 
 use super::{Kind, MAX_BYTES, gutter, search, selection, syntax};
-use crate::ui::scratchpad::{self, ScratchpadTab};
+use crate::ui::{
+    line_edit,
+    scratchpad::{self, ScratchpadTab},
+};
 
 #[derive(Clone, Copy)]
 enum Encoding {
@@ -160,9 +165,18 @@ impl Editor {
         Ok(())
     }
 
+    /// Record a change to the text, made by the box or before it's drawn.
+    fn changed(&mut self, ctx: &Context) {
+        self.dirty = self.text != self.original;
+        self.lines = self.text.bytes().filter(|&b| b == b'\n').count() + 1;
+        // Update the toolbar and title, drawn before the editor.
+        ctx.request_repaint();
+    }
+
     /// Fill the window with egui's native selection, clipboard, navigation,
     /// undo/redo and Tab indentation, with the viewer's gutter and find bar.
     /// Tab inserts a tab, or 4 spaces if `tab` is [ScratchpadTab::Spaces].
+    /// Ctrl+Y deletes the line, in place of egui's redo.
     pub(super) fn show(
         &mut self,
         ui: &mut Ui,
@@ -171,8 +185,12 @@ impl Editor {
         search: &mut search::Search,
         window: ViewportId,
     ) {
-        if ui.ctx().memory(|m| m.has_focus(id(window))) {
-            ui.input_mut(|i| {
+        let ctx = ui.ctx().clone();
+        // Edits made before the box is drawn, so it shows them. Its undo
+        // takes them back as it does typing.
+        let mut caret = search.take_replace(&mut self.text);
+        if ctx.memory(|m| m.has_focus(id(window))) {
+            let deletes = ui.input_mut(|i| {
                 for event in &mut i.events {
                     if let Event::Paste(text) = event {
                         *text = text.replace("\r\n", "\n");
@@ -181,7 +199,23 @@ impl Editor {
                 if tab == ScratchpadTab::Spaces {
                     scratchpad::tab_to_spaces(&mut i.events);
                 }
+                i.count_and_consume_key(Modifiers::COMMAND, Key::Y)
             });
+            if deletes > 0 {
+                let mut range = TextEdit::load_state(&ctx, id(window))
+                    .and_then(|s| s.cursor.char_range())
+                    .unwrap_or_default();
+                for _ in 0..deletes {
+                    let at = delete_lines(&mut self.text, range);
+                    range = CCursorRange::one(CCursor::new(at));
+                    caret = Some(at);
+                }
+            }
+        }
+        if let Some(caret) = caret {
+            line_edit::set_caret(&ctx, id(window), caret);
+            self.changed(&ctx);
+            search.text_changed();
         }
         let language = match kind {
             Kind::Code(language) => Some(language),
@@ -254,16 +288,53 @@ impl Editor {
         let gutter = Rect::from_x_y_ranges(gutter.x_range(), output.inner_rect.y_range());
         gutter::paint(ui, gutter, &edit.galley, edit.galley_pos);
         if edit.response.changed() {
-            self.dirty = self.text != self.original;
-            self.lines = self.text.bytes().filter(|&b| b == b'\n').count() + 1;
-            // Update the toolbar and title, drawn before the editor.
-            ui.ctx().request_repaint();
+            self.changed(&ctx);
         }
     }
 
     pub(super) fn reset_state(ctx: &Context, window: ViewportId) {
         TextEdit::store_state(ctx, id(window), Default::default());
     }
+}
+
+/// Ctrl+Y, as in JetBrains IDEs: delete the lines `range` touches, with their
+/// newline, returning where the caret goes: its column, on the line now in
+/// their place. A selection ending at the start of a line leaves that line.
+fn delete_lines(text: &mut String, range: CCursorRange) -> usize {
+    let mut chars: Vec<char> = text.chars().collect();
+    let line_start = |chars: &[char], i: usize| {
+        chars[..i]
+            .iter()
+            .rposition(|&c| c == '\n')
+            .map_or(0, |n| n + 1)
+    };
+    let [start, end] = range.sorted_cursors().map(|c| c.index.0.min(chars.len()));
+    let caret = range.primary.index.0.min(chars.len());
+    let column = caret - line_start(&chars, caret);
+
+    let mut from = line_start(&chars, start);
+    let last = if end > start && end == line_start(&chars, end) {
+        end - 1
+    } else {
+        end
+    };
+    let to = chars[last..]
+        .iter()
+        .position(|&c| c == '\n')
+        .map_or(chars.len(), |n| last + n + 1);
+    // The last line has no newline of its own: take the one before it.
+    if from > 0 && to == chars.len() && chars[from..to].last() != Some(&'\n') {
+        from -= 1;
+    }
+    chars.drain(from..to);
+
+    let start = line_start(&chars, from);
+    let len = chars[start..]
+        .iter()
+        .position(|&c| c == '\n')
+        .unwrap_or(chars.len() - start);
+    *text = chars.into_iter().collect();
+    start + column.min(len)
 }
 
 fn read_complete(path: &Path) -> Result<Vec<u8>, String> {
@@ -520,6 +591,77 @@ mod tests {
         assert!(doc.save(&ctx));
         assert_eq!(fs::read(&file.0).unwrap(), b"saved\r\n    \t");
         assert!(!doc.dirty());
+    }
+
+    #[test]
+    fn delete_lines_keeps_the_caret_column() {
+        let delete = |text: &str, from: usize, to: usize| {
+            let mut text = text.to_owned();
+            let caret = delete_lines(
+                &mut text,
+                CCursorRange::two(CCursor::new(from), CCursor::new(to)),
+            );
+            (text, caret)
+        };
+        assert_eq!(delete("one\ntwo\nthree", 5, 5), ("one\nthree".into(), 5));
+        // The last line takes the newline before it.
+        assert_eq!(delete("one\ntwo", 6, 6), ("one".into(), 2));
+        assert_eq!(delete("one\ntwo\n", 6, 6), ("one\n".into(), 4));
+        assert_eq!(delete("one\n", 4, 4), ("one".into(), 0));
+        assert_eq!(delete("only", 2, 2), ("".into(), 0));
+        assert_eq!(delete("", 0, 0), ("".into(), 0));
+        // Every line a selection touches, but not one it ends at the start of.
+        assert_eq!(delete("one\ntwo\nthree", 1, 5), ("three".into(), 1));
+        assert_eq!(delete("one\ntwo\nthree", 0, 4), ("two\nthree".into(), 0));
+        assert_eq!(delete("雪\n🦅🦅\nx", 3, 3), ("雪\nx".into(), 3));
+    }
+
+    #[test]
+    fn ctrl_y_deletes_the_line_and_undo_restores_it() {
+        let file = TestFile::new(b"one\ntwo\nthree");
+        let ctx = Context::default();
+        ctx.set_os(OperatingSystem::Windows);
+        let window = ViewportId::ROOT;
+        let mut doc = Doc::new(&ctx, window, file.0.clone(), Kind::Text);
+        doc.start_editing(&ctx);
+        let mut time = 0.;
+        let mut frame = |doc: &mut Doc, events| {
+            time += 1.;
+            ctx.run_ui(
+                RawInput {
+                    time: Some(time),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    doc.editor.as_mut().unwrap().show(
+                        ui,
+                        Kind::Text,
+                        doc.tab,
+                        &mut doc.search,
+                        window,
+                    );
+                },
+            )
+            .drop_without_applying_deltas();
+        };
+        let text = |doc: &Doc| doc.editor.as_ref().unwrap().text.clone();
+        // Focus, then a pass with it for undo to start from.
+        frame(&mut doc, vec![]);
+        frame(&mut doc, vec![]);
+        frame(&mut doc, vec![key(Key::ArrowDown, Modifiers::NONE)]);
+        frame(&mut doc, vec![key(Key::Y, Modifiers::COMMAND)]);
+        assert_eq!(text(&doc), "one\nthree");
+        assert!(doc.dirty());
+        assert_eq!(doc.editor.as_ref().unwrap().lines, 2);
+        frame(&mut doc, vec![key(Key::Z, Modifiers::COMMAND)]);
+        assert_eq!(text(&doc), "one\ntwo\nthree");
+        assert!(!doc.dirty());
+        frame(
+            &mut doc,
+            vec![key(Key::Z, Modifiers::COMMAND | Modifiers::SHIFT)],
+        );
+        assert_eq!(text(&doc), "one\nthree");
     }
 
     #[test]

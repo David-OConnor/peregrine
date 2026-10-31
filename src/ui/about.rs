@@ -328,6 +328,17 @@ fn shortcut_groups(mac: bool) -> Vec<(&'static str, Shortcuts)> {
         ),
     ];
 
+    let editor = vec![
+        (format!("{cmd} + S"), "Save"),
+        (format!("{cmd} + Z / {cmd} + Shift + Z"), "Undo / redo"),
+        (format!("{cmd} + R"), "Replace"),
+        (
+            "Enter".into(),
+            "Replace the current match, in the replace box",
+        ),
+        (format!("{cmd} + Y"), "Delete the line"),
+    ];
+
     vec![
         ("Anywhere", anywhere),
         ("CLI input", cli),
@@ -335,6 +346,7 @@ fn shortcut_groups(mac: bool) -> Vec<(&'static str, Shortcuts)> {
         ("Tabs", tabs),
         ("Files panel", files),
         ("File viewer", viewer),
+        ("Editor", editor),
     ]
 }
 

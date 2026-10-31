@@ -774,6 +774,11 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
         ui.ctx().request_repaint();
     }
 
+    // The next line of a multi-line input, once the one before has finished.
+    if let Some(line) = state.next_queued() {
+        submit_command(state, &line);
+    }
+
     Panel::top("tabs_panel").resizable(false).show(ui, |ui| {
         shrink_panel_fonts(ui);
         tabs::tabs_bar(state, ui);

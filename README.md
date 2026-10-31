@@ -70,7 +70,7 @@ Drag files and folders onto a folder (or the ⬆ and shortcut buttons) to move t
 
 Opening most popular text-based file formats (.txt, Markdown, TOML, most code files) or image (.png, .jpg, .bmp) file in the browser will open an integrated viewer; you can then open in your OS's default handler from there. In the image viewer, Ctrl+scroll zooms and dragging pans.
 
-Text files open read-only. Use **Edit** at the top of the viewer to edit text or Markdown source with syntax highlighting, line numbers, find, selection, copy/paste, undo/redo, and Tab indentation. **Save** (Ctrl+S, or Cmd+S on Mac) writes the changes; **Discard edits** returns to View mode and loads the file from disk. Switching to **View**, reloading, or closing with unsaved edits offers Save, Discard, or Cancel. Files over 1 MB and files with invalid or binary text remain available in the viewer; use the OS's default handler to edit them.
+Text files open read-only. Use **Edit** at the top of the viewer to edit text or Markdown source with syntax highlighting, line numbers, find and replace, selection, copy/paste, undo/redo, and Tab indentation. **Save** (Ctrl+S, or Cmd+S on Mac) writes the changes; **Discard edits** returns to View mode and loads the file from disk. Switching to **View**, reloading, or closing with unsaved edits offers Save, Discard, or Cancel. Files over 1 MB and files with invalid or binary text remain available in the viewer; use the OS's default handler to edit them.
 
 In View and Edit modes, drag a text selection to the top or bottom edge to scroll and extend it beyond the visible text. Code files also scroll horizontally when selecting past the left or right edge.
 
@@ -194,8 +194,14 @@ On Mac, use **Cmd** in place of **Ctrl**.
 - **Alt + C**: Toggle match case. On Mac, **Cmd + Option + C**
 - **Escape** (in the find box): Clear the search
 - **F5**: Reload the file
-- **Ctrl + S** (in Edit mode): Save changes. **Ctrl + Z** undoes; **Ctrl + Shift + Z** or **Ctrl + Y** redoes
 - **Left** and **Right** arrow keys (image viewer): Previous and next image in the directory
+
+### Editor
+The file viewer's Edit mode. On Mac, use **Cmd** in place of **Ctrl**.
+
+- **Ctrl + S**: Save changes. **Ctrl + Z** undoes; **Ctrl + Shift + Z** redoes
+- **Ctrl + R**: Replace. **Enter** (in the replace box) replaces the current match
+- **Ctrl + Y**: Delete the line
 
 ### Tabs
 On Mac, use **Cmd** in place of **Ctrl**, except for the **Ctrl + Tab** and **Ctrl + PageUp / PageDown** shortcuts, which use **Ctrl** on every OS.
