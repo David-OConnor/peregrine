@@ -15,7 +15,7 @@ use egui::{
     text::{CCursor, CCursorRange},
 };
 
-use super::{Kind, MAX_BYTES, gutter, search, selection, syntax};
+use super::{Kind, MAX_BYTES, comment, gutter, search, selection, syntax};
 use crate::ui::{
     line_edit,
     scratchpad::{self, ScratchpadTab},
@@ -200,7 +200,8 @@ impl Editor {
     /// Fill the window with egui's native selection, clipboard, navigation,
     /// undo/redo and Tab indentation, with the viewer's gutter and find bar.
     /// Tab inserts a tab, or 4 spaces if `tab` is [ScratchpadTab::Spaces].
-    /// Ctrl+Y deletes the line, in place of egui's redo.
+    /// Ctrl+Y deletes the line, in place of egui's redo. Ctrl+/ comments out
+    /// the line, or uncomments it, in source and Markdown.
     pub(super) fn show(
         &mut self,
         ui: &mut Ui,
@@ -210,11 +211,18 @@ impl Editor {
         doc: Id,
     ) {
         let ctx = ui.ctx().clone();
+        let language = match kind {
+            Kind::Code(language) => Some(language),
+            Kind::Markdown => Some("md"),
+            _ => None,
+        };
         // Edits made before the box is drawn, so it shows them. Its undo
         // takes them back as it does typing.
-        let mut caret = search.take_replace(&mut self.text);
+        let mut select = search
+            .take_replace(&mut self.text)
+            .map(|at| CCursorRange::one(CCursor::new(at)));
         if ctx.memory(|m| m.has_focus(id(doc))) {
-            let deletes = ui.input_mut(|i| {
+            let (deletes, comments) = ui.input_mut(|i| {
                 for event in &mut i.events {
                     if let Event::Paste(text) = event {
                         *text = text.replace("\r\n", "\n");
@@ -223,29 +231,34 @@ impl Editor {
                 if tab == ScratchpadTab::Spaces {
                     scratchpad::tab_to_spaces(&mut i.events);
                 }
-                i.count_and_consume_key(Modifiers::COMMAND, Key::Y)
+                (
+                    i.count_and_consume_key(Modifiers::COMMAND, Key::Y),
+                    i.count_and_consume_key(Modifiers::COMMAND, Key::Slash),
+                )
             });
-            if deletes > 0 {
+            if deletes + comments > 0 {
                 let mut range = TextEdit::load_state(&ctx, id(doc))
                     .and_then(|s| s.cursor.char_range())
                     .unwrap_or_default();
                 for _ in 0..deletes {
-                    let at = delete_lines(&mut self.text, range);
-                    range = CCursorRange::one(CCursor::new(at));
-                    caret = Some(at);
+                    range = CCursorRange::one(CCursor::new(delete_lines(&mut self.text, range)));
+                    select = Some(range);
+                }
+                // Plain text has no comments.
+                let comment = language.filter(|_| comments > 0).and_then(syntax::comment);
+                if let Some(comment) = comment {
+                    for _ in 0..comments {
+                        range = comment::toggle(&mut self.text, range, comment);
+                        select = Some(range);
+                    }
                 }
             }
         }
-        if let Some(caret) = caret {
-            line_edit::set_caret(&ctx, id(doc), caret);
+        if let Some(select) = select {
+            line_edit::set_selection(&ctx, id(doc), select);
             self.changed(&ctx);
             search.text_changed();
         }
-        let language = match kind {
-            Kind::Code(language) => Some(language),
-            Kind::Markdown => Some("md"),
-            _ => None,
-        };
         let code = matches!(kind, Kind::Code(_));
         let space = ui.available_rect_before_wrap();
         let (gutter, body) =
@@ -711,6 +724,54 @@ mod tests {
             vec![key(Key::Z, Modifiers::COMMAND | Modifiers::SHIFT)],
         );
         assert_eq!(text(&doc), "one\nthree");
+    }
+
+    #[test]
+    fn ctrl_slash_toggles_comments_in_source_only() {
+        let file = TestFile::new(b"fn a() {}\nfn b() {}");
+        let ctx = Context::default();
+        ctx.set_os(OperatingSystem::Windows);
+        let mut doc = Doc::new(&ctx, Id::new("doc"), file.0.clone(), Kind::Code("rs"));
+        doc.start_editing(&ctx);
+        let mut time = 0.;
+        let mut frame = |doc: &mut Doc, kind, events| {
+            time += 1.;
+            ctx.run_ui(
+                RawInput {
+                    time: Some(time),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    doc.editor
+                        .as_mut()
+                        .unwrap()
+                        .show(ui, kind, doc.tab, &mut doc.search, doc.id);
+                },
+            )
+            .drop_without_applying_deltas();
+        };
+        let text = |doc: &Doc| doc.editor.as_ref().unwrap().text.clone();
+        let rust = Kind::Code("rs");
+        let slash = || key(Key::Slash, Modifiers::COMMAND);
+        // Focus, then a pass with it for undo to start from.
+        frame(&mut doc, rust, vec![]);
+        frame(&mut doc, rust, vec![]);
+        frame(&mut doc, rust, vec![key(Key::ArrowDown, Modifiers::NONE)]);
+        frame(&mut doc, rust, vec![slash()]);
+        assert_eq!(text(&doc), "fn a() {}\n// fn b() {}");
+        assert!(doc.dirty());
+        frame(&mut doc, rust, vec![key(Key::Z, Modifiers::COMMAND)]);
+        assert_eq!(text(&doc), "fn a() {}\nfn b() {}");
+        // The selection stays on the same lines, to toggle them back.
+        frame(&mut doc, rust, vec![key(Key::A, Modifiers::COMMAND)]);
+        frame(&mut doc, rust, vec![slash()]);
+        assert_eq!(text(&doc), "// fn a() {}\n// fn b() {}");
+        frame(&mut doc, rust, vec![slash()]);
+        assert_eq!(text(&doc), "fn a() {}\nfn b() {}");
+        assert!(!doc.dirty());
+        frame(&mut doc, Kind::Text, vec![slash()]);
+        assert_eq!(text(&doc), "fn a() {}\nfn b() {}");
     }
 
     #[test]

@@ -19,7 +19,9 @@ egui_commonmark = { version = "0.25.0", features = ["better_syntax_highlighting"
 
 # Syntax highlighting: the same engine/features already built for Markdown.
 # Keep defaults off so this doesn't add the Oniguruma C dependency.
-syntect = { version = "5.3", default-features = false, features = ["default-fancy"] }
+# `metadata`: each bundled grammar's comment markers, for the editor's Ctrl+/.
+# A 5 KB dump, read with the crates `plist-load` already builds.
+syntect = { version = "5.3", default-features = false, features = ["default-fancy", "metadata"] }
 
 # Note: RustRover is marking `egui_extras` as unused, but it's not. Code will
 # compile without it, but MD features will be missing.

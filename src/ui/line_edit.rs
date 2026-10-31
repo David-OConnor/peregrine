@@ -337,10 +337,13 @@ pub fn apply_in_box(ctx: &Context, id: Id, text: &mut String, edit: Edit, ring: 
 
 /// Put the text box `id`'s caret at char `caret`, with nothing selected.
 pub fn set_caret(ctx: &Context, id: Id, caret: usize) {
+    set_selection(ctx, id, CCursorRange::one(CCursor::new(caret)));
+}
+
+/// Select `range` in the text box `id`.
+pub fn set_selection(ctx: &Context, id: Id, range: CCursorRange) {
     let mut edit_state = TextEdit::load_state(ctx, id).unwrap_or_default();
-    edit_state
-        .cursor
-        .set_char_range(Some(CCursorRange::one(CCursor::new(caret))));
+    edit_state.cursor.set_char_range(Some(range));
     edit_state.store(ctx, id);
 }
 

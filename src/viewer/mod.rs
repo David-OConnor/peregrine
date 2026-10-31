@@ -43,6 +43,7 @@ use crate::{
     },
 };
 
+mod comment;
 mod editor;
 mod gutter;
 mod search;

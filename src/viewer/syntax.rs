@@ -33,6 +33,8 @@ use syntect::{
     util::LinesWithEndings,
 };
 
+use super::comment::Comment;
+
 const TOML: &str = include_str!("../../resources/syntaxes/TOML.sublime-syntax");
 const POWERSHELL: &str = include_str!("../../resources/syntaxes/PowerShell.sublime-syntax");
 
@@ -93,6 +95,29 @@ fn lockfile_language(path: &Path) -> Option<&'static str> {
             _ => return None,
         },
     )
+}
+
+/// How `language` comments out a line, from its grammar's metadata (Sublime
+/// Text's `.tmPreferences`): with a line comment where it has one, otherwise
+/// with a block comment around the line. `None` if it has neither.
+pub(super) fn comment(language: &str) -> Option<Comment> {
+    // The grammars bundled here come without metadata.
+    if matches!(language, "toml" | "ps1") {
+        return Some(Comment::Line("# "));
+    }
+    let syntax = SYNTAXES.find_syntax_by_extension(language)?;
+    let metadata = SYNTAXES.metadata().metadata_for_scope(&[syntax.scope]);
+    // The best match first. Its `line_comment()` would borrow from `metadata`.
+    let mut items = metadata.items.iter().map(|&(_, set)| &set.items);
+    let line = items
+        .clone()
+        .find_map(|items| items.line_comment.as_deref());
+    let block = items.find_map(|items| items.block_comment.as_ref());
+    match (line, block) {
+        (Some(marker), _) => Some(Comment::Line(marker)),
+        (None, Some((open, close))) => Some(Comment::Block(open, close)),
+        (None, None) => None,
+    }
 }
 
 /// Everything, besides file contents, that changes the cached text layout.
@@ -666,6 +691,24 @@ mod tests {
                     .any(|section| section.format.color != first),
                 "{language} should be highlighted"
             );
+        }
+    }
+
+    #[test]
+    fn editor_languages_have_comment_markers() {
+        for (language, expected) in [
+            ("rs", Comment::Line("// ")),
+            ("py", Comment::Line("# ")),
+            ("md", Comment::Block("<!-- ", " -->")),
+            ("toml", Comment::Line("# ")),
+            ("js", Comment::Line("// ")),
+            ("json", Comment::Line("// ")),
+            ("ps1", Comment::Line("# ")),
+        ] {
+            assert_eq!(comment(language), Some(expected), "{language}");
+        }
+        for language in ["html", "xml", "c", "cpp", "go", "sh", "bat"] {
+            assert!(comment(language).is_some(), "{language}");
         }
     }
 
