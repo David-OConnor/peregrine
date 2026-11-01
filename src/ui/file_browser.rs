@@ -222,6 +222,7 @@ pub(super) fn draw(state: &mut State, ui: &mut Ui) {
     let mut go_back = false;
     let mut go_forward = false;
     let mut go_to: Option<PathBuf> = None;
+    let mut new_tab = false;
     let mut dropped: Option<FileDrop> = None;
     #[cfg(windows)]
     let mut open_bin = false;
@@ -282,7 +283,10 @@ pub(super) fn draw(state: &mut State, ui: &mut Ui) {
             {
                 dropped = Some(d);
             }
-            if resp.clicked() {
+            if resp.middle_clicked() {
+                go_to = dir;
+                new_tab = true;
+            } else if resp.clicked() {
                 go_to = dir;
             }
         }
@@ -339,7 +343,11 @@ pub(super) fn draw(state: &mut State, ui: &mut Ui) {
     } else if go_forward {
         state.nav_forward();
     } else if let Some(target) = go_to {
-        state.change_dir(target);
+        if new_tab {
+            state.open_dir_in_new_tab(target);
+        } else {
+            state.change_dir(target);
+        }
     }
 
     // Listing filters. Each button is highlighted while the entries it
