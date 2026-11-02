@@ -60,9 +60,19 @@ pub(super) const RECENT_DIRS_COL_WIDTH: f32 = 170.;
 /// so it doesn't stand out from the rest of the window.
 const BOOKMARKED_FILL_LIGHT: Color32 = Color32::from_rgb(220, 240, 220);
 const BOOKMARKED_FILL_DARK: Color32 = Color32::from_rgb(40, 90, 50);
-/// Uncolored text (the index, separators) on a bookmarked row in light mode.
-/// In dark mode the row keeps the theme's own text color.
+/// Uncolored text (the index, separators) on a bookmarked row, or any
+/// highlighted Bookmarks / Recent dirs row (see [RowHighlight]), in light
+/// mode. In dark mode the row keeps the theme's own text color.
 pub(super) const BOOKMARKED_TEXT: Color32 = Color32::from_gray(30);
+
+/// Background of a Bookmarks / Recent dirs row whose dir is the active tab's
+/// (gold), or another open tab's (blue), per panel theme: pale in light mode,
+/// deep in dark mode. Each keeps every [path_color] stop at least as legible
+/// as on an unhighlighted button.
+const CWD_FILL_LIGHT: Color32 = Color32::from_rgb(252, 236, 180);
+const CWD_FILL_DARK: Color32 = Color32::from_rgb(70, 56, 12);
+const OPEN_TAB_FILL_LIGHT: Color32 = Color32::from_rgb(215, 232, 252);
+const OPEN_TAB_FILL_DARK: Color32 = Color32::from_rgb(28, 55, 95);
 
 /// The background of a bookmarked row (see [BOOKMARKED_FILL_LIGHT]).
 pub(super) fn bookmarked_fill(dark: bool) -> Color32 {
@@ -72,6 +82,42 @@ pub(super) fn bookmarked_fill(dark: bool) -> Color32 {
         BOOKMARKED_FILL_LIGHT
     }
 }
+/// Why a Bookmarks / Recent dirs row is drawn on a colored background. When
+/// more than one applies, the first listed wins (see [row_highlight]).
+#[derive(Clone, Copy)]
+enum RowHighlight {
+    /// The active tab's dir: gold.
+    Cwd,
+    /// Another open tab's dir: blue.
+    OpenTab,
+    /// A Recent dirs row that's also bookmarked: green.
+    Bookmarked,
+}
+
+impl RowHighlight {
+    fn fill(self, dark: bool) -> Color32 {
+        match (self, dark) {
+            (Self::Cwd, false) => CWD_FILL_LIGHT,
+            (Self::Cwd, true) => CWD_FILL_DARK,
+            (Self::OpenTab, false) => OPEN_TAB_FILL_LIGHT,
+            (Self::OpenTab, true) => OPEN_TAB_FILL_DARK,
+            (Self::Bookmarked, _) => bookmarked_fill(dark),
+        }
+    }
+}
+
+/// How to highlight the row for `path`, if at all: as the active tab's dir,
+/// another open tab's, or with `bookmarked`, a bookmark.
+fn row_highlight(state: &State, path: &Path, bookmarked: bool) -> Option<RowHighlight> {
+    if path == state.cwd() {
+        Some(RowHighlight::Cwd)
+    } else if state.cwd.iter().any(|c| c == path) {
+        Some(RowHighlight::OpenTab)
+    } else {
+        bookmarked.then_some(RowHighlight::Bookmarked)
+    }
+}
+
 /// The filled ★ of a bookmarked dir (see [bookmark_star]).
 const STAR_COLOR: Color32 = Color32::from_rgb(225, 165, 0);
 const STAR_ON: char = '★';
@@ -134,18 +180,18 @@ fn dir_label(
 }
 
 /// A Bookmarks / Recent dirs row's button, labelled as [dir_label]. With
-/// `highlight` (a Recent dirs row that's also bookmarked), it's drawn on
-/// [bookmarked_fill]. When the label doesn't show the whole path (it's just
-/// the name, or truncated), the hover text does.
+/// `highlight` (see [row_highlight]), it's drawn on that one's background.
+/// When the label doesn't show the whole path (it's just the name, or
+/// truncated), the hover text does.
 fn dir_button(
     ui: &mut Ui,
     prefix: String,
     path: &Path,
     opts: DirLabelOpts,
-    highlight: bool,
+    highlight: Option<RowHighlight>,
 ) -> egui::Response {
     let dark = ui.visuals().dark_mode;
-    let text_color = if highlight && !dark {
+    let text_color = if highlight.is_some() && !dark {
         BOOKMARKED_TEXT
     } else {
         Color32::PLACEHOLDER
@@ -154,8 +200,8 @@ fn dir_button(
     let whole = !opts.names && parts_len(&parts) <= opts.max_len;
     let mut button = Button::new(dir_label(ui, prefix, parts, opts.max_len, text_color));
 
-    if highlight {
-        button = button.fill(bookmarked_fill(dark));
+    if let Some(h) = highlight {
+        button = button.fill(h.fill(dark));
     }
 
     let resp = ui.add(button);
@@ -429,7 +475,9 @@ fn bookmark_drop_slot(rows: &[(usize, Rect)], pos: Pos2, gap: f32) -> Option<(us
 }
 
 /// Display directory bookmarks as a clickable list, in columns when the panel
-/// is wide enough, in the order picked at the top (see [sort_bookmarks]).
+/// is wide enough, in the order picked at the top (see [sort_bookmarks]). The
+/// active tab's dir has a gold background, and other open tabs' dirs a blue
+/// one (see [RowHighlight]).
 /// Clicking a row cd's to that bookmark, and middle-clicking opens it in a new
 /// tab; in Custom order, dragging it moves it. The `x` removes it from the
 /// list, and "Cleanup missing" removes every bookmark whose dir is gone. The
@@ -499,7 +547,8 @@ pub(super) fn dir_bookmarks(state: &mut State, ui: &mut Ui) {
                 let bm = &state.dir_bookmarks[i];
 
                 let row = ui.horizontal(|ui| {
-                    let mut resp = dir_button(ui, format!("{n}: "), bm, opts, false);
+                    let highlight = row_highlight(state, bm, false);
+                    let mut resp = dir_button(ui, format!("{n}: "), bm, opts, highlight);
                     if draggable {
                         // A press that moves becomes a drag; one that doesn't
                         // is still a click.
@@ -556,8 +605,9 @@ pub(super) fn dir_bookmarks(state: &mut State, ui: &mut Ui) {
 
 /// Display recent directories we've executed a command from or acted on in
 /// the Files panel (see [State::touch_recent_dir]), as a clickable list, in
-/// columns when the panel is wide enough. Newest first. Dirs that are
-/// also bookmarked have a green background (see [bookmarked_fill]). In
+/// columns when the panel is wide enough. Newest first. The active tab's dir
+/// has a gold background, other open tabs' dirs a blue one, and other dirs
+/// that are also bookmarked a green one (see [RowHighlight]). In
 /// "Names" mode each name takes its parent dir's color, so siblings group
 /// visually. Clicking a row cd's there, and middle-clicking opens it in a new
 /// tab. The ★ adds the row's dir to Bookmarks or removes it (see
@@ -608,7 +658,8 @@ pub(super) fn dir_history(state: &mut State, ui: &mut Ui) {
 
                 let bookmarked = state.dir_bookmarks.contains(&r.path);
                 ui.horizontal(|ui| {
-                    let resp = dir_button(ui, format!("{i}: "), &r.path, opts, bookmarked);
+                    let highlight = row_highlight(state, &r.path, bookmarked);
+                    let resp = dir_button(ui, format!("{i}: "), &r.path, opts, highlight);
                     if let Some(a) = dir_click(&resp, &r.path, DirList::RecentDirs) {
                         action = Some(a);
                     }
