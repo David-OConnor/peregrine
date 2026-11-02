@@ -15,6 +15,7 @@ pub mod clipboard;
 mod cmd_history;
 pub mod dirs;
 mod file_browser;
+mod file_icons;
 mod grid;
 pub mod line_edit;
 pub mod panes;

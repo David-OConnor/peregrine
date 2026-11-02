@@ -2,9 +2,9 @@ use std::path::{Path, PathBuf};
 
 use eframe::epaint::text::cursor::CCursor;
 use egui::{
-    Align, Area, Button, Color32, DragAndDrop, Event, Frame, Id, Key, KeyboardShortcut, Layout,
-    Modal, Modifiers, Panel, Response, RichText, ScrollArea, Sense, Stroke, StrokeKind, TextEdit,
-    TextStyle, Ui, text::CCursorRange,
+    Align, Area, Atom, AtomExt, Button, Color32, DragAndDrop, Event, Frame, Id, Key,
+    KeyboardShortcut, Layout, Modal, Modifiers, Panel, Response, RichText, ScrollArea, Sense,
+    Stroke, StrokeKind, TextEdit, TextStyle, Ui, text::CCursorRange,
 };
 
 use crate::{
@@ -18,7 +18,7 @@ use crate::{
     ui::{
         ListAction,
         dirs::{BOOKMARKED_TEXT, bookmarked_fill},
-        path_bar, search, terminal,
+        file_icons, path_bar, search, terminal,
     },
     viewer,
 };
@@ -923,6 +923,9 @@ fn file_list(state: &mut State, ui: &mut Ui, search_changed: bool, arrow_moved: 
 
     let mut rename_done: Option<bool> = None;
 
+    let icon_slot = file_icons::slot_size(ui);
+    let file_icon_id = Id::new("file_icon");
+
     let columns = ScrollArea::vertical()
         .id_salt("file_browser_scroll")
         .auto_shrink([false, false])
@@ -951,36 +954,54 @@ fn file_list(state: &mut State, ui: &mut Ui, search_changed: bool, arrow_moved: 
                     return;
                 }
 
-                let text = if f.is_folder {
-                    format!("📁 {}", f.disp_name)
-                } else {
-                    f.disp_name.clone()
-                };
-
                 let is_selected = selected.contains(&f.path);
                 // A bookmarked folder is drawn on the same green as in
                 // Recent dirs, unless it's selected so the selection shows.
                 let bookmarked =
                     f.is_folder && !is_selected && state.dir_bookmarks.contains(&f.path);
+                let file_type = if f.is_folder {
+                    None
+                } else {
+                    file_icons::file_type(&f.path)
+                };
 
-                let mut rich = RichText::new(text).monospace();
+                let mut color = None;
                 if f.is_folder {
                     if bookmarked && !dark {
-                        rich = rich.color(BOOKMARKED_TEXT);
+                        color = Some(BOOKMARKED_TEXT);
                     }
                     // Same color this folder has in any path shown elsewhere.
                     let path = render_with_tilde(&f.path, home.as_deref());
                     if let Some(c) = path_color::last_color(&path, Some("~"), dark) {
-                        rich = rich.color(c);
+                        color = Some(c);
                     }
                 } else if f.is_executable {
-                    rich = rich.color(COLOR_EXECUTABLE);
+                    color = Some(COLOR_EXECUTABLE);
+                } else if let Some(t) = file_type {
+                    color = Some(t.name_color(dark));
                 }
+                let text = |s: &str| {
+                    let rich = RichText::new(s).monospace();
+                    match color {
+                        Some(c) => rich.color(c),
+                        None => rich,
+                    }
+                };
+
+                // A folder's 📁 in its name's color, or the space a file's
+                // icon is painted in (see [file_icons]), so all the names
+                // line up.
+                let icon = if f.is_folder {
+                    Atom::from(text("📁"))
+                } else {
+                    Atom::custom(file_icon_id, icon_slot)
+                };
+                let name = text(&f.disp_name).atom_shrink(true);
 
                 // Full width so the whole row is clickable and the selection
                 // highlight spans the column. Long names are truncated; the
                 // details pane shows the full name.
-                let mut row = Button::selectable(is_selected, rich)
+                let mut row = Button::selectable(is_selected, (icon, name))
                     .truncate()
                     .sense(Sense::click_and_drag())
                     .min_size(egui::vec2(ui.available_width(), 0.0));
@@ -988,7 +1009,11 @@ fn file_list(state: &mut State, ui: &mut Ui, search_changed: bool, arrow_moved: 
                     row = row.fill(bookmarked_fill(dark)).frame_when_inactive(true);
                 }
 
-                let resp = ui.add(row);
+                let out = row.atom_ui(ui);
+                if let (Some(t), Some(slot)) = (file_type, out.rect(file_icon_id)) {
+                    file_icons::paint(ui, slot, t);
+                }
+                let resp = out.response;
                 let is_lead = lead == Some(f.path.as_path());
                 if is_lead && search_changed {
                     resp.scroll_to_me(Some(Align::TOP));
