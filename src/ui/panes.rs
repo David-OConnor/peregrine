@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     BROWSER_COL_WIDTH, CWD_HIST_COL_WIDTH, REMOTE_COL_WIDTH, RIGHT_COL_WIDTH, central_reserve,
-    clipboard, cmd_history, dirs, file_browser, remote, scale_panel_fonts, scratchpad, tabs,
-    terminal,
+    clipboard, cmd_history, dirs, file_browser, remote, scale_panel_fonts, scratchpad, system_status,
+    tabs, terminal,
 };
 use crate::state::State;
 
@@ -40,6 +40,7 @@ pub struct PanelVis {
     pub path_editor: bool,
     pub clipboard: bool,
     pub scratchpad: bool,
+    pub system_status: bool,
     pub terminal: bool,
 }
 
@@ -55,6 +56,7 @@ impl Default for PanelVis {
             path_editor: false,
             clipboard: false,
             scratchpad: false,
+            system_status: false,
             terminal: true,
         }
     }
@@ -72,11 +74,12 @@ pub enum Pane {
     RecentCmds,
     Clipboard,
     Scratchpad,
+    SystemStatus,
 }
 
 impl Pane {
     /// Every pane, left to right as they are until dragged elsewhere.
-    pub const DEFAULT_ORDER: [Self; 9] = [
+    pub const DEFAULT_ORDER: [Self; 10] = [
         Self::Bookmarks,
         Self::RecentDirs,
         Self::Files,
@@ -86,6 +89,7 @@ impl Pane {
         Self::RecentCmds,
         Self::Clipboard,
         Self::Scratchpad,
+        Self::SystemStatus,
     ];
 
     /// The name its place in the saved order is stored under (see
@@ -101,6 +105,7 @@ impl Pane {
             Self::RecentCmds => "recent_cmds",
             Self::Clipboard => "clipboard",
             Self::Scratchpad => "scratchpad",
+            Self::SystemStatus => "system_status",
         }
     }
 
@@ -116,6 +121,7 @@ impl Pane {
             Self::RecentCmds => "Recent cmds",
             Self::Clipboard => "Clipboard",
             Self::Scratchpad => "Scratchpad",
+            Self::SystemStatus => "System",
         }
     }
 
@@ -131,6 +137,7 @@ impl Pane {
             Self::RecentCmds => &mut vis.recent_cmds,
             Self::Clipboard => &mut vis.clipboard,
             Self::Scratchpad => &mut vis.scratchpad,
+            Self::SystemStatus => &mut vis.system_status,
         }
     }
 
@@ -149,6 +156,7 @@ impl Pane {
             Self::RecentCmds => RIGHT_COL_WIDTH,
             Self::Clipboard => CLIPBOARD_COL_WIDTH,
             Self::Scratchpad => scratchpad::COL_WIDTH,
+            Self::SystemStatus => system_status::COL_WIDTH,
             // Never a side panel.
             Self::Terminal => super::MIN_CENTRAL_WIDTH,
         }
@@ -166,6 +174,7 @@ impl Pane {
             Self::RecentCmds => "cmd_history_panel",
             Self::Clipboard => "clipboard_panel",
             Self::Scratchpad => "scratchpad_panel",
+            Self::SystemStatus => "system_status_panel",
         }
     }
 }
@@ -174,7 +183,7 @@ impl Pane {
 /// keys are skipped, and a pane the keys lack (one added since they were
 /// saved, or all of them when nothing was) goes after the pane it follows
 /// in [Pane::DEFAULT_ORDER].
-pub fn order_from_keys(keys: &[String]) -> [Pane; 9] {
+pub fn order_from_keys(keys: &[String]) -> [Pane; 10] {
     let mut order: Vec<Pane> = Vec::with_capacity(Pane::DEFAULT_ORDER.len());
     for key in keys {
         if let Some(pane) = Pane::DEFAULT_ORDER.into_iter().find(|p| p.key() == key)
@@ -317,6 +326,7 @@ fn contents(state: &mut State, ui: &mut Ui, pane: Pane) {
         Pane::RecentCmds => cmd_history::cmd_history(state, ui),
         Pane::Clipboard => clipboard::draw(state, ui),
         Pane::Scratchpad => scratchpad::draw(state, ui),
+        Pane::SystemStatus => system_status::draw(state, ui),
         // Only ever in the middle, where [terminal_pane] draws it.
         Pane::Terminal => {}
     }
@@ -486,6 +496,7 @@ mod tests {
                 "remote_terminals",
                 "clipboard",
                 "scratchpad",
+                "system_status",
             ]
         );
     }

@@ -27,6 +27,7 @@ mod remote;
 pub mod scratchpad;
 mod search;
 mod settings;
+mod system_status;
 pub mod tab_keys;
 mod tabs;
 pub mod terminal;
@@ -816,5 +817,32 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
     let scratchpad_due = state.ui.scratchpad.save_due(ui.ctx());
     if clipboard_changed || scratchpad_due {
         let _ = state.save();
+    }
+}
+
+#[cfg(test)]
+mod tmp_remove_tests {
+    use super::*;
+
+    #[test]
+    fn remove_parent_keeps_child() {
+        let mut state = State::default();
+        state.state_path = std::path::PathBuf::from(r"C:\Users\the_a\AppData\Local\Temp\claude\d78eeec94e4764a1\57fd39c8-e44d-4326-93c0-639a623ecd16\scratchpad\tmp_test_state.ss");
+        state.dir_bookmarks = ["/c/code", "/c/code/Bio", "/c/code/Bio/mol_defs", "/c/code/Bio/bio_web"]
+            .iter().map(std::path::PathBuf::from).collect();
+
+        for sort in [dirs::BookmarkSort::Proximity, dirs::BookmarkSort::Alpha, dirs::BookmarkSort::Custom] {
+            let mut s = State::default();
+            s.state_path = state.state_path.clone();
+            s.dir_bookmarks = state.dir_bookmarks.clone();
+            s.set_bookmark_sort(sort);
+            // Remove Bio via the panel's x.
+            apply_action(&mut s, Some(ListAction::RemoveBookmark(1)));
+            println!("{sort:?} after: {:?}", s.dir_bookmarks);
+            for r in &s.ui.bookmarks_sorted {
+                println!("  {:?} {}", r.lines, s.dir_bookmarks[r.i].display());
+            }
+            println!("  filter {:?}", s.ui.bookmarks_filter);
+        }
     }
 }

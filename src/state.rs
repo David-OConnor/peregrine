@@ -82,6 +82,7 @@ pub struct StateUi {
     pub kill_ring: ui::line_edit::KillRing,
     /// The Scratchpad window's notes. Its text is saved in the state file.
     pub scratchpad: ui::scratchpad::Scratchpad,
+    pub system_status: crate::system_status::Monitor,
 
     /// Search text for each sidebar panel. Empty = "show everything". Updated
     /// in-place by the panel's TextEdit.
@@ -112,7 +113,7 @@ pub struct StateUi {
     pub history_nav: Vec<NavState>,
     pub panel_vis: PanelVis,
     /// The panes, left to right. See [ui::panes].
-    pub pane_order: [Pane; 9],
+    pub pane_order: [Pane; 10],
 
     /// Per-tab browser-style back/forward navigation stacks (parallel to
     /// `State::cwd`). `nav_back` holds dirs we can return to (most recent on
@@ -290,6 +291,7 @@ impl Default for StateUi {
             hint_cache: Default::default(),
             kill_ring: Default::default(),
             scratchpad: Default::default(),
+            system_status: Default::default(),
             bookmarks_search: String::new(),
             recent_dirs_search: String::new(),
             history_search: String::new(),

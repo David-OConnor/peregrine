@@ -21,6 +21,7 @@ mod pty;
 mod remote;
 mod running;
 mod state;
+mod system_status;
 mod term;
 mod terminal;
 mod ui;
