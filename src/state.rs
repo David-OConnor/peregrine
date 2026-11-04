@@ -30,7 +30,7 @@ use crate::{
     terminal::{self, Output},
     ui::{
         self,
-        dirs::BookmarkSort,
+        dirs::{BookmarkRow, BookmarkSort},
         panes::{Pane, PanelVis},
         path_panel::{PathPanel, PathWindow},
     },
@@ -90,11 +90,11 @@ pub struct StateUi {
     pub history_search: String,
     pub cwd_history_search: String,
 
-    /// `dir_bookmarks` indices in the order the Bookmarks panel lists them,
-    /// per [State::bookmark_sort]. A bookmark's place in this is the number
-    /// the panel shows for it, which `bm <n>` and `del bm <n>` take.
-    /// Re-derived with `bookmarks_filter`.
-    pub bookmarks_sorted: Vec<usize>,
+    /// The Bookmarks panel's rows, in the order it lists them, per
+    /// [State::bookmark_sort]. A bookmark's place in this is the number the
+    /// panel shows for it, which `bm <n>` and `del bm <n>` take. Re-derived
+    /// with `bookmarks_filter`.
+    pub bookmarks_sorted: Vec<BookmarkRow>,
     /// Indices into the corresponding source list (`recent_dirs`, `history`;
     /// for bookmarks, `bookmarks_sorted`) that match the current search.
     /// Re-derived whenever the search text or the source list changes via the
@@ -508,6 +508,9 @@ pub struct State {
     /// since (e.g. by the CLI's Ctrl+B); the panel skips the first and puts
     /// the second last.
     pub bookmark_order: Vec<PathBuf>,
+    /// Bookmarks the GUI has navigated to, most recent last, for
+    /// [BookmarkSort::Recent]. Persisted with the GUI settings (see [prefs]).
+    pub bookmark_visits: Vec<PathBuf>,
     /// Whether each Cmd history row shows the "In <dir>" button that re-runs
     /// it where it was first run. Off by default; persisted.
     pub cmd_history_show_dir: bool,
@@ -564,6 +567,7 @@ impl Default for State {
             recent_dir_names: true,
             bookmark_sort: ui::dirs::DEFAULT_BOOKMARK_SORT,
             bookmark_order: Vec::new(),
+            bookmark_visits: Vec::new(),
             cmd_history_show_dir: false,
             file_viewers: FileViewers::default(),
             path_panel: PathPanel::default(),
@@ -1490,6 +1494,7 @@ impl State {
             recent_dir_names: true,
             bookmark_sort: ui::dirs::DEFAULT_BOOKMARK_SORT,
             bookmark_order: loaded.bookmark_order,
+            bookmark_visits: Vec::new(),
             cmd_history_show_dir: false,
             file_viewers: FileViewers::default(),
             path_panel: PathPanel::default(),
@@ -1703,9 +1708,14 @@ impl State {
         // puts it last, as for any new one.
         let bookmarks = &self.dir_bookmarks;
         self.bookmark_order.retain(|p| bookmarks.contains(p));
+        self.bookmark_visits.retain(|p| bookmarks.contains(p));
 
-        self.ui.bookmarks_sorted =
-            ui::dirs::sort_bookmarks(bookmarks, self.bookmark_sort, &self.bookmark_order);
+        self.ui.bookmarks_sorted = ui::dirs::sort_bookmarks(
+            bookmarks,
+            self.bookmark_sort,
+            &self.bookmark_order,
+            &self.bookmark_visits,
+        );
 
         let needle = self.ui.bookmarks_search.to_lowercase();
 
@@ -1714,8 +1724,8 @@ impl State {
             .bookmarks_sorted
             .iter()
             .enumerate()
-            .filter(|&(_, &i)| {
-                let path = bookmarks[i].display().to_string();
+            .filter(|(_, r)| {
+                let path = bookmarks[r.i].display().to_string();
                 needle.is_empty() || path.to_lowercase().contains(&needle)
             })
             .map(|(pos, _)| pos)
@@ -1725,7 +1735,18 @@ impl State {
     /// The `dir_bookmarks` index of the bookmark the Bookmarks panel shows as
     /// number `n`.
     pub fn bookmark_at(&self, n: usize) -> Option<usize> {
-        self.ui.bookmarks_sorted.get(n).copied()
+        self.ui.bookmarks_sorted.get(n).map(|r| r.i)
+    }
+
+    /// Mark `dir` as the most recently visited bookmark, if it's one.
+    fn record_bookmark_visit(&mut self, dir: &Path) {
+        if !self.dir_bookmarks.iter().any(|p| p == dir) {
+            return;
+        }
+
+        self.bookmark_visits.retain(|p| p != dir);
+        self.bookmark_visits.push(dir.to_path_buf());
+        self.refresh_bookmarks_filter();
     }
 
     /// Order the Bookmarks panel by `sort`.
@@ -1741,7 +1762,7 @@ impl State {
             .ui
             .bookmarks_sorted
             .iter()
-            .map(|&i| self.dir_bookmarks[i].clone())
+            .map(|r| self.dir_bookmarks[r.i].clone())
             .collect();
         if from >= order.len() || to >= order.len() || from == to {
             return;
@@ -1830,6 +1851,11 @@ impl State {
             format!("Removed bookmark: {}", dir.display())
         } else {
             self.dir_bookmarks.push(dir.clone());
+            // Bookmarking the dir you're in counts as a visit.
+            if dir == self.cwd() {
+                self.record_bookmark_visit(&dir);
+            }
+
             format!("Added a bookmark: {}", dir.display())
         };
 
@@ -1964,6 +1990,7 @@ impl State {
         env::set_current_dir(&target)?;
         let new_cwd = env::current_dir().unwrap_or(target);
         let i = self.ui.active_tab;
+        self.record_bookmark_visit(&new_cwd);
         self.cwd[i] = new_cwd;
         self.refresh_cwd_history_filter();
         self.refresh_branch();

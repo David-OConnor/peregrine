@@ -1,7 +1,10 @@
 //! This module contains code related to the "Bookmarks" and "Recent dirs" panels. It includes
 //! code used by one or the other, and shared between them.
 
-use std::path::{Path, PathBuf};
+use std::{
+    cmp::Reverse,
+    path::{Path, PathBuf},
+};
 
 use eframe::epaint::{Color32, FontId, text::LayoutJob};
 use egui::{
@@ -38,6 +41,8 @@ pub const DEFAULT_BOOKMARK_SORT: BookmarkSort = BookmarkSort::Proximity;
 pub enum BookmarkSort {
     /// Oldest first: the order [State::dir_bookmarks] keeps them in.
     Added,
+    /// Most recently visited first; see [State::bookmark_visits].
+    Recent,
     /// By each dir's final name, ignoring case.
     Alpha,
     /// By path, so dirs in the same part of the tree sit together.
@@ -367,15 +372,64 @@ fn dir_col_width(ui: &Ui, prefix_chars: usize, label_chars: usize, buttons: &[ch
     ui::chars_width(ui, TextStyle::Button, (prefix_chars + label_chars) as f32) + glyphs + extra
 }
 
-/// The order the Bookmarks panel lists `bookmarks` in for `sort`, as indices
-/// into it. `custom` is the order for [BookmarkSort::Custom]; bookmarks it
-/// doesn't name (added since) follow it, oldest first.
-pub fn sort_bookmarks(bookmarks: &[PathBuf], sort: BookmarkSort, custom: &[PathBuf]) -> Vec<usize> {
+/// A row of the Bookmarks panel, in [sort_bookmarks]'s order.
+#[derive(Clone, Debug)]
+pub struct BookmarkRow {
+    /// Index into [State::dir_bookmarks].
+    pub i: usize,
+    /// One per level this row is nested, outermost first: whether the
+    /// bookmark at that level of its path (an ancestor, or for the last, this
+    /// one) has a sibling below. Draws the tree's `│` at that level, and `├`
+    /// rather than `└` at the last. Empty at the top level.
+    pub lines: Vec<bool>,
+}
+
+/// The order the Bookmarks panel lists `bookmarks` in for `sort`. A bookmark
+/// whose parent dir is also bookmarked is nested under it, among its siblings
+/// in that order. `custom` is the order for [BookmarkSort::Custom]; bookmarks
+/// it doesn't name (added since) follow it, oldest first. `visits` is for
+/// [BookmarkSort::Recent], most recent last; a bookmark goes by the latest
+/// visit to it or anything nested under it. Unvisited ones follow, oldest
+/// first.
+pub fn sort_bookmarks(
+    bookmarks: &[PathBuf],
+    sort: BookmarkSort,
+    custom: &[PathBuf],
+    visits: &[PathBuf],
+) -> Vec<BookmarkRow> {
+    // Each bookmark's parent dir's bookmark, if that's one.
+    let parent: Vec<Option<usize>> = bookmarks
+        .iter()
+        .map(|b| {
+            b.parent()
+                .and_then(|p| bookmarks.iter().position(|o| o == p))
+        })
+        .collect();
+
     let mut order: Vec<usize> = (0..bookmarks.len()).collect();
 
     // These sorts are stable, so ties stay oldest first.
     match sort {
         BookmarkSort::Added => {}
+        BookmarkSort::Recent => {
+            let own: Vec<Option<usize>> = bookmarks
+                .iter()
+                .map(|b| visits.iter().position(|p| p == b))
+                .collect();
+
+            // Rank each by its own or a descendant's visit, so a recently
+            // visited one rises as far as its nesting allows.
+            let mut latest = own.clone();
+            for (i, &visit) in own.iter().enumerate() {
+                let mut up = parent[i];
+                while let Some(p) = up {
+                    latest[p] = latest[p].max(visit);
+                    up = parent[p];
+                }
+            }
+
+            order.sort_by_key(|&i| Reverse(latest[i]));
+        }
         // The same name in two places goes by path.
         BookmarkSort::Alpha => {
             order.sort_by_cached_key(|&i| (dir_name_key(&bookmarks[i]), tree_key(&bookmarks[i])))
@@ -389,7 +443,79 @@ pub fn sort_bookmarks(bookmarks: &[PathBuf], sort: BookmarkSort, custom: &[PathB
         }),
     }
 
-    order
+    // Each bookmark's children, and those with no bookmarked parent, in order.
+    let mut children = vec![Vec::new(); bookmarks.len()];
+    let mut top = Vec::new();
+    for &i in &order {
+        match parent[i] {
+            Some(p) => children[p].push(i),
+            None => top.push(i),
+        }
+    }
+
+    let mut rows = Vec::with_capacity(bookmarks.len());
+    push_bookmark_rows(&top, &children, false, &mut Vec::new(), &mut rows);
+
+    rows
+}
+
+/// Add `siblings` and, under each, its `children`, to `rows`. `nested` unless
+/// they're top-level; `lines` is [BookmarkRow::lines] for their parent.
+fn push_bookmark_rows(
+    siblings: &[usize],
+    children: &[Vec<usize>],
+    nested: bool,
+    lines: &mut Vec<bool>,
+    rows: &mut Vec<BookmarkRow>,
+) {
+    for (n, &i) in siblings.iter().enumerate() {
+        if nested {
+            lines.push(n + 1 < siblings.len());
+        }
+
+        rows.push(BookmarkRow {
+            i,
+            lines: lines.clone(),
+        });
+        push_bookmark_rows(&children[i], children, true, lines, rows);
+
+        if nested {
+            lines.pop();
+        }
+    }
+}
+
+/// Draw a nested Bookmarks row's tree lines (see [BookmarkRow::lines]) in the
+/// indent left of its button. The row starts at `left`, and spans `row`
+/// vertically. `gap` is the space between rows, which the lines bridge.
+fn paint_tree_lines(ui: &Ui, lines: &[bool], left: f32, row: Rangef, gap: f32) {
+    let Some((&more, outer)) = lines.split_last() else {
+        return;
+    };
+
+    let indent = ui.spacing().indent;
+    let stroke = ui.visuals().widgets.noninteractive.bg_stroke;
+    let painter = ui.painter();
+    let top = row.min - gap / 2.;
+    let bottom = row.max + gap / 2.;
+    let mid = row.center();
+
+    let x = |level: usize| left + (level as f32 + 0.5) * indent;
+
+    // `│` for each ancestor with a sibling below.
+    for (level, _) in outer.iter().enumerate().filter(|(_, l)| **l) {
+        painter.vline(x(level), Rangef::new(top, bottom), stroke);
+    }
+
+    // `├` or `└`, then across to the button.
+    let level = outer.len();
+    let end = if more { bottom } else { mid };
+    painter.vline(x(level), Rangef::new(top, end), stroke);
+    painter.hline(
+        Rangef::new(x(level), left + lines.len() as f32 * indent - 2.),
+        mid,
+        stroke,
+    );
 }
 
 /// `path`'s final name, lowercased, to sort by. A root (e.g. `C:\`), which
@@ -412,7 +538,7 @@ fn tree_key(path: &Path) -> Vec<String> {
 }
 
 /// The Bookmarks panel's sort modes, with each button's label and hover text.
-const BOOKMARK_SORTS: [(BookmarkSort, &str, &str); 4] = [
+const BOOKMARK_SORTS: [(BookmarkSort, &str, &str); 5] = [
     (
         BookmarkSort::Alpha,
         "A-Z",
@@ -420,8 +546,13 @@ const BOOKMARK_SORTS: [(BookmarkSort, &str, &str); 4] = [
     ),
     (
         BookmarkSort::Added,
-        "Date",
+        "Added",
         "In the order they were bookmarked, oldest first",
+    ),
+    (
+        BookmarkSort::Recent,
+        "Recent",
+        "Most recently visited first",
     ),
     (
         BookmarkSort::Proximity,
@@ -438,7 +569,7 @@ const BOOKMARK_SORTS: [(BookmarkSort, &str, &str); 4] = [
 /// Width of the line marking where a dragged bookmark will land.
 const BOOKMARK_DROP_MARKER_WIDTH: f32 = 2.;
 
-/// The `Sort: A-Z | Added | Proximity | Custom` selector at the top of the
+/// The `Sort: A-Z | Added | Recent | Prox | Custom` selector at the top of the
 /// Bookmarks panel (see [BOOKMARK_SORTS]), wrapping when the panel is narrow.
 /// Returns the mode picked, if it changed.
 fn bookmark_sort_control(ui: &mut Ui, current: BookmarkSort) -> Option<BookmarkSort> {
@@ -475,7 +606,8 @@ fn bookmark_drop_slot(rows: &[(usize, Rect)], pos: Pos2, gap: f32) -> Option<(us
 }
 
 /// Display directory bookmarks as a clickable list, in columns when the panel
-/// is wide enough, in the order picked at the top (see [sort_bookmarks]). The
+/// is wide enough, in the order picked at the top (see [sort_bookmarks]), with
+/// each bookmark nested under its parent dir's, if that's bookmarked too. The
 /// active tab's dir has a gold background, and other open tabs' dirs a blue
 /// one (see [RowHighlight]).
 /// Clicking a row cd's to that bookmark, and middle-clicking opens it in a new
@@ -528,7 +660,14 @@ pub(super) fn dir_bookmarks(state: &mut State, ui: &mut Ui) {
             // `"<n>: "`, sized for the largest number.
             let prefix_chars = sorted.len().to_string().len() + 2;
             let label_chars = dir_label_chars(ui, state.dir_bookmarks.iter(), opts);
-            let min_width = dir_col_width(ui, prefix_chars, label_chars, &['x']);
+            let indent = ui.spacing().indent;
+            let depth = sorted.iter().map(|r| r.lines.len()).max().unwrap_or(0);
+            let min_width =
+                dir_col_width(ui, prefix_chars, label_chars, &['x']) + depth as f32 * indent;
+
+            // A search leaves gaps in the tree, so it lists matches flat.
+            let nest = state.ui.bookmarks_search.is_empty();
+            let gap = ui.spacing().item_spacing.y;
 
             // Rows move by dragging only in Custom order.
             let draggable = state.bookmark_sort == BookmarkSort::Custom;
@@ -541,12 +680,17 @@ pub(super) fn dir_bookmarks(state: &mut State, ui: &mut Ui) {
             // Rows are numbered by their place in the panel's order, which is
             // what `bm <n>` takes; `i` indexes `dir_bookmarks`.
             ui::list_columns(ui, &state.ui.bookmarks_filter, min_width, |ui, n| {
-                let Some(&i) = sorted.get(n) else {
+                let Some(entry) = sorted.get(n) else {
                     return;
                 };
+                let i = entry.i;
                 let bm = &state.dir_bookmarks[i];
+                let lines: &[bool] = if nest { &entry.lines } else { &[] };
+                let left = ui.cursor().min.x;
 
                 let row = ui.horizontal(|ui| {
+                    ui.add_space(lines.len() as f32 * indent);
+
                     let highlight = row_highlight(state, bm, false);
                     let mut resp = dir_button(ui, format!("{n}: "), bm, opts, highlight);
                     if draggable {
@@ -570,6 +714,8 @@ pub(super) fn dir_bookmarks(state: &mut State, ui: &mut Ui) {
                     }
                 });
 
+                paint_tree_lines(ui, lines, left, row.response.rect.y_range(), gap);
+
                 let column = ui.max_rect().x_range();
                 rows.push((
                     n,
@@ -578,7 +724,6 @@ pub(super) fn dir_bookmarks(state: &mut State, ui: &mut Ui) {
             });
 
             let pointer = ui.input(|i| i.pointer.latest_pos());
-            let gap = ui.spacing().item_spacing.y;
             if let (Some(from), Some(pos)) = (dragged.or(dropped), pointer)
                 && let Some((slot, y, x_range)) = bookmark_drop_slot(&rows, pos, gap)
             {

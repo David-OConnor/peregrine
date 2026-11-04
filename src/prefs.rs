@@ -38,6 +38,7 @@ pub fn save(state: &State, storage: &mut dyn Storage) {
     set_value(storage, "bookmark_names", &state.bookmark_names);
     set_value(storage, "recent_dir_names", &state.recent_dir_names);
     set_value(storage, "bookmark_sort", &state.bookmark_sort);
+    set_value(storage, "bookmark_visits", &state.bookmark_visits);
     set_value(storage, "cmd_history_show_dir", &state.cmd_history_show_dir);
     set_value(storage, "dir_color_depth", &path_color::depth_levels());
 }
@@ -78,6 +79,7 @@ pub fn load(state: &mut State, storage: &dyn Storage) {
     load_into(storage, "bookmark_names", &mut state.bookmark_names);
     load_into(storage, "recent_dir_names", &mut state.recent_dir_names);
     load_into(storage, "bookmark_sort", &mut state.bookmark_sort);
+    load_into(storage, "bookmark_visits", &mut state.bookmark_visits);
     load_into(
         storage,
         "cmd_history_show_dir",
