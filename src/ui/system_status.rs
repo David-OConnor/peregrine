@@ -7,7 +7,17 @@ use egui::{ProgressBar, RichText, ScrollArea, Ui};
 use super::panel_header;
 use crate::{state::State, system_status::Snapshot};
 
-pub(super) const COL_WIDTH: f32 = 300.;
+pub(super) const COL_WIDTH: f32 = 360.;
+
+const SECTION_SPACING: f32 = 10.;  // 2x of these plus a horizontal line
+
+
+fn section_separator(ui: &mut Ui) {
+    ui.add_space(SECTION_SPACING);
+    ui.separator();
+    ui.add_space(SECTION_SPACING);
+}
+
 
 pub(super) fn draw(state: &mut State, ui: &mut Ui) {
     panel_header(ui, "System status", &mut state.ui.panel_vis.system_status);
@@ -55,7 +65,6 @@ pub(super) fn draw(state: &mut State, ui: &mut Ui) {
 
 fn contents(snapshot: &Snapshot, ui: &mut Ui) {
     let hardware = &snapshot.hardware;
-    ui.weak("Local system · updates every 2s");
     ui.add_space(6.);
     ui.strong("CPU");
     ui.label(&hardware.cpu);
@@ -79,7 +88,7 @@ fn contents(snapshot: &Snapshot, ui: &mut Ui) {
         ui.weak("CPU usage unavailable");
     }
 
-    ui.separator();
+    section_separator(ui);
     ui.strong("Memory");
 
     if let Some(installed) = hardware.installed_memory {
@@ -106,7 +115,7 @@ fn contents(snapshot: &Snapshot, ui: &mut Ui) {
         ui.weak("Memory usage unavailable");
     }
 
-    ui.separator();
+    section_separator(ui);
     ui.strong("GPUs");
 
     if hardware.gpus.is_empty() {
@@ -132,7 +141,7 @@ fn contents(snapshot: &Snapshot, ui: &mut Ui) {
         ui.add_space(4.);
     }
 
-    ui.separator();
+    section_separator(ui);
     ui.strong("Storage");
 
     if hardware.disks.is_empty() {
@@ -162,11 +171,6 @@ fn contents(snapshot: &Snapshot, ui: &mut Ui) {
         );
         ui.add_space(4.);
     }
-
-    ui.weak("Storage refreshes every 15s · hardware every 60s")
-        .on_hover_text(
-            "Sampling pauses when this pane is hidden. Network and optical volumes are skipped.",
-        );
 
     for note in &hardware.notes {
         ui.weak(note);
