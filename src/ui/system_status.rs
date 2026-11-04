@@ -81,7 +81,7 @@ fn contents(snapshot: &Snapshot, ui: &mut Ui) {
         .on_hover_text("Highest detected SIMD tier available to this process");
 
     if let Some(usage) = snapshot.cpu_usage {
-        meter(ui, usage / 100., format!("{usage:.0}% CPU"));
+        meter(ui, usage / 100., format!("{usage:.0}%"));
     } else if snapshot.cpu_available {
         ui.weak("CPU usage: waiting for two samples");
     } else {
@@ -100,15 +100,12 @@ fn contents(snapshot: &Snapshot, ui: &mut Ui) {
     if let Some(memory) = &snapshot.memory {
         let used = memory.total.saturating_sub(memory.available);
         let fraction = ratio(used, memory.total);
+        let (used_text, total_text) = compact_pair(used, memory.total);
+
         meter(
             ui,
             fraction,
-            format!(
-                "{} / {} used · {:.0}%",
-                bytes(used),
-                bytes(memory.total),
-                fraction * 100.
-            ),
+            format!("{used_text} / {total_text} used · {:.0}%", fraction * 100.),
         );
         ui.weak(format!("{} available", bytes(memory.available)));
     } else {
@@ -163,11 +160,12 @@ fn contents(snapshot: &Snapshot, ui: &mut Ui) {
 
     for volume in snapshot.volumes.iter() {
         let used = volume.total.saturating_sub(volume.available);
+        let (free_text, total_text) = compact_pair(volume.available, volume.total);
         ui.label(&volume.name);
         meter(
             ui,
             ratio(used, volume.total),
-            format!("{} free / {}", bytes(volume.available), bytes(volume.total)),
+            format!("{free_text} free / {total_text}"),
         );
         ui.add_space(4.);
     }
@@ -181,6 +179,7 @@ fn meter(ui: &mut Ui, fraction: f32, text: String) {
     let bar = ProgressBar::new(fraction.clamp(0., 1.))
         .text(text)
         .animate(false);
+
     let bar = if fraction >= 0.9 {
         bar.fill(ui.visuals().warn_fg_color)
     } else {
@@ -198,17 +197,35 @@ fn ratio(used: u64, total: u64) -> f32 {
     (used as f64 / total as f64).clamp(0., 1.) as f32
 }
 
+const MIB: f64 = 1024. * 1024.;
+const GIB: f64 = MIB * 1024.;
+const TIB: f64 = GIB * 1024.;
+
+/// The display unit for a byte count: (divisor, decimal places, suffix).
+fn byte_unit(value: u64) -> (f64, usize, &'static str) {
+    let value = value as f64;
+
+    if value >= TIB {
+        return (TIB, 1, "TiB");
+    }
+
+    if value >= GIB {
+        return (GIB, 1, "GiB");
+    }
+
+    (MIB, 0, "MiB")
+}
+
 fn bytes(value: u64) -> String {
-    const GIB: f64 = 1024. * 1024. * 1024.;
-    let gib = value as f64 / GIB;
+    let (divisor, precision, suffix) = byte_unit(value);
+    format!("{:.precision$} {suffix}", value as f64 / divisor)
+}
 
-    if gib >= 1024. {
-        return format!("{:.1} TiB", gib / 1024.);
-    }
+/// Formats `value` and `total` both scaled to the unit `bytes` would pick for `total`, with a
+/// short unit letter on the total only, e.g. ("10.7", "15.8 G").
+fn compact_pair(value: u64, total: u64) -> (String, String) {
+    let (divisor, precision, suffix) = byte_unit(total);
+    let format = |v: u64| format!("{:.precision$}", v as f64 / divisor);
 
-    if gib >= 1. {
-        return format!("{gib:.1} GiB");
-    }
-
-    format!("{:.0} MiB", value as f64 / (1024. * 1024.))
+    (format(value), format!("{} {}", format(total), &suffix[..1]))
 }
