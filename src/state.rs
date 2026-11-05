@@ -435,6 +435,8 @@ pub struct State {
     /// Roots of repos cloned by full URL (written by the CLI's `clone` alias).
     /// The GUI doesn't use these; it round-trips them so saving doesn't drop them.
     pub clone_roots: Vec<String>,
+    /// Folders the System status pane scans for cargo target folders. Persisted.
+    pub rust_target_roots: Vec<PathBuf>,
     /// SSH connection per tab (parallel to `cwd`): being made, or live.
     /// While live, that tab's typed commands run on the remote. Not
     /// persisted (a connection can't outlive the process).
@@ -544,6 +546,7 @@ impl Default for State {
             recent_dirs: Vec::new(),
             remote_terminals: Vec::new(),
             clone_roots: Vec::new(),
+            rust_target_roots: Vec::new(),
             remote: vec![None],
             running: vec![None],
             browser_files: Vec::new(),
@@ -1388,6 +1391,7 @@ impl State {
             &self.bookmark_order,
             &self.ui.clipboard.history.entries,
             &self.ui.scratchpad.text,
+            &self.rust_target_roots,
             &self.state_path,
         )
     }
@@ -1470,6 +1474,7 @@ impl State {
             recent_dirs: loaded.recent_dirs,
             remote_terminals: loaded.remote_terminals,
             clone_roots: loaded.clone_roots,
+            rust_target_roots: loaded.rust_target_roots,
             remote: (0..n).map(|_| None).collect(),
             running: (0..n).map(|_| None).collect(),
             browser_files: Vec::new(),

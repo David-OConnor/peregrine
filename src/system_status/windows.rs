@@ -1,5 +1,6 @@
 use std::{
     mem::size_of,
+    path::PathBuf,
     ptr::{null, null_mut},
 };
 
@@ -15,7 +16,10 @@ use windows_sys::{
             Diagnostics::Debug::{SEM_FAILCRITICALERRORS, SetThreadErrorMode},
             IO::DeviceIoControl,
             Ioctl::{DISK_GEOMETRY_EX, IOCTL_DISK_GET_DRIVE_GEOMETRY_EX},
-            Registry::{HKEY_LOCAL_MACHINE, RRF_RT_REG_QWORD, RRF_RT_REG_SZ, RegGetValueW},
+            Registry::{
+                HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_QWORD, RRF_RT_REG_SZ,
+                RegGetValueW,
+            },
             SystemInformation::{
                 GROUP_AFFINITY, GetLogicalProcessorInformationEx,
                 GetPhysicallyInstalledSystemMemory, GlobalMemoryStatusEx, MEMORYSTATUSEX,
@@ -55,7 +59,7 @@ pub fn hardware() -> Hardware {
     let logical = unsafe { GetActiveProcessorCount(ALL_PROCESSOR_GROUPS) } as usize;
 
     Hardware {
-        cpu: registry_string(cpu_key, "ProcessorNameString")
+        cpu: registry_string(HKEY_LOCAL_MACHINE, cpu_key, "ProcessorNameString")
             .unwrap_or_else(|| std::env::consts::ARCH.into()),
         physical_cores: physical_cores(),
         logical_cores: (logical > 0).then_some(logical),
@@ -258,7 +262,7 @@ fn gpus() -> Option<Vec<Gpu>> {
             .map(|key| format!(r"SYSTEM\CurrentControlSet\Control\Class\{key}"));
         let driver = driver_key
             .as_deref()
-            .and_then(|key| registry_string(key, "DriverVersion"));
+            .and_then(|key| registry_string(HKEY_LOCAL_MACHINE, key, "DriverVersion"));
         let memory = driver_key
             .as_deref()
             .and_then(|key| registry_qword(key, "HardwareInformation.qwMemorySize"));
@@ -484,7 +488,20 @@ fn wide_string(buffer: &[u16]) -> String {
         .to_owned()
 }
 
-fn registry_string(key: &str, name: &str) -> Option<String> {
+/// Steam's install folder, as Steam records it.
+pub fn steam_root() -> Option<PathBuf> {
+    registry_string(HKEY_CURRENT_USER, r"Software\Valve\Steam", "SteamPath")
+        .or_else(|| {
+            registry_string(
+                HKEY_LOCAL_MACHINE,
+                r"SOFTWARE\WOW6432Node\Valve\Steam",
+                "InstallPath",
+            )
+        })
+        .map(PathBuf::from)
+}
+
+fn registry_string(root: HKEY, key: &str, name: &str) -> Option<String> {
     let key = to_wide(key);
     let name = to_wide(name);
     let mut buffer = [0u16; 1024];
@@ -492,7 +509,7 @@ fn registry_string(key: &str, name: &str) -> Option<String> {
     // SAFETY: terminated names, typed output buffer, and matching byte count.
     let result = unsafe {
         RegGetValueW(
-            HKEY_LOCAL_MACHINE,
+            root,
             key.as_ptr(),
             name.as_ptr(),
             RRF_RT_REG_SZ,

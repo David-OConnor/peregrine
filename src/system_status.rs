@@ -19,6 +19,8 @@ mod platform;
 #[path = "system_status/unsupported.rs"]
 mod platform;
 
+pub mod space;
+
 pub const SAMPLE_INTERVAL: Duration = Duration::from_secs(2);
 const STORAGE_INTERVAL: Duration = Duration::from_secs(15);
 const HARDWARE_INTERVAL: Duration = Duration::from_secs(60);
@@ -88,6 +90,8 @@ struct Worker {
 pub struct Monitor {
     pub snapshot: Option<Snapshot>,
     pub error: Option<String>,
+    pub steam: space::Scan<Vec<space::SteamLibrary>>,
+    pub rust_targets: space::Scan<Vec<space::RootTargets>>,
     worker: Option<Worker>,
     pending: bool,
     next_sample: Option<Instant>,
