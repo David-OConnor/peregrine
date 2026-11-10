@@ -44,7 +44,8 @@ If you use a fully CLI workflow, or if your terminal program must be available w
 ## Everything is searchable
 You can search in every GUI panel: bookmarks, recent directories, recent commands, clipboard etc. The file browser has a quick filter, and full Ripgrep search for file names or contents. 
 
-![Demo of the Peregrine UI showing the file viewer and a markdown file](/screenshots/demo_1.png)
+
+[//]: # (![Demo of the Peregrine UI showing the file viewer and a markdown file]&#40;/screenshots/demo_1.png&#41;)
 
 
 ## UI overview
