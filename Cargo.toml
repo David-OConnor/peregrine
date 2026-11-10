@@ -1,0 +1,151 @@
+[package]
+name = "peregrine"
+version = "0.1.2"
+edition = "2024"
+
+[dependencies]
+chrono = "0.4.45"
+
+egui = "0.36.2"
+# `persistence`: eframe saves the window's position and size, egui's memory
+# (theme, panel widths, egui window positions), and our GUI settings (see
+# `src/prefs.rs`) to its own storage file.
+eframe = { version = "0.36.2", features = ["persistence"] }
+serde = { version = "1", features = ["derive"] }
+
+# Markdown viewer windows. `better_syntax_highlighting` colors fenced
+# code blocks via syntect.
+egui_commonmark = { version = "0.25.0", features = ["better_syntax_highlighting"] }
+
+# Syntax highlighting: the same engine/features already built for Markdown.
+# Keep defaults off so this doesn't add the Oniguruma C dependency.
+# `metadata`: each bundled grammar's comment markers, for the editor's Ctrl+/.
+# A 5 KB dump, read with the crates `plist-load` already builds.
+syntect = { version = "5.3", default-features = false, features = ["default-fancy", "metadata"] }
+
+# Note: RustRover is marking `egui_extras` as unused, but it's not. Code will
+# compile without it, but MD features will be missing.
+# Image loaders for those pictures (egui_commonmark installs them). `http`
+# fetches remote images (README badges etc.) on a background thread via
+# ehttp; `svg_text` renders the text in SVGs, which badges are mostly made of.
+egui_extras = { version = "0.36.2", features = ["file", "http", "image", "gif", "webp", "svg", "svg_text"] }
+
+# Same parser egui_commonmark uses: the viewer finds `<details>` blocks with it
+# so they can render as collapsible sections. Adds nothing new to the build.
+pulldown-cmark = { version = "0.13", default-features = false }
+# egui_extras decodes only the formats enabled on the `image` crate. The image
+# viewer windows (see `src/viewer.rs`) decode with it directly.
+image ={ version = "0.25", default-features = false, features = ["png", "jpeg", "bmp"] }
+
+shell = { path = "../shell" }
+
+# Checking for, downloading, and installing new releases, from the About window.
+# Without its default `gui` feature, which is the Software Manager application
+# itself.
+software_manager = { path = "../software_manager", default-features = false }
+
+# The project bar's Projects window lists a GitHub or GitLab workspace's repos
+# from their APIs (see `src/workspace.rs`). Same version and features
+# `software_manager` builds, so this adds nothing new.
+ureq = { version = "3.4.2", features = ["json"] }
+
+# Terminal emulator for full-screen programs (vim, nano, less, top) run over
+# SSH: the remote's output is parsed into a screen of cells the GUI draws
+# (see `src/remote.rs`, `src/ui/remote_grid.rs`).
+vt100 = "0.16.2"
+
+# Files panel Deep search (see `src/deep_search.rs`): ripgrep's own library
+# crates, so results match what `rg` finds. `ignore` is its parallel,
+# .gitignore-aware directory walker; `grep-searcher` and `grep-regex` its
+# line-oriented search.
+grep-matcher = "0.1.9"
+grep-regex = "0.1.14"
+grep-searcher = "0.1.17"
+ignore = "0.4.33"
+
+# Files-panel Delete: use each OS's recoverable Recycle Bin / Trash.
+trash = "5.2.9"
+
+# Files-panel Compress to ZIP and Extract (see `src/files.rs`). Same version
+# and features `software_manager` builds, so this adds nothing new.
+zip = { version = "9.0.5", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
+# The main window's handle (its `HWND`, X11 window, or Wayland display and
+# surface), from eframe, for dragging files out of it (see
+# `src/drag_out.rs`). Already built for eframe and winit.
+raw-window-handle = "0.6"
+
+# Files panel (see `src/files.rs`): `ShellExecuteW` opens a file with its default
+# program, as an Explorer double-click does; `SHGetFileInfoW` gives Explorer's
+# type name ("Text Document") for the details pane; the drive functions list
+# "This PC" for the drive menu. Same version `shell` uses, so this adds nothing
+# new to the build. The PATH panel (see `src/path_env.rs`) reads and writes
+# the User and System `Path` registry values, broadcasts the change as
+# Windows' own dialog does, and runs itself elevated (`ShellExecuteExW`
+# "runas") to write the System one. Shell commands (see `src/running.rs`) run
+# in a job object, so Stop ends everything they started. Files rows dragged
+# out of the window go to other programs through the shell's drag and drop
+# (`SHDoDragDrop`, with the data object Explorer drags; see
+# `src/drag_out.rs`). Local commands run in a pseudo console (ConPTY, with
+# the pipes it talks over; see `src/pty.rs`), as the `shell` crate's Ctrl+C
+# handling already builds. The System panel's process lists (see
+# `src/system_status/processes.rs`) read every process in one call with
+# `NtQuerySystemInformation`, much cheaper than opening each in turn.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Wdk_System_SystemInformation",
+    "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_Console",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+    "Win32_System_JobObjects",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    "Win32_System_Pipes",
+    "Win32_System_Registry",
+    "Win32_System_SystemInformation",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+    "Win32_System_WindowsProgramming",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+# Files panel Cut / Copy / Paste (see `src/clipboard.rs`): file lists on the
+# clipboard, plus Explorer's "Preferred DropEffect" marking a cut. Already
+# built for egui's own clipboard (via arboard).
+clipboard-win = { version = "5.4", features = ["std"] }
+
+# The same, elsewhere: arboard reads and writes the clipboard's file list.
+# egui's clipboard already builds it.
+[target.'cfg(not(windows))'.dependencies]
+arboard = { version = "3.6", default-features = false }
+
+# Local commands run in a pseudo terminal (`openpty`; see `src/pty.rs`). The
+# `shell` crate already builds it.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# Files rows dragged out of the window, on Linux (see `src/drag_out.rs`): on
+# X11 with the XDND protocol, over an x11rb connection of our own; on Wayland
+# with our own objects on winit's connection, through libwayland (`system`,
+# for `Backend::from_foreign_display`), with `rustix` to wait on its socket.
+# All already built for winit, with these features.
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb = { version = "0.13", default-features = false }
+wayland-client = { version = "0.31", default-features = false, features = ["system"] }
+rustix = { version = "1", features = ["event"] }
+
+[build-dependencies]
+# Embeds `resources/icon.ico` in the Windows `.exe` (see `build.rs`).
+winresource = "0.1.31"
+
+[profile.release]
+strip = true  # Strip symbols from binary. Size reduction on Linux/Mac.

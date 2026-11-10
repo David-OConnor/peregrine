@@ -1,0 +1,352 @@
+//! An ANSI escape-sequence parser for line-oriented output.
+//!
+//! Shells like PowerShell emit sequences such as `ESC[32;1m` to color their
+//! output. We parse those into styled segments so the GUI can render. Output
+//! from a remote terminal also moves the cursor within a line to redraw it
+//! (progress bars, spinners); those few controls come out as [Ctl]s for the
+//! scrollback to apply. Anything else (cursor addressing, modes, titles) is
+//! dropped: full-screen programs get a real terminal screen instead (see
+//! `remote`).
+
+use egui::{Color32, FontId, Stroke, TextFormat};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Style {
+    fg: Option<Color32>,
+    bg: Option<Color32>,
+    bold: bool,
+    italic: bool,
+    underline: bool,
+}
+
+impl Style {
+    const fn new() -> Self {
+        Self {
+            fg: None,
+            bg: None,
+            bold: false,
+            italic: false,
+            underline: false,
+        }
+    }
+
+    /// Text in these colors (`None` for the default) and attributes.
+    pub const fn with(
+        fg: Option<Color32>,
+        bg: Option<Color32>,
+        bold: bool,
+        italic: bool,
+        underline: bool,
+    ) -> Self {
+        Self {
+            fg,
+            bg,
+            bold,
+            italic,
+            underline,
+        }
+    }
+
+    pub fn has_background(self) -> bool {
+        self.bg.is_some()
+    }
+
+    pub fn format(self, default_fg: Color32, font: FontId) -> TextFormat {
+        let color = self.fg.unwrap_or(default_fg);
+        let color = if self.bold { brighten(color) } else { color };
+        TextFormat {
+            font_id: font,
+            color,
+            background: self.bg.unwrap_or(Color32::TRANSPARENT),
+            italics: self.italic,
+            underline: if self.underline {
+                Stroke::new(1.0, color)
+            } else {
+                Stroke::NONE
+            },
+            ..Default::default()
+        }
+    }
+}
+
+impl Default for Style {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// A piece of parsed output: styled text, or a cursor control.
+pub enum Piece {
+    Text(Segment),
+    Ctl(Ctl),
+}
+
+/// The in-line cursor controls the scrollback applies.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ctl {
+    /// Carriage return: back to the start of the line.
+    Cr,
+    /// One column left.
+    Backspace,
+    /// `ESC [ n K`: erase to the end of the line (0), from its start to the
+    /// cursor (1), or all of it (2).
+    EraseLine(u8),
+    /// `ESC [ n G`: to this column, from 0.
+    Column(usize),
+    /// `ESC [ n C` / `ESC [ n D`: this many columns right / left.
+    Forward(usize),
+    Back(usize),
+}
+
+pub struct Segment {
+    pub text: String,
+    pub fg: Option<Color32>,
+    pub bg: Option<Color32>,
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+}
+
+impl Segment {
+    pub fn style(&self) -> Style {
+        Style {
+            fg: self.fg,
+            bg: self.bg,
+            bold: self.bold,
+            italic: self.italic,
+            underline: self.underline,
+        }
+    }
+}
+
+/// Standard 16-color ANSI palette, tuned to read well on a black background.
+fn ansi_color(code: u32, bright: bool) -> Option<Color32> {
+    let (r, g, b) = match (code, bright) {
+        (0, false) => (40, 40, 40),
+        (1, false) => (200, 70, 70),
+        (2, false) => (90, 200, 90),
+        (3, false) => (200, 180, 70),
+        (4, false) => (90, 130, 230),
+        (5, false) => (200, 90, 200),
+        (6, false) => (70, 200, 200),
+        (7, false) => (200, 200, 200),
+        (0, true) => (110, 110, 110),
+        (1, true) => (255, 110, 110),
+        (2, true) => (130, 255, 130),
+        (3, true) => (255, 230, 110),
+        (4, true) => (130, 170, 255),
+        (5, true) => (255, 130, 255),
+        (6, true) => (130, 255, 255),
+        (7, true) => (255, 255, 255),
+        _ => return None,
+    };
+    Some(Color32::from_rgb(r, g, b))
+}
+
+/// xterm 256-color palette lookup.
+pub fn xterm256(n: u8) -> Color32 {
+    if n < 16 {
+        let bright = n >= 8;
+        let code = (n % 8) as u32;
+        return ansi_color(code, bright).unwrap_or(Color32::WHITE);
+    }
+
+    if n >= 232 {
+        let v = 8 + (n - 232).saturating_mul(10);
+        return Color32::from_rgb(v, v, v);
+    }
+
+    let c = n - 16;
+    let levels = [0u8, 95, 135, 175, 215, 255];
+    let r = (c / 36) as usize;
+    let g = ((c % 36) / 6) as usize;
+    let b = (c % 6) as usize;
+
+    Color32::from_rgb(levels[r], levels[g], levels[b])
+}
+
+fn apply_sgr(style: &mut Style, params: &[u32]) {
+    let mut i = 0;
+    while i < params.len() {
+        let p = params[i];
+        match p {
+            0 => *style = Style::new(),
+            1 => style.bold = true,
+            3 => style.italic = true,
+            4 => style.underline = true,
+            22 => style.bold = false,
+            23 => style.italic = false,
+            24 => style.underline = false,
+            30..=37 => style.fg = ansi_color(p - 30, false),
+            90..=97 => style.fg = ansi_color(p - 90, true),
+            40..=47 => style.bg = ansi_color(p - 40, false),
+            100..=107 => style.bg = ansi_color(p - 100, true),
+            39 => style.fg = None,
+            49 => style.bg = None,
+            38 => {
+                if i + 2 < params.len() && params[i + 1] == 5 {
+                    style.fg = Some(xterm256(params[i + 2] as u8));
+                    i += 2;
+                } else if i + 4 < params.len() && params[i + 1] == 2 {
+                    style.fg = Some(Color32::from_rgb(
+                        params[i + 2] as u8,
+                        params[i + 3] as u8,
+                        params[i + 4] as u8,
+                    ));
+                    i += 4;
+                }
+            }
+            48 => {
+                if i + 2 < params.len() && params[i + 1] == 5 {
+                    style.bg = Some(xterm256(params[i + 2] as u8));
+                    i += 2;
+                } else if i + 4 < params.len() && params[i + 1] == 2 {
+                    style.bg = Some(Color32::from_rgb(
+                        params[i + 2] as u8,
+                        params[i + 3] as u8,
+                        params[i + 4] as u8,
+                    ));
+                    i += 4;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+}
+
+#[derive(Default)]
+enum Escape {
+    #[default]
+    Text,
+    Start,
+    /// After `ESC` and an intermediate byte, as in `ESC ( B` (select a
+    /// character set): the next byte ends it.
+    Intermediate,
+    Csi,
+    /// A string up to BEL or `ESC \`: OSC (`ESC ]`), and likewise DCS, SOS,
+    /// PM and APC.
+    Osc,
+    OscEnd,
+}
+
+/// Incremental parser: a read can end halfway through an escape sequence.
+/// ANSI is consumed once on arrival, rather than on every output repaint.
+#[derive(Default)]
+pub struct Parser {
+    style: Style,
+    escape: Escape,
+    params: String,
+    params_overflow: bool,
+}
+
+impl Parser {
+    pub fn feed(&mut self, input: &str) -> Vec<Piece> {
+        let mut pieces = Vec::new();
+        let mut text = String::new();
+        let flush = |pieces: &mut Vec<Piece>, text: &mut String, style: &Style| {
+            if !text.is_empty() {
+                pieces.push(Piece::Text(make_segment(std::mem::take(text), style)));
+            }
+        };
+        for c in input.chars() {
+            match self.escape {
+                Escape::Text => match c {
+                    '\x1b' => self.escape = Escape::Start,
+                    '\r' => {
+                        flush(&mut pieces, &mut text, &self.style);
+                        pieces.push(Piece::Ctl(Ctl::Cr));
+                    }
+                    '\x08' => {
+                        flush(&mut pieces, &mut text, &self.style);
+                        pieces.push(Piece::Ctl(Ctl::Backspace));
+                    }
+                    // Other C0/C1 controls (BEL, shift-in/out, …) don't print.
+                    '\t' | '\n' => text.push(c),
+                    c if c.is_control() => {}
+                    _ => text.push(c),
+                },
+                Escape::Start => match c {
+                    '[' => {
+                        self.params.clear();
+                        self.params_overflow = false;
+                        self.escape = Escape::Csi;
+                    }
+                    ']' | 'P' | 'X' | '^' | '_' => self.escape = Escape::Osc,
+                    ' '..='/' => self.escape = Escape::Intermediate,
+                    _ => self.escape = Escape::Text,
+                },
+                Escape::Intermediate => {
+                    if !(' '..='/').contains(&c) {
+                        self.escape = Escape::Text;
+                    }
+                }
+                Escape::Csi => {
+                    if ('@'..='~').contains(&c) {
+                        // Private sequences (`ESC [ ? 25 l`) set modes.
+                        let plain = !self.params_overflow
+                            && self.params.bytes().all(|b| b.is_ascii_digit() || b == b';');
+                        let n = || -> Option<usize> { self.params.split(";").next()?.parse().ok() };
+                        let ctl = match c {
+                            'm' if plain => {
+                                flush(&mut pieces, &mut text, &self.style);
+                                let params: Vec<u32> = self
+                                    .params
+                                    .split(';')
+                                    .map(|p| p.parse().unwrap_or(0))
+                                    .collect();
+                                apply_sgr(&mut self.style, &params);
+                                None
+                            }
+                            'K' if plain => Some(Ctl::EraseLine(n().unwrap_or(0).min(3) as u8)),
+                            'G' if plain => Some(Ctl::Column(n().unwrap_or(1).max(1) - 1)),
+                            'C' if plain => Some(Ctl::Forward(n().unwrap_or(1).max(1))),
+                            'D' if plain => Some(Ctl::Back(n().unwrap_or(1).max(1))),
+                            _ => None,
+                        };
+                        if let Some(ctl) = ctl {
+                            flush(&mut pieces, &mut text, &self.style);
+                            pieces.push(Piece::Ctl(ctl));
+                        }
+                        self.escape = Escape::Text;
+                    } else if self.params.len() < 128 {
+                        self.params.push(c);
+                    } else {
+                        // Malformed controls must not become an unbounded buffer.
+                        self.params_overflow = true;
+                    }
+                }
+                Escape::Osc => match c {
+                    '\x07' => self.escape = Escape::Text,
+                    '\x1b' => self.escape = Escape::OscEnd,
+                    _ => {}
+                },
+                Escape::OscEnd => {
+                    self.escape = if c == '\\' || c == '\x07' {
+                        Escape::Text
+                    } else {
+                        Escape::Osc
+                    };
+                }
+            }
+        }
+        flush(&mut pieces, &mut text, &self.style);
+        pieces
+    }
+}
+
+fn brighten(c: Color32) -> Color32 {
+    let lift = |v: u8| ((v as u16 + 255) / 2).min(255) as u8;
+    Color32::from_rgb(lift(c.r()), lift(c.g()), lift(c.b()))
+}
+
+fn make_segment(text: String, style: &Style) -> Segment {
+    Segment {
+        text,
+        fg: style.fg,
+        bg: style.bg,
+        bold: style.bold,
+        italic: style.italic,
+        underline: style.underline,
+    }
+}

@@ -1,0 +1,16 @@
+# IDE
+*.iws
+.idea/workspace.xml
+
+/target
+Cargo.lock
+
+.claude
+AGENTS.md
+
+
+# This application's save data
+*.ss
+
+# Releases
+*.zip
