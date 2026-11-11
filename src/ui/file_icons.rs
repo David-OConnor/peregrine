@@ -6,7 +6,7 @@
 //!
 //! The icons are painted rather than emoji, so each can carry a letter and a
 //! color of its own:
-//! - Text (`.txt`, `.md`): a page with lines on it.
+//! - Text (`.txt`, `.md`, `.pdf`): a page with lines on it.
 //! - Code (`.rs`, `.py`): a page in the language's color with its initial
 //!   (or a symbol, as `$` for shell scripts) on it.
 //! - Config (`.toml`, `.json`): a page with sliders on it.
@@ -46,6 +46,10 @@ const BY_EXTENSION: &[(&[&str], Icon, u32)] = &[
     (&["md", "markdown"], Icon::Text, 0x083FA1),
     (&["csv", "tsv"], Icon::Text, 0x237346),
     (&["log"], Icon::Text, 0x8A929C),
+    // Adobe's red.
+    (&["pdf"], Icon::Text, 0xFA0F00),
+    // A blue from LibreOffice's palette, lighter than Markdown's.
+    (&["odt"], Icon::Text, 0x1C99E0),
     (&["rs"], Icon::Code('R'), 0xDEA584),
     // Python's logo yellow.
     (&["py", "pyw", "pyi"], Icon::Code('P'), 0xFFD43B),
