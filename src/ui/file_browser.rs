@@ -610,12 +610,16 @@ pub(super) fn draw(state: &mut State, ui: &mut Ui) {
             let home = state.home.as_deref();
             ui::file_details(
                 state.selected_file.as_ref(),
+                state.folder_size.as_ref(),
                 state.selection.summary.as_ref(),
                 home,
                 &state.file_preview,
                 ui,
-            );
+            )
         });
+    if details.inner {
+        state.calculate_folder_size(ui.ctx());
+    }
 
     // A new folder or file being named. Outside the listing's scroll area,
     // so it stays in view.

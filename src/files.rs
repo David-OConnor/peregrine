@@ -4,10 +4,15 @@
 use std::{
     env, fs, io,
     path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+    },
     thread::{self, JoinHandle},
     time::SystemTime,
 };
 
+use ignore::{WalkBuilder, WalkState};
 use shell::BrowserFile;
 
 /// A confirmed deletion, moving items to the OS trash on a worker thread.
@@ -462,6 +467,105 @@ impl FileDetails {
             hidden_attr: false,
         })
     }
+}
+
+/// Worker threads [FolderSize] walks with.
+const FOLDER_SIZE_THREADS: usize = 4;
+
+/// A folder's total size, summed on worker threads when the user asks; no
+/// OS keeps a faster source. Dropping it stops the walk.
+pub struct FolderSize {
+    pub path: PathBuf,
+    /// The folder's modified time when the walk started. Adding or removing
+    /// one of its entries changes it; changes deeper down don't.
+    pub modified: Option<SystemTime>,
+    progress: Arc<SizeProgress>,
+}
+
+#[derive(Default)]
+struct SizeProgress {
+    bytes: AtomicU64,
+    unreadable: AtomicUsize,
+    done: AtomicBool,
+    cancel: AtomicBool,
+}
+
+impl FolderSize {
+    /// Start summing the sizes of the files under `path`, hidden and
+    /// ignored ones included, without following symlinks inside it. `ctx` is
+    /// repainted when it's done.
+    pub fn start(path: PathBuf, modified: Option<SystemTime>, ctx: egui::Context) -> Self {
+        let progress = Arc::new(SizeProgress::default());
+        // The walker doesn't descend into a symlinked root.
+        let root = fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+
+        let p = Arc::clone(&progress);
+        thread::spawn(move || {
+            sum_sizes(&root, &p);
+            p.done.store(true, Ordering::Release);
+            ctx.request_repaint();
+        });
+
+        Self {
+            path,
+            modified,
+            progress,
+        }
+    }
+
+    /// Bytes counted so far; the total once [Self::done].
+    pub fn bytes(&self) -> u64 {
+        self.progress.bytes.load(Ordering::Relaxed)
+    }
+
+    pub fn done(&self) -> bool {
+        self.progress.done.load(Ordering::Acquire)
+    }
+
+    /// Folders and files that couldn't be read, so aren't counted.
+    pub fn unreadable(&self) -> usize {
+        self.progress.unreadable.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for FolderSize {
+    fn drop(&mut self) {
+        self.progress.cancel.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Add the size of each file under `root` to `p`, as [FolderSize::start]
+/// says, until done or cancelled.
+fn sum_sizes(root: &Path, p: &SizeProgress) {
+    let mut walk = WalkBuilder::new(root);
+    walk.standard_filters(false).threads(FOLDER_SIZE_THREADS);
+
+    walk.build_parallel().run(|| {
+        Box::new(|entry| {
+            if p.cancel.load(Ordering::Relaxed) {
+                return WalkState::Quit;
+            }
+            let Ok(entry) = entry else {
+                p.unreadable.fetch_add(1, Ordering::Relaxed);
+                return WalkState::Continue;
+            };
+            if !entry.file_type().is_some_and(|t| t.is_file()) {
+                return WalkState::Continue;
+            }
+
+            // Free on Windows, where listing a dir gives each file's size.
+            match entry.metadata() {
+                Ok(md) => {
+                    p.bytes.fetch_add(md.len(), Ordering::Relaxed);
+                }
+                Err(_) => {
+                    p.unreadable.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+
+            WalkState::Continue
+        })
+    });
 }
 
 /// What the details pane shows while several rows are selected, in place of

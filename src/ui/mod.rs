@@ -36,7 +36,7 @@ pub mod zoom;
 use crate::{
     OutType,
     cmd_color::CmdColors,
-    files::{FileDetails, SelectionSummary, format_size, open_with_default_app},
+    files::{FileDetails, FolderSize, SelectionSummary, format_size, open_with_default_app},
     path_color::{self},
     render_with_tilde, run_command,
     state::State,
@@ -518,21 +518,23 @@ fn detail_time(t: SystemTime) -> String {
 const MAX_SELECTED_NAMES: usize = 200;
 
 /// The Files panel's lower pane: type, size, dates and attributes of the
-/// selected row, read when it was selected (see [FileDetails::read]). Under
-/// them, an image's `preview` fills the rest of the pane. While more than
-/// one row is selected, their `summary` instead: how many files and
-/// folders, the files' total size, when they were last modified, and their
-/// names.
+/// selected row, read when it was selected (see [FileDetails::read]). A
+/// folder's size is `folder_size`, summed on request. Under them, an image's
+/// `preview` fills the rest of the pane. While more than one row is
+/// selected, their `summary` instead: how many files and folders, the
+/// files' total size, when they were last modified, and their names.
+/// Returns whether the user asked for the folder's size.
 fn file_details(
     details: Option<&FileDetails>,
+    folder_size: Option<&FolderSize>,
     summary: Option<&SelectionSummary>,
     home: Option<&Path>,
     preview: &viewer::ImagePreview,
     ui: &mut Ui,
-) {
+) -> bool {
     if let Some(s) = summary {
         selection_details(s, home, ui);
-        return;
+        return false;
     }
     let Some(d) = details else {
         ui.label(
@@ -540,8 +542,10 @@ fn file_details(
                 .italics()
                 .weak(),
         );
-        return;
+        return false;
     };
+
+    let mut calculate = false;
 
     // Only as tall as the text, so the preview gets the rest; it scrolls
     // when the pane is too short for it all.
@@ -555,6 +559,9 @@ fn file_details(
             detail_field(ui, "Type", d.type_name.clone().into());
             if let Some(size) = d.size {
                 detail_field(ui, "Size", format_size(size).into());
+            }
+            if d.is_folder {
+                calculate = folder_size_field(ui, folder_size.filter(|s| s.path == d.path));
             }
             if let Some([w, h]) = preview.size() {
                 detail_field(ui, "Dimensions", format!("{w} × {h}").into());
@@ -587,6 +594,46 @@ fn file_details(
         });
     ui.add_space(4.);
     preview.show(ui);
+
+    calculate
+}
+
+/// A folder's Size line in [file_details]: a button to sum it up, a spinner
+/// while that runs, then the total, with a button to redo it. Returns
+/// whether either button was clicked.
+fn folder_size_field(ui: &mut Ui, size: Option<&FolderSize>) -> bool {
+    let mut clicked = false;
+
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new("Size").weak());
+        match size {
+            None => {
+                clicked = ui
+                    .small_button("Calculate size")
+                    .on_hover_text("Add up the sizes of everything in it")
+                    .clicked();
+            }
+            Some(s) if !s.done() => {
+                ui.spinner();
+                ui.label(RichText::new(format!("{} so far", format_size(s.bytes()))).weak());
+            }
+            Some(s) => {
+                let mut total = format_size(s.bytes());
+                let unreadable = s.unreadable();
+                if unreadable > 0 {
+                    let n = plural(unreadable, "unreadable item", "unreadable items");
+                    total += &format!(", not counting {n}");
+                }
+                ui.label(total);
+                clicked = ui
+                    .small_button("Recalculate size")
+                    .on_hover_text("Changes deep inside the folder aren't noticed")
+                    .clicked();
+            }
+        }
+    });
+
+    clicked
 }
 
 /// [file_details] while several rows are selected.

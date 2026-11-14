@@ -27,7 +27,9 @@ use crate::{
     deep_search::{self, DeepSearch},
     dir_watch::DirWatch,
     drag_out,
-    files::{Delete, FileDetails, FileSort, SelectionSummary, ZipJob, sort_browser_files},
+    files::{
+        Delete, FileDetails, FileSort, FolderSize, SelectionSummary, ZipJob, sort_browser_files,
+    },
     path_color, prefs,
     project::{Branches, Project},
     remote::{LiveRemote, Remote},
@@ -479,6 +481,9 @@ pub struct State {
     /// and cleared once the path is no longer in the listing (e.g. after a
     /// cd or tab switch).
     pub selected_file: Option<FileDetails>,
+    /// `selected_file`'s total size, when it's a folder and the user asked
+    /// for it (see [State::calculate_folder_size]).
+    pub folder_size: Option<FolderSize>,
     /// Every selected Files row (see [State::select_file] and co.).
     pub selection: FileSelection,
     /// What kind of project `browser_dir` is, for the Files panel's project
@@ -580,6 +585,7 @@ impl Default for State {
             browser_dir: PathBuf::new(),
             dir_watch: DirWatch::default(),
             selected_file: None,
+            folder_size: None,
             selection: FileSelection::default(),
             project: Project::default(),
             project_root: None,
@@ -985,6 +991,7 @@ impl State {
     pub fn clear_file_selection(&mut self) {
         self.selection = FileSelection::default();
         self.selected_file = None;
+        self.folder_size = None;
     }
 
     /// Deselect Files rows that are no longer shown, and re-read the details
@@ -1022,7 +1029,28 @@ impl State {
         {
             self.selection.paths.remove(path);
         }
+
+        // A folder's total stands until another row leads or its own entries
+        // change. Changes deeper down go unseen; the pane offers a redo.
+        let current = match (&self.selected_file, &self.folder_size) {
+            (Some(d), Some(s)) => d.path == s.path && d.modified == s.modified,
+            _ => false,
+        };
+        if !current {
+            self.folder_size = None;
+        }
+
         self.refresh_summary();
+    }
+
+    /// Start summing up the lead folder's size for its details, replacing
+    /// any earlier total.
+    pub fn calculate_folder_size(&mut self, ctx: &egui::Context) {
+        self.folder_size = self
+            .selected_file
+            .as_ref()
+            .filter(|d| d.is_folder)
+            .map(|d| FolderSize::start(d.path.clone(), d.modified, ctx.clone()));
     }
 
     /// Re-read [FileSelection::summary], which the details pane shows while
@@ -1590,6 +1618,7 @@ impl State {
             browser_dir: PathBuf::new(),
             dir_watch: DirWatch::default(),
             selected_file: None,
+            folder_size: None,
             selection: FileSelection::default(),
             project: Project::default(),
             project_root: None,
