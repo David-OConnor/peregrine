@@ -204,9 +204,9 @@ fn contents(
             let (fraction, text) = used(memory.total.saturating_sub(memory.available));
             meter(ui, fraction, text);
             average_meters(ui, snapshot.memory_averages, |bytes| used(bytes as u64));
-            ui.weak(format!("{} available", bytes(memory.available)));
+            ui.label(format!("{} available", bytes(memory.available)));
         } else {
-            ui.weak("Memory usage unavailable");
+            ui.label("Memory usage unavailable");
         }
 
         memory_cleared = process_list(ui, memory_table, snapshot, &MEMORY);
@@ -223,7 +223,7 @@ fn contents(
 
         for disk in &hardware.disks {
             ui.label(&disk.name);
-            ui.weak(
+            ui.label(
                 disk.capacity
                     .map_or_else(|| "Capacity unavailable".into(), bytes),
             );
