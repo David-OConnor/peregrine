@@ -7,6 +7,7 @@ use std::{
         mpsc::{self, Receiver, TryRecvError},
     },
     thread,
+    time::SystemTime,
 };
 
 use chrono::Utc;
@@ -507,6 +508,12 @@ pub struct State {
     pub zip_job: Option<ZipJob>,
     /// Where bookmarks + recent dirs are persisted.
     pub state_path: PathBuf,
+    /// The lists shared with the CLI as last read or written, so saving keeps
+    /// what a CLI saved since (see [save_data::save]).
+    pub saved: save_data::Shared,
+    /// The state file's modified time when last read or written. A change
+    /// means a CLI saved; see [Self::sync_saved].
+    pub state_seen: Option<SystemTime>,
     /// Cached git branch for each tab's cwd (parallel to `cwd`). `None`
     /// when that tab's cwd isn't inside a repo. Refreshed by
     /// `refresh_branch` after every command, cd, tab switch, or new tab.
@@ -596,6 +603,8 @@ impl Default for State {
             zip_job: None,
             state_path: save_data::default_path()
                 .unwrap_or_else(|| PathBuf::from(save_data::FILENAME)),
+            saved: save_data::Shared::default(),
+            state_seen: None,
             branch: vec![branch],
             git_branches: None,
             font_size: ui::DEFAULT_FONT_SIZE,
@@ -1496,9 +1505,9 @@ impl State {
         (n.his_cursor, n.cd_cursor)
     }
 
-    /// Write the state file shared with the CLI. The GUI's settings and
-    /// layout aren't in it; see [prefs].
-    pub fn save(&self) -> io::Result<()> {
+    /// Write the state file shared with the CLI, taking in what a CLI saved
+    /// there since. The GUI's settings and layout aren't in it; see [prefs].
+    pub fn save(&mut self) -> io::Result<()> {
         // Persist the current tab layout (each tab's cwd, in order, plus the
         // active index) so reopening the GUI restores the same tabs.
         // A WSL tab in a drive's dir as its distro has it, `/mnt/c`, so it
@@ -1513,19 +1522,56 @@ impl State {
             paths,
             active: self.ui.active_tab,
         };
-        save_data::save_state(
-            &self.dir_bookmarks,
-            &self.recent_dirs,
-            &self.history,
-            &self.remote_terminals,
-            &self.clone_roots,
-            &open_tabs,
-            &self.bookmark_order,
-            &self.ui.clipboard.history.entries,
-            &self.ui.scratchpad.text,
-            &self.rust_target_roots,
-            &self.state_path,
-        )
+        let gui = save_data::GuiOnly {
+            open_tabs: &open_tabs,
+            bookmark_order: &self.bookmark_order,
+            clipboard: &self.ui.clipboard.history.entries,
+            scratchpad: &self.ui.scratchpad.text,
+            rust_target_roots: &self.rust_target_roots,
+        };
+        let ours = save_data::Ours {
+            bookmarks: &mut self.dir_bookmarks,
+            recent_dirs: &mut self.recent_dirs,
+            history: &mut self.history,
+            remote_terminals: &mut self.remote_terminals,
+            clone_roots: &mut self.clone_roots,
+        };
+        let changed = save_data::save(&mut self.saved, ours, Some(gui), &self.state_path)?;
+        self.state_seen = modified(&self.state_path);
+
+        if changed {
+            self.refresh_shared();
+        }
+
+        Ok(())
+    }
+
+    /// Takes in what a CLI saved to the state file since we last read or
+    /// wrote it. Cheap when it hasn't changed.
+    pub fn sync_saved(&mut self) {
+        let modified = modified(&self.state_path);
+        if modified == self.state_seen {
+            return;
+        }
+
+        self.state_seen = modified;
+        let ours = save_data::Ours {
+            bookmarks: &mut self.dir_bookmarks,
+            recent_dirs: &mut self.recent_dirs,
+            history: &mut self.history,
+            remote_terminals: &mut self.remote_terminals,
+            clone_roots: &mut self.clone_roots,
+        };
+
+        if let Ok(true) = save_data::sync(&mut self.saved, ours, &self.state_path) {
+            self.refresh_shared();
+        }
+    }
+
+    /// Rebuild what's derived from the lists shared with the CLI.
+    fn refresh_shared(&mut self) {
+        self.refresh_all_filters();
+        self.refresh_cmd_colors();
     }
 
     /// Adjust the terminal-pane font size by `delta` points, clamped to a
@@ -1554,7 +1600,9 @@ impl State {
     }
 
     pub fn load(path: PathBuf) -> io::Result<Self> {
+        let state_seen = modified(&path);
         let loaded = save_data::load_state(&path)?;
+        let saved = loaded.shared();
 
         // Restore the saved tabs. Drop any whose directory no longer exists
         // (it may have been deleted or renamed since the last run); if none
@@ -1628,6 +1676,8 @@ impl State {
             deleting: None,
             zip_job: None,
             state_path: path,
+            saved,
+            state_seen,
             branch,
             git_branches: None,
             // The settings are applied later, from eframe's storage (see
@@ -3040,6 +3090,10 @@ fn tab_branch(dir: &Path) -> Option<String> {
     } else {
         current_branch(dir)
     }
+}
+
+fn modified(path: &Path) -> Option<SystemTime> {
+    path.metadata().and_then(|m| m.modified()).ok()
 }
 
 /// The egui theme for a dark or light window.

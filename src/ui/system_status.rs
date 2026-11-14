@@ -19,7 +19,7 @@ use crate::{
     system_status::{
         Averages, PROCESS_MEMORY, Snapshot,
         processes::{Figures, Period, Processes, Row, Sort, Table},
-        space::{self, RootTargets, Scan, SteamLibrary},
+        space::{self, RootTargets, RustTargets, Scan, SteamLibrary},
     },
 };
 
@@ -211,20 +211,26 @@ fn contents(
     }
 
     for gpu in &hardware.gpus {
-        ui.label(RichText::new(&gpu.name).strong());
-        if gpu.driver_available == Some(false) {
-            ui.colored_label(ui.visuals().warn_fg_color, &gpu.status);
-        } else {
-            ui.label(&gpu.status);
-        }
-        ui.label(format!(
-            "Driver: {}",
-            gpu.driver.as_deref().unwrap_or("version unavailable")
-        ));
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new(&gpu.name).strong());
 
-        if let Some(memory) = gpu.memory {
-            ui.weak(format!("{} dedicated memory", bytes(memory)));
-        }
+            if let Some(memory) = gpu.memory {
+                ui.label(format!("{} memory", bytes(memory)));
+            }
+        });
+
+        ui.horizontal_wrapped(|ui| {
+            if gpu.driver_available == Some(false) {
+                ui.colored_label(ui.visuals().warn_fg_color, &gpu.status);
+            } else {
+                ui.label(&gpu.status);
+            }
+
+            ui.label(format!(
+                "Driver: {}",
+                gpu.driver.as_deref().unwrap_or("version unavailable")
+            ));
+        });
 
         ui.add_space(4.);
     }
@@ -513,12 +519,31 @@ fn steam(scan: &mut Scan<Vec<SteamLibrary>>, home: Option<&Path>, ui: &mut Ui) {
 /// The Rust targets row, and its roots: the folders scanned. Returns whether
 /// `roots` changed.
 fn rust_targets(
-    scan: &mut Scan<Vec<RootTargets>>,
+    targets: &mut RustTargets,
     roots: &mut Vec<PathBuf>,
     bookmarks: &[PathBuf],
     home: Option<&Path>,
     ui: &mut Ui,
 ) -> bool {
+    let RustTargets {
+        scan,
+        deletion,
+        deleting,
+    } = targets;
+
+    // A finished deletion updates its root's results.
+    if !deletion.running()
+        && let Some(result) = deletion.result.take()
+        && let Some(root) = deleting.take()
+        && let Some(Ok(found)) = &mut scan.result
+        && let Some(f) = found.iter_mut().find(|f| f.root == root)
+    {
+        match result {
+            Ok(updated) => *f = updated,
+            Err(e) => f.errors = vec![e],
+        }
+    }
+
     // Results for roots since removed don't count.
     let total = |found: &Vec<RootTargets>| {
         let current: Vec<_> = found.iter().filter(|f| roots.contains(&f.root)).collect();
@@ -528,9 +553,13 @@ fn rust_targets(
 
         format!("{} · {count} {noun}", short_bytes(size))
     };
-    let hint = roots
-        .is_empty()
-        .then_some("Add a root from bookmarks first");
+    let hint = if roots.is_empty() {
+        Some("Add a root from bookmarks first")
+    } else if deleting.is_some() {
+        Some("Wait for the deletion to finish")
+    } else {
+        None
+    };
 
     if scan_row(ui, scan, "Space used by Rust targets", hint, total) {
         let roots = roots.clone();
@@ -543,6 +572,7 @@ fn rust_targets(
         scan.result.as_ref().and_then(|r| r.as_ref().ok())
     };
     let mut remove = None;
+    let mut delete = None;
 
     for (i, root) in roots.iter().enumerate() {
         ui.horizontal(|ui| {
@@ -554,11 +584,53 @@ fn rust_targets(
 
             ui.label(path_job(ui, root, home));
 
-            if let Some(f) = found.and_then(|found| found.iter().find(|f| f.root == *root)) {
-                ui.weak(short_bytes(f.size))
-                    .on_hover_ui(|ui| target_list(ui, f));
+            let Some(f) = found.and_then(|found| found.iter().find(|f| f.root == *root)) else {
+                return;
+            };
+
+            ui.strong(short_bytes(f.size))
+                .on_hover_ui(|ui| target_list(ui, f));
+
+            if deleting.as_ref() == Some(root) {
+                ui.spinner();
+            } else {
+                let disabled_hint = if deleting.is_some() {
+                    "Wait for the other deletion to finish"
+                } else {
+                    "No cargo target folders"
+                };
+                let enabled = deleting.is_none() && !f.targets.is_empty();
+
+                if ui
+                    .add_enabled(enabled, Button::new("Delete target folders"))
+                    .on_hover_text("Delete the cargo target folders under this root")
+                    .on_disabled_hover_text(disabled_hint)
+                    .clicked()
+                {
+                    delete = Some((root.clone(), f.targets.clone()));
+                }
+            }
+
+            if !f.errors.is_empty() {
+                ui.colored_label(
+                    ui.visuals().error_fg_color,
+                    format!("{} not deleted", f.errors.len()),
+                )
+                .on_hover_ui(|ui| {
+                    for e in &f.errors {
+                        ui.label(e);
+                    }
+                });
             }
         });
+    }
+
+    if let Some((root, folders)) = delete {
+        *deleting = Some(root.clone());
+        deletion.start(
+            move || Ok(space::delete_targets(root, folders)),
+            repaint(ui.ctx()),
+        );
     }
 
     let mut add = None;

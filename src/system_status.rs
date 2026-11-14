@@ -140,7 +140,7 @@ pub struct Monitor {
     pub snapshot: Option<Snapshot>,
     pub error: Option<String>,
     pub steam: space::Scan<Vec<space::SteamLibrary>>,
-    pub rust_targets: space::Scan<Vec<space::RootTargets>>,
+    pub rust_targets: space::RustTargets,
     pub cpu_processes: processes::Table,
     pub memory_processes: processes::Table,
     worker: Option<Worker>,

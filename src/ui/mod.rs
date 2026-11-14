@@ -783,6 +783,8 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
     // Take in what other apps copy, whether or not the panel is open.
     state.ui.clipboard.sys.watch(ui.ctx());
     clipboard::capture(state, ui.ctx());
+    // And the bookmarks, history etc. a CLI saved. Before anything uses them.
+    state.sync_saved();
 
     // Run the command submitted last frame. That frame already painted its
     // echo, so the user sees what they ran while a blocking built-in runs.

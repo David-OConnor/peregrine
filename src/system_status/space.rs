@@ -130,26 +130,65 @@ fn steam_root() -> Option<PathBuf> {
         .find(|p| p.join("steamapps").is_dir())
 }
 
+/// The Rust targets scan, and a deletion under one of its roots.
+#[derive(Default)]
+pub struct RustTargets {
+    pub scan: Scan<Vec<RootTargets>>,
+    pub deletion: Scan<RootTargets>,
+    /// The root `deletion` is for.
+    pub deleting: Option<PathBuf>,
+}
+
 pub struct RootTargets {
     pub root: PathBuf,
     /// Biggest first.
     pub targets: Vec<TargetDir>,
     pub size: u64,
+    /// Errors from the last deletion.
+    pub errors: Vec<String>,
+}
+
+impl RootTargets {
+    fn new(root: PathBuf, mut targets: Vec<TargetDir>, errors: Vec<String>) -> Self {
+        targets.sort_by_key(|t| Reverse(t.size));
+        let size = targets.iter().map(|t| t.size).sum();
+
+        Self {
+            root,
+            targets,
+            size,
+            errors,
+        }
+    }
 }
 
 /// Cargo target folders under each root, as `rm_targets` finds them.
 pub fn rust_targets(roots: Vec<PathBuf>) -> Vec<RootTargets> {
     in_parallel(roots, |root| {
-        let mut targets = shell::find_targets(&root);
-        targets.sort_by_key(|t| Reverse(t.size));
-        let size = targets.iter().map(|t| t.size).sum();
+        let targets = shell::find_targets(&root);
 
-        RootTargets {
-            root,
-            targets,
-            size,
-        }
+        RootTargets::new(root, targets, Vec::new())
     })
+}
+
+/// Deletes `targets`, as `rm_targets` does. What's left are those that failed,
+/// re-measured.
+pub fn delete_targets(root: PathBuf, targets: Vec<TargetDir>) -> RootTargets {
+    let failures = shell::delete_targets(&targets, |_| {});
+    let errors = failures
+        .iter()
+        .map(|(t, e)| format!("{}: {e}", t.path.display()))
+        .collect();
+    let left = failures
+        .iter()
+        .filter(|(t, _)| t.path.exists())
+        .map(|(t, _)| TargetDir {
+            size: shell::dir_size(&t.path),
+            path: t.path.clone(),
+        })
+        .collect();
+
+    RootTargets::new(root, left, errors)
 }
 
 /// `f` on each item, a thread each, in item order. Libraries and roots are
