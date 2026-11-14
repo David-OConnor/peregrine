@@ -13,10 +13,24 @@ use super::search::{self, Layout};
 
 /// Scroll while a selection drag is held at an edge, including between
 /// pointer events. Farther beyond the edge scrolls faster, capped at 900 pt/s.
+/// The wheel scrolls too; egui's scroll areas ignore it during a drag.
 pub(super) fn auto_scroll(ui: &Ui, dragging: bool, horizontal: bool) {
     if !dragging || !ui.input(|i| i.pointer.primary_down()) {
         return;
     }
+
+    let wheel = ui.input_mut(|i| {
+        let delta = &mut i.smooth_scroll_delta;
+        let taken = vec2(if horizontal { delta.x } else { 0. }, delta.y);
+        *delta -= taken;
+        taken
+    });
+    if wheel != Vec2::ZERO {
+        ui.scroll_with_delta_animation(wheel, egui::style::ScrollAnimation::none());
+        // Extend the selection to the newly exposed text.
+        ui.ctx().request_repaint();
+    }
+
     let Some(pointer) = ui.ctx().pointer_interact_pos() else {
         return;
     };

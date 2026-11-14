@@ -143,131 +143,146 @@ fn contents(
 ) -> bool {
     let hardware = &snapshot.hardware;
     ui.add_space(6.);
-    ui.strong("CPU");
-    ui.label(&hardware.cpu);
-    let cores = match (hardware.physical_cores, hardware.logical_cores) {
-        (Some(physical), Some(logical)) => {
-            format!("{physical} cores · {logical} logical processors")
-        }
-        (None, Some(logical)) => format!("{logical} logical processors"),
-        (Some(physical), None) => format!("{physical} cores"),
-        (None, None) => "Core count unavailable".into(),
-    };
-    ui.label(cores);
-    ui.label(format!("SIMD: {}", hardware.simd))
-        .on_hover_text("Highest detected SIMD tier available to this process");
 
-    if let Some(usage) = snapshot.cpu_usage {
-        meter(ui, usage / 100., format!("{usage:.0}%"));
-    } else if snapshot.cpu_available {
-        ui.weak("CPU usage: waiting for two samples");
-    } else {
-        ui.weak("CPU usage unavailable");
-    }
+    let cpu_cleared;
+    let memory_cleared;
 
-    average_meters(ui, snapshot.cpu_averages, |percent| {
-        (percent / 100., format!("{percent:.0}%"))
-    });
-
-    let cpu_cleared = process_list(ui, cpu_table, snapshot, &CPU);
-
-    section_separator(ui);
-    ui.strong("Memory");
-
-    if let Some(installed) = hardware.installed_memory {
-        ui.label(format!("{} installed", bytes(installed)));
-    } else if let Some(memory) = &snapshot.memory {
-        ui.label(format!("{} usable RAM", bytes(memory.total)));
-    }
-
-    if let Some(memory) = &snapshot.memory {
-        let used = |used: u64| {
-            let fraction = ratio(used, memory.total);
-            let text = format!(
-                "{} / {} used · {:.0}%",
-                short_bytes(used),
-                short_bytes(memory.total),
-                fraction * 100.
-            );
-
-            (fraction, text)
+    {
+        ui.strong("CPU");
+        ui.label(&hardware.cpu);
+        let cores = match (hardware.physical_cores, hardware.logical_cores) {
+            (Some(physical), Some(logical)) => {
+                format!("{physical} cores · {logical} logical processors")
+            }
+            (None, Some(logical)) => format!("{logical} logical processors"),
+            (Some(physical), None) => format!("{physical} cores"),
+            (None, None) => "Core count unavailable".into(),
         };
+        ui.label(cores);
+        ui.label(format!("SIMD: {}", hardware.simd))
+            .on_hover_text("Highest detected SIMD tier available to this process");
 
-        let (fraction, text) = used(memory.total.saturating_sub(memory.available));
-        meter(ui, fraction, text);
-        average_meters(ui, snapshot.memory_averages, |bytes| used(bytes as u64));
-        ui.weak(format!("{} available", bytes(memory.available)));
-    } else {
-        ui.weak("Memory usage unavailable");
-    }
+        if let Some(usage) = snapshot.cpu_usage {
+            meter(ui, usage / 100., format!("{usage:.0}%"));
+        } else if snapshot.cpu_available {
+            ui.weak("CPU usage: waiting for two samples");
+        } else {
+            ui.weak("CPU usage unavailable");
+        }
 
-    let memory_cleared = process_list(ui, memory_table, snapshot, &MEMORY);
-
-    section_separator(ui);
-    ui.strong("GPUs");
-
-    if hardware.gpus.is_empty() {
-        ui.weak("No GPUs reported");
-    }
-
-    for gpu in &hardware.gpus {
-        ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new(&gpu.name).strong());
-
-            if let Some(memory) = gpu.memory {
-                ui.label(format!("{} memory", bytes(memory)));
-            }
+        average_meters(ui, snapshot.cpu_averages, |percent| {
+            (percent / 100., format!("{percent:.0}%"))
         });
 
-        ui.horizontal_wrapped(|ui| {
-            if gpu.driver_available == Some(false) {
-                ui.colored_label(ui.visuals().warn_fg_color, &gpu.status);
-            } else {
-                ui.label(&gpu.status);
-            }
-
-            ui.label(format!(
-                "Driver: {}",
-                gpu.driver.as_deref().unwrap_or("version unavailable")
-            ));
-        });
-
-        ui.add_space(4.);
+        cpu_cleared = process_list(ui, cpu_table, snapshot, &CPU);
     }
 
     section_separator(ui);
-    ui.strong("Storage");
 
-    if hardware.disks.is_empty() {
-        ui.weak("No physical disks reported");
+    {
+        ui.strong("Memory");
+
+        if let Some(installed) = hardware.installed_memory {
+            ui.label(format!("{} installed", bytes(installed)));
+        } else if let Some(memory) = &snapshot.memory {
+            ui.label(format!("{} usable RAM", bytes(memory.total)));
+        }
+
+        if let Some(memory) = &snapshot.memory {
+            let used = |used: u64| {
+                let fraction = ratio(used, memory.total);
+                let text = format!(
+                    "{} / {} used · {:.0}%",
+                    short_bytes(used),
+                    short_bytes(memory.total),
+                    fraction * 100.
+                );
+
+                (fraction, text)
+            };
+
+            let (fraction, text) = used(memory.total.saturating_sub(memory.available));
+            meter(ui, fraction, text);
+            average_meters(ui, snapshot.memory_averages, |bytes| used(bytes as u64));
+            ui.weak(format!("{} available", bytes(memory.available)));
+        } else {
+            ui.weak("Memory usage unavailable");
+        }
+
+        memory_cleared = process_list(ui, memory_table, snapshot, &MEMORY);
     }
 
-    for disk in &hardware.disks {
-        ui.label(&disk.name);
-        ui.weak(
-            disk.capacity
-                .map_or_else(|| "Capacity unavailable".into(), bytes),
-        );
+    section_separator(ui);
+
+    {
+        ui.strong("Storage");
+
+        if hardware.disks.is_empty() {
+            ui.weak("No physical disks reported");
+        }
+
+        for disk in &hardware.disks {
+            ui.label(&disk.name);
+            ui.weak(
+                disk.capacity
+                    .map_or_else(|| "Capacity unavailable".into(), bytes),
+            );
+        }
+
+        if !snapshot.volumes.is_empty() {
+            ui.add_space(6.);
+            ui.strong("Volumes");
+        }
+
+        for volume in snapshot.volumes.iter() {
+            let used = volume.total.saturating_sub(volume.available);
+            ui.label(&volume.name);
+            meter(
+                ui,
+                ratio(used, volume.total),
+                format!(
+                    "{} free / {}",
+                    short_bytes(volume.available),
+                    short_bytes(volume.total)
+                ),
+            );
+            ui.add_space(4.);
+        }
     }
 
-    if !snapshot.volumes.is_empty() {
-        ui.add_space(6.);
-        ui.strong("Volumes");
-    }
+    section_separator(ui);
 
-    for volume in snapshot.volumes.iter() {
-        let used = volume.total.saturating_sub(volume.available);
-        ui.label(&volume.name);
-        meter(
-            ui,
-            ratio(used, volume.total),
-            format!(
-                "{} free / {}",
-                short_bytes(volume.available),
-                short_bytes(volume.total)
-            ),
-        );
-        ui.add_space(4.);
+    {
+        ui.strong("GPUs");
+
+        if hardware.gpus.is_empty() {
+            ui.weak("No GPUs reported");
+        }
+
+        for gpu in &hardware.gpus {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new(&gpu.name).strong());
+
+                if let Some(memory) = gpu.memory {
+                    ui.label(format!("{} memory", bytes(memory)));
+                }
+            });
+
+            ui.horizontal_wrapped(|ui| {
+                if gpu.driver_available == Some(false) {
+                    ui.colored_label(ui.visuals().warn_fg_color, &gpu.status);
+                } else {
+                    ui.label(&gpu.status);
+                }
+
+                ui.label(format!(
+                    "Driver: {}",
+                    gpu.driver.as_deref().unwrap_or("version unavailable")
+                ));
+            });
+
+            ui.add_space(4.);
+        }
     }
 
     cpu_cleared || memory_cleared
