@@ -2,7 +2,11 @@ use std::{
     collections::{HashSet, VecDeque},
     env, io,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        mpsc::{self, Receiver, TryRecvError},
+    },
+    thread,
 };
 
 use chrono::Utc;
@@ -36,6 +40,7 @@ use crate::{
         path_panel::{PathPanel, PathWindow},
     },
     viewer::{FileViewers, ImagePreview},
+    wsl::{self, Here},
 };
 
 /// State specific to the GUI: the current input buffer, the captured terminal
@@ -78,6 +83,8 @@ pub struct StateUi {
     /// The last greyed suggestion worked out, so repaints don't read the
     /// disk again. See [State::input_hint].
     pub hint_cache: HintCache,
+    /// Likewise in WSL, for the line and dir it's for.
+    pub wsl_hint: Option<(String, PathBuf, Option<InputHint>)>,
     /// Text deleted from the CLI input with Shell's line-editing keys, for
     /// Ctrl+Y to paste back. One for all tabs, as the CLI's line editor has.
     pub kill_ring: ui::line_edit::KillRing,
@@ -216,6 +223,10 @@ pub struct StateUi {
     /// The output pane's size in characters (columns, rows) as last drawn,
     /// which remote terminals are kept at.
     pub term_size: (u16, u16),
+    /// Where the terminal pane and the tab strip's CLI font control were last
+    /// drawn, for [ui::zoom]. Nothing while the terminal's hidden.
+    pub term_rect: egui::Rect,
+    pub cli_font_rect: egui::Rect,
 }
 
 /// Most closed tabs kept for [State::reopen_closed_tab].
@@ -232,14 +243,16 @@ pub struct DetachedTab {
     out: Output,
     nav_back: Vec<PathBuf>,
     nav_forward: Vec<PathBuf>,
+    wsl: Option<String>,
 }
 
 impl DetachedTab {
-    /// A fresh tab at `cwd`, to go in at `index`.
-    fn new(index: usize, cwd: PathBuf) -> Self {
+    /// A fresh tab at `cwd`, in WSL `distro` if any, to go in at `index`.
+    fn new(index: usize, cwd: PathBuf, wsl: Option<String>) -> Self {
         Self {
             index,
             cwd,
+            wsl,
             cli_input: String::new(),
             out: Output::default(),
             nav_back: Vec::new(),
@@ -290,6 +303,7 @@ impl Default for StateUi {
             queued_lines: vec![VecDeque::new()],
             tab_list_pending: None,
             hint_cache: Default::default(),
+            wsl_hint: None,
             kill_ring: Default::default(),
             scratchpad: Default::default(),
             system_status: Default::default(),
@@ -339,6 +353,8 @@ impl Default for StateUi {
             remote_edit_idx: None,
             closed_tabs: Vec::new(),
             term_size: (80, 24),
+            term_rect: egui::Rect::NOTHING,
+            cli_font_rect: egui::Rect::NOTHING,
         }
     }
 }
@@ -442,6 +458,10 @@ pub struct State {
     /// While live, that tab's typed commands run on the remote. Not
     /// persisted (a connection can't outlive the process).
     pub remote: Vec<Option<Remote>>,
+    /// The WSL distro each tab is in, if any (parallel to `cwd`). A tab whose
+    /// cwd is in a distro is in it regardless; this keeps it there when it
+    /// goes into a Windows drive, as `/mnt/c`. See [Self::here].
+    pub wsl: Vec<Option<String>>,
     /// The shell command running in each tab, if any (parallel to `cwd`).
     /// While set, that tab's typed lines go to its stdin. See [RunningCmd].
     pub running: Vec<Option<RunningCmd>>,
@@ -534,12 +554,14 @@ pub struct State {
     /// The main window, for handing Files rows dragged out of it to the OS
     /// (see [crate::drag_out]). Set by the first frame, where that's done.
     pub main_window: Option<drag_out::Window>,
+    /// A WSL tab waiting on its distro's home (see [Self::open_wsl_tab]).
+    pub wsl_opening: Option<Receiver<(String, Option<String>)>>,
 }
 
 impl Default for State {
     fn default() -> Self {
         let cwd = env::current_dir().unwrap_or_default();
-        let branch = current_branch(&cwd);
+        let branch = tab_branch(&cwd);
         let mut s = Self {
             ui: StateUi::default(),
             home: get_home(),
@@ -552,6 +574,7 @@ impl Default for State {
             clone_roots: Vec::new(),
             rust_target_roots: Vec::new(),
             remote: vec![None],
+            wsl: vec![None],
             running: vec![None],
             browser_files: Vec::new(),
             browser_dir: PathBuf::new(),
@@ -583,6 +606,7 @@ impl Default for State {
             path_panel: PathPanel::default(),
             egui_ctx: None,
             main_window: None,
+            wsl_opening: None,
         };
         s.refresh_all_filters();
         s.refresh_cmd_colors();
@@ -622,8 +646,51 @@ impl State {
     /// The active tab's local cwd, split into color-coded runs (see
     /// [path_color]) for drawing on the black terminal panes.
     pub fn cwd_color_parts(&self) -> Vec<path_color::Part> {
+        if let Some(here) = self.here() {
+            return path_color::parts(&here.display(), Some("~"), true);
+        }
+
         let home = self.home.as_ref().map(|h| h.display().to_string());
         path_color::parts(&self.cwd().display().to_string(), home.as_deref(), true)
+    }
+
+    /// The active tab's cwd as shown: `~/code`, or `Ubuntu:/mnt/c` in WSL.
+    pub fn cwd_shown(&self) -> String {
+        match self.here() {
+            Some(here) => here.display(),
+            None => crate::render_with_tilde(self.cwd(), self.home.as_deref()),
+        }
+    }
+
+    /// Where the active tab is in WSL, if it is.
+    pub fn here(&self) -> Option<Here> {
+        let i = self.ui.active_tab;
+
+        Here::of(&self.cwd[i], self.wsl[i].as_deref())
+    }
+
+    /// Where `~` is for the active tab: its distro's home in a WSL tab (see
+    /// [wsl::home_dir]).
+    pub fn tab_home(&self) -> Option<PathBuf> {
+        match self.here() {
+            Some(here) => wsl::known_home_dir(self.cwd()).or_else(|| Some(wsl::home_dir(&here))),
+            None => self.home.clone(),
+        }
+    }
+
+    /// Leave WSL, for `exit` there: commands run in PowerShell again. A dir
+    /// in the distro, which PowerShell can't run in, goes home.
+    pub fn leave_wsl(&mut self) {
+        let i = self.ui.active_tab;
+        self.wsl[i] = None;
+
+        if wsl::split(self.cwd()).is_some()
+            && let Some(home) = self.home.clone()
+        {
+            self.change_dir(home);
+        }
+        let shown = self.cwd_shown();
+        self.push_out(format!("Left WSL, in {shown}"), OutType::StdOut);
     }
 
     /// Whether the active tab has an SSH connection, live or being made
@@ -672,7 +739,7 @@ impl State {
     /// `cd`, tab creation, and tab selection.
     pub fn refresh_branch(&mut self) {
         let i = self.ui.active_tab;
-        self.branch[i] = current_branch(&self.cwd[i]);
+        self.branch[i] = tab_branch(&self.cwd[i]);
         self.git_branches = None;
     }
 
@@ -1406,8 +1473,16 @@ impl State {
     pub fn save(&self) -> io::Result<()> {
         // Persist the current tab layout (each tab's cwd, in order, plus the
         // active index) so reopening the GUI restores the same tabs.
+        // A WSL tab in a drive's dir as its distro has it, `/mnt/c`, so it
+        // comes back in WSL.
+        let paths = (0..self.cwd.len())
+            .map(|i| match Here::of(&self.cwd[i], self.wsl[i].as_deref()) {
+                Some(here) => wsl::unc(&here.distro, &here.linux),
+                None => self.cwd[i].clone(),
+            })
+            .collect();
         let open_tabs = OpenTabs {
-            paths: self.cwd.clone(),
+            paths,
             active: self.ui.active_tab,
         };
         save_data::save_state(
@@ -1457,14 +1532,18 @@ impl State {
         // (it may have been deleted or renamed since the last run); if none
         // remain — or the file predates the feature — fall back to a single
         // tab at the current directory.
-        let mut cwd: Vec<PathBuf> = loaded
+        // A WSL tab in a drive's dir is saved as the distro has it (see
+        // [Self::save]).
+        let (mut cwd, mut wsl): (Vec<PathBuf>, Vec<Option<String>>) = loaded
             .open_tabs
             .paths
             .into_iter()
-            .filter(|p| p.is_dir())
-            .collect();
+            .map(|p| (wsl::fs_path(&p), wsl::split(&p).map(|(d, _)| d)))
+            .filter(|(p, _)| p.is_dir())
+            .unzip();
         if cwd.is_empty() {
             cwd.push(env::current_dir().unwrap_or_default());
+            wsl.push(None);
         }
 
         // Clamp the saved active index to the (possibly shrunken) tab list and
@@ -1474,7 +1553,7 @@ impl State {
         let _ = env::set_current_dir(&cwd[active_tab]);
 
         let n = cwd.len();
-        let branch = cwd.iter().map(|c| current_branch(c)).collect();
+        let branch = cwd.iter().map(|c| tab_branch(c)).collect();
 
         let mut ui = StateUi::default();
         ui.active_tab = active_tab;
@@ -1505,6 +1584,7 @@ impl State {
             clone_roots: loaded.clone_roots,
             rust_target_roots: loaded.rust_target_roots,
             remote: (0..n).map(|_| None).collect(),
+            wsl,
             running: (0..n).map(|_| None).collect(),
             browser_files: Vec::new(),
             browser_dir: PathBuf::new(),
@@ -1537,6 +1617,7 @@ impl State {
             path_panel: PathPanel::default(),
             egui_ctx: None,
             main_window: None,
+            wsl_opening: None,
         };
         s.refresh_all_filters();
         s.refresh_cmd_colors();
@@ -1570,7 +1651,12 @@ impl State {
 
     /// Open a new tab inheriting the active tab's cwd. Switches focus to it.
     pub fn add_tab(&mut self) {
-        let tab = DetachedTab::new(self.cwd.len(), self.cwd().to_path_buf());
+        let i = self.ui.active_tab;
+        let tab = DetachedTab::new(
+            self.cwd.len(),
+            self.cwd().to_path_buf(),
+            self.wsl[i].clone(),
+        );
         // New tab inherits the active tab's branch (same cwd → same repo).
         let inherited_branch = self.branch[self.ui.active_tab].clone();
         self.insert_tab(tab, inherited_branch);
@@ -1592,6 +1678,7 @@ impl State {
         self.ui.nav_back.insert(i, tab.nav_back);
         self.ui.nav_forward.insert(i, tab.nav_forward);
         self.branch.insert(i, branch);
+        self.wsl.insert(i, tab.wsl);
         // Tabs go in local and idle; a connection isn't inherited.
         self.remote.insert(i, None);
         self.running.insert(i, None);
@@ -1609,13 +1696,48 @@ impl State {
                 continue;
             }
             let _ = env::set_current_dir(&tab.cwd);
-            let branch = current_branch(&tab.cwd);
+            let branch = tab_branch(&tab.cwd);
             self.insert_tab(tab, branch);
 
             self.refresh_cwd_history_filter();
             self.refresh_browser_files();
             return;
         }
+    }
+
+    /// Open a tab in `distro`'s home. That's looked up on a thread first,
+    /// since it starts the distro if it isn't running, which can take
+    /// seconds; [Self::pump_wsl_opening] then opens the tab.
+    pub fn open_wsl_tab(&mut self, distro: String, ctx: &egui::Context) {
+        let (tx, rx) = mpsc::channel();
+        let ctx = ctx.clone();
+        thread::spawn(move || {
+            let home = wsl::look_up_home(&distro);
+            let _ = tx.send((distro, home));
+            ctx.request_repaint();
+        });
+
+        self.wsl_opening = Some(rx);
+    }
+
+    /// Open the tab [Self::open_wsl_tab] asked for, once its home is known.
+    pub fn pump_wsl_opening(&mut self) {
+        let Some(rx) = &self.wsl_opening else {
+            return;
+        };
+        let (distro, home) = match rx.try_recv() {
+            Ok(found) => found,
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => {
+                self.wsl_opening = None;
+                return;
+            }
+        };
+        self.wsl_opening = None;
+
+        let root = wsl::unc_root(&distro);
+        let dir = home.map_or_else(|| root.clone(), |h| root.join(h.trim_start_matches('/')));
+        self.open_dir_in_new_tab(dir);
     }
 
     /// Move the tab at `from` to `to`, shifting the tabs between over by one.
@@ -1638,6 +1760,7 @@ impl State {
         shift(&mut self.ui.nav_back, from, to);
         shift(&mut self.ui.nav_forward, from, to);
         shift(&mut self.branch, from, to);
+        shift(&mut self.wsl, from, to);
         shift(&mut self.remote, from, to);
         shift(&mut self.running, from, to);
 
@@ -1658,6 +1781,7 @@ impl State {
             out: self.ui.out.remove(idx),
             nav_back: self.ui.nav_back.remove(idx),
             nav_forward: self.ui.nav_forward.remove(idx),
+            wsl: self.wsl.remove(idx),
         };
         self.ui.history_nav.remove(idx);
         self.ui.queued_lines.remove(idx);
@@ -1930,14 +2054,55 @@ impl State {
         }
     }
 
+    /// The Bookmarks and Recent dirs in `here`'s distro: in WSL, a Windows
+    /// dir isn't one to suggest, or for `cd` to guess.
+    pub fn saved_dirs_in(&self, here: &Here) -> (Vec<PathBuf>, Vec<RecentDir>) {
+        let ours =
+            |p: &Path| wsl::split(p).is_some_and(|(d, _)| d.eq_ignore_ascii_case(&here.distro));
+        let bookmarks = self
+            .dir_bookmarks
+            .iter()
+            .filter(|p| ours(p))
+            .cloned()
+            .collect();
+        let recent = self
+            .recent_dirs
+            .iter()
+            .filter(|r| ours(&r.path))
+            .map(|r| RecentDir {
+                path: r.path.clone(),
+                dt: r.dt,
+            })
+            .collect();
+
+        (bookmarks, recent)
+    }
+
+    /// What [Self::completion_sources] borrows for the active tab.
+    fn completion_lists(&self) -> CompletionLists {
+        let here = self.here();
+        let saved = here.as_ref().map(|h| self.saved_dirs_in(h));
+
+        CompletionLists {
+            home: self.tab_home(),
+            here,
+            saved,
+        }
+    }
+
     /// What Tab completion and the greyed suggestion draw on, filled as the
-    /// CLI fills it.
-    fn completion_sources(&self) -> CompletionSources<'_> {
+    /// CLI fills it, from `lists`.
+    fn completion_sources<'a>(&'a self, lists: &'a CompletionLists) -> CompletionSources<'a> {
+        let (bookmarks, recent_dirs) = match &lists.saved {
+            Some((b, r)) => (b.as_slice(), r.as_slice()),
+            None => (self.dir_bookmarks.as_slice(), self.recent_dirs.as_slice()),
+        };
+
         CompletionSources {
             cwd: self.cwd(),
-            home: self.home.as_deref(),
-            bookmarks: &self.dir_bookmarks,
-            recent_dirs: &self.recent_dirs,
+            home: lists.home.as_deref(),
+            bookmarks,
+            recent_dirs,
             clone_roots: &self.clone_roots,
             history: &self.history,
             remote: self.is_remote(),
@@ -1951,12 +2116,38 @@ impl State {
     pub fn autocomplete_input(&mut self, pos: usize) -> Option<usize> {
         let i = self.ui.active_tab;
         let live = self.ui.cli_input[i].clone();
-        let result = complete_input(&live, pos, &self.completion_sources())?;
+        let lists = self.completion_lists();
+        // A Linux path, completed as Windows spells it (see [wsl::CdLine]).
+        let cd = (pos == live.len())
+            .then(|| wsl::CdLine::new(lists.here.as_ref(), self.cwd(), &live))
+            .flatten();
+        let (line, pos) = match &cd {
+            Some(cd) => (cd.line.clone(), cd.line.len()),
+            None => (live.clone(), pos),
+        };
+        let back = |text: String| match &cd {
+            Some(cd) => cd.back(&text),
+            None => Some(text),
+        };
+
+        let mut result = complete_input(&line, pos, &self.completion_sources(&lists))?;
+        // In WSL, only what's in the distro.
+        if let Some(here) = &lists.here {
+            result.candidates.retain(|c| {
+                let text = format!("{}{}", &line[..result.start], c.replacement);
+                back(text).is_some_and(|t| wsl_cd_line(here, &live, t).is_some())
+            });
+        }
         let several = result.candidates.len() > 1;
         // As in rustyline, only take the shared prefix when it adds to the
         // input: case-insensitive and fuzzy candidates can share less than
         // was typed.
-        let applied = apply_completion(&live, pos, &result)
+        let applied = apply_completion(&line, pos, &result)
+            .and_then(back)
+            .and_then(|text| match &lists.here {
+                Some(here) => wsl_cd_line(here, &live, text),
+                None => Some(text),
+            })
             .filter(|text| !several || text.len() > live.len());
         let caret = match applied {
             Some(text) => {
@@ -1982,19 +2173,83 @@ impl State {
     /// [shell::input_hint]), as the CLI shows it; →, End and Ctrl+E accept
     /// it.
     pub fn input_hint(&mut self) -> Option<InputHint> {
+        let live = &self.ui.cli_input[self.ui.active_tab];
+        if let Some((line, cwd, hint)) = &self.ui.wsl_hint
+            && line == live
+            && cwd == self.cwd()
+        {
+            return hint.clone();
+        }
+
         // Taken out while the sources borrow the rest of `self`.
         let mut cache = std::mem::take(&mut self.ui.hint_cache);
-        let live = &self.ui.cli_input[self.ui.active_tab];
-        let hint = cache.get(live, live.len(), &self.completion_sources());
+        let lists = self.completion_lists();
+        let sources = self.completion_sources(&lists);
+
+        let Some(here) = &lists.here else {
+            let hint = cache.get(live, live.len(), &sources);
+            self.ui.hint_cache = cache;
+            return hint;
+        };
+
+        // In WSL, a `cd` only to a dir in the distro. That's checked on disk,
+        // so the answer is kept for repaints.
+        let hint = match wsl::CdLine::new(Some(here), self.cwd(), live) {
+            Some(cd) => cache
+                .get(&cd.line, cd.line.len(), &sources)
+                .and_then(|h| cd.back(&h.line)),
+            None => cache.get(live, live.len(), &sources).map(|h| h.line),
+        }
+        .and_then(|line| wsl_cd_line(here, live, line))
+        .filter(|line| self.wsl_cd_goes(here, line))
+        .and_then(|line| {
+            let display = match line.strip_prefix(live.as_str()) {
+                Some(rest) => rest.to_owned(),
+                None => format!(" → {}", line.strip_prefix("cd ")?.trim_start()),
+            };
+            (!display.is_empty()).then_some(InputHint { display, line })
+        });
         self.ui.hint_cache = cache;
+        self.ui.wsl_hint = Some((live.clone(), self.cwd().to_path_buf(), hint.clone()));
+
         hint
     }
 
+    /// Whether `line`, if a `cd`, goes to a dir in WSL `here`, as
+    /// `util::handle_cmd` would take it.
+    fn wsl_cd_goes(&self, here: &Here, line: &str) -> bool {
+        let Some(arg) = line.strip_prefix("cd ").map(str::trim) else {
+            return true;
+        };
+        if arg.is_empty() || arg.parse::<usize>().is_ok() {
+            return true;
+        }
+
+        match wsl::resolve(Some(here), arg) {
+            Some(target) => wsl::fs_path(&target).is_dir(),
+            None => self.cwd().join(arg).is_dir(),
+        }
+    }
+
     /// `line` as Enter runs it: a `cd` goes where its suggestion does (see
-    /// [HintCache::line_for_enter]).
+    /// [HintCache::line_for_enter]). In WSL, only to a dir in the distro.
     pub fn line_for_enter(&mut self, line: String) -> String {
         let mut cache = std::mem::take(&mut self.ui.hint_cache);
-        let accepted = cache.line_for_enter(&line, &self.completion_sources());
+        let lists = self.completion_lists();
+        let sources = self.completion_sources(&lists);
+        let accepted = match wsl::CdLine::new(lists.here.as_ref(), self.cwd(), &line) {
+            // A Linux path, gone to as typed when it's there (see `util::handle_cmd`).
+            Some(cd) => cache
+                .line_for_enter(&cd.line, &sources)
+                .and_then(|l| cd.back(&l)),
+            None => cache.line_for_enter(&line, &sources),
+        };
+        let accepted = match &lists.here {
+            Some(here) => accepted
+                .and_then(|l| wsl_cd_line(here, &line, l))
+                .filter(|l| self.wsl_cd_goes(here, l)),
+            None => accepted,
+        };
         self.ui.hint_cache = cache;
 
         accepted.unwrap_or(line)
@@ -2024,10 +2279,19 @@ impl State {
     /// rather than reporting it.
     fn try_navigate_to(&mut self, target: PathBuf) -> io::Result<bool> {
         let before = self.cwd().to_path_buf();
+        // A distro's `/mnt/c` is read as `C:\`, staying in the distro.
+        let distro = wsl::split(&target).map(|(d, _)| d);
+        let target = wsl::fs_path(&target);
         env::set_current_dir(&target)?;
         let new_cwd = env::current_dir().unwrap_or(target);
         let i = self.ui.active_tab;
         self.record_bookmark_visit(&new_cwd);
+        if distro.is_some() {
+            self.wsl[i] = distro;
+        }
+        if Here::of(&new_cwd, self.wsl[i].as_deref()).is_none() {
+            self.wsl[i] = None;
+        }
         self.cwd[i] = new_cwd;
         self.refresh_cwd_history_filter();
         self.refresh_branch();
@@ -2074,7 +2338,7 @@ impl State {
     /// Back history. If `target` can't be entered, reports why and opens
     /// nothing.
     pub fn open_dir_in_new_tab(&mut self, target: PathBuf) {
-        if let Err(e) = env::set_current_dir(&target) {
+        if let Err(e) = env::set_current_dir(wsl::fs_path(&target)) {
             self.push_out(format!("cd: {e}"), OutType::StdErr);
             return;
         }
@@ -2220,7 +2484,15 @@ impl State {
             );
             return;
         }
-        match RunningCmd::start(line, dir, self.ui.term_size, &self.ui.out[i], ctx) {
+        let here = Here::of(dir, self.wsl[i].as_deref());
+        match RunningCmd::start(
+            line,
+            dir,
+            here.as_ref(),
+            self.ui.term_size,
+            &self.ui.out[i],
+            ctx,
+        ) {
             Ok(mut cmd) => {
                 cmd.clone_root = clone_root;
                 self.running[i] = Some(cmd);
@@ -2700,6 +2972,45 @@ fn parse_remote_spec(spec: &str) -> (String, u16, String) {
         None => (hostport.to_string(), 22),
     };
     (host, port_arg.unwrap_or(port), user)
+}
+
+/// What [State::completion_sources] borrows: the tab's home, and in WSL,
+/// where it is, and its distro's saved dirs (see [State::saved_dirs_in]).
+struct CompletionLists {
+    home: Option<PathBuf>,
+    here: Option<Here>,
+    saved: Option<(Vec<PathBuf>, Vec<RecentDir>)>,
+}
+
+/// `line`, a completion of `typed` in WSL `here`, if it stays in the
+/// distro: a `cd` to a Windows path only when one was typed. A path in the
+/// distro is spelled as Linux has it.
+fn wsl_cd_line(here: &Here, typed: &str, line: String) -> Option<String> {
+    let Some(arg) = line.strip_prefix("cd ").map(str::trim_start) else {
+        return Some(line);
+    };
+
+    if let Some(linux) = wsl::linux_arg(here, arg) {
+        return Some(format!("cd {linux}"));
+    }
+    let typed_windows = typed
+        .strip_prefix("cd ")
+        .is_some_and(|a| wsl::windows_absolute(a.trim_start()));
+    if wsl::windows_absolute(arg) && !typed_windows {
+        return None;
+    }
+
+    Some(line)
+}
+
+/// `dir`'s git branch. In WSL, read from the repo's files: Windows' git
+/// won't work in a repo a Linux user owns.
+fn tab_branch(dir: &Path) -> Option<String> {
+    if wsl::split(dir).is_some() {
+        crate::project::head_branch(dir)
+    } else {
+        current_branch(dir)
+    }
 }
 
 /// The egui theme for a dark or light window.

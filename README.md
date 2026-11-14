@@ -173,6 +173,7 @@ The About window lists these too. Most are inspired by other programs - especial
 - **Alt + 1** / **Alt + 2**: Go to Desktop / Downloads
 - **Alt + 3**: Go to AppData. `~/Library` on Mac, `~/.local` on Linux
 - **Alt + 4**: Go to Program Files. `/Applications` on Mac, `/usr` on Linux
+- **Alt + 5**: Go to `AppData\Local\Programs`. Windows only
 
 On Mac, use **Cmd + Option** in place of **Alt**.
 

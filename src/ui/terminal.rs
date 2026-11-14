@@ -366,10 +366,22 @@ pub fn take_shortcut(ctx: &Context, shortcut: KeyboardShortcut) -> bool {
     })
 }
 
-/// Alt + these cd the active tab to the first five Files panel shortcuts (see
-/// [files::shortcuts]): Home, Desktop, Downloads, app data and programs.
-/// Cmd+Option on Mac, where Option + a key types a symbol.
-const FOLDER_KEYS: [Key; 5] = [Key::Backtick, Key::Num1, Key::Num2, Key::Num3, Key::Num4];
+/// Alt + these cd the active tab to the first Files panel shortcuts (see
+/// [files::shortcuts]): Home, Desktop, Downloads, app data, programs, and on
+/// Windows, per-user programs. Cmd+Option on Mac, where Option + a key types
+/// a symbol.
+const FOLDER_KEYS: &[Key] = if cfg!(windows) {
+    &[
+        Key::Backtick,
+        Key::Num1,
+        Key::Num2,
+        Key::Num3,
+        Key::Num4,
+        Key::Num5,
+    ]
+} else {
+    &[Key::Backtick, Key::Num1, Key::Num2, Key::Num3, Key::Num4]
+};
 
 /// The modifiers [FOLDER_KEYS] take on this OS.
 fn folder_mods(ctx: &Context) -> Modifiers {
@@ -938,6 +950,12 @@ fn program_keys(state: &mut State, ui: &mut Ui) {
 /// box does while one reads keys as typed.
 pub fn program_has_keys(state: &State, ctx: &Context) -> bool {
     grid::has_focus(ctx) || (state.keys_here() && ctx.memory(|m| m.has_focus(input_id())))
+}
+
+/// Whether the terminal has the keyboard: its input box, or a full-screen
+/// program's screen.
+pub fn has_focus(ctx: &Context) -> bool {
+    grid::has_focus(ctx) || ctx.memory(|m| m.has_focus(input_id()))
 }
 
 /// Apply `edit` to the active tab's input, moving the input box's caret to

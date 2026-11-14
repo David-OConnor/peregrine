@@ -28,6 +28,7 @@ use crate::{
     pty::{self, Pty, Spawned},
     term::Term,
     terminal::Output,
+    wsl::{self, Here},
 };
 
 /// How long to keep reading output once the shell has exited. Output it wrote
@@ -64,6 +65,8 @@ pub struct RunningCmd {
     pub term: Term,
     /// Set once Stop ended it, so its exit isn't reported as a failure.
     stopped: bool,
+    /// Running in a WSL distro (see [crate::wsl]), which ends input as Unix does.
+    wsl: bool,
     pty: Pty,
     rx: Receiver<Msg>,
     lifecycle: Receiver<Lifecycle>,
@@ -79,18 +82,22 @@ pub struct RunningCmd {
 
 impl RunningCmd {
     /// Start `line` in the system shell (PowerShell 7 on Windows, `sh`
-    /// elsewhere) in `dir`, in a terminal of `size` (columns, rows). `out` is
-    /// the tab's output, which its output joins. `ctx` is repainted whenever
-    /// there's news, so the output shows without waiting for the user to
-    /// move the mouse.
+    /// elsewhere; the login shell in WSL, `wsl`) in `dir`, in a terminal of
+    /// `size` (columns, rows). `out` is the tab's output, which its output
+    /// joins. `ctx` is repainted whenever there's news, so the output shows
+    /// without waiting for the user to move the mouse.
     pub fn start(
         line: &str,
         dir: &Path,
+        wsl: Option<&Here>,
         size: (u16, u16),
         out: &Output,
         ctx: &egui::Context,
     ) -> io::Result<Self> {
-        let (program, args) = if cfg!(windows) {
+        let wsl_args = wsl.map(|here| wsl::command_args(here, line));
+        let (program, args) = if let Some(a) = &wsl_args {
+            ("wsl.exe", a.iter().map(String::as_str).collect())
+        } else if cfg!(windows) {
             ("pwsh", vec!["-NoProfile", "-NoLogo", "-Command", line])
         } else {
             ("sh", vec!["-c", line])
@@ -127,6 +134,7 @@ impl RunningCmd {
             clone_root: None,
             term: Term::new(cols, rows, out),
             stopped: false,
+            wsl: wsl_args.is_some(),
             pty,
             rx,
             lifecycle,
@@ -233,10 +241,14 @@ impl RunningCmd {
         let _ = self.pty.interrupt();
     }
 
-    /// End the program's input, as Ctrl+D (Ctrl+Z on Windows) does on an
-    /// empty line in a terminal.
+    /// End the program's input, as Ctrl+D (Ctrl+Z on Windows, outside WSL)
+    /// does on an empty line in a terminal.
     pub fn end_input(&mut self) {
-        let _ = self.pty.end_input();
+        if self.wsl {
+            self.send(b"\x04");
+        } else {
+            let _ = self.pty.end_input();
+        }
     }
 
     /// Match the terminal to the pane's size, in characters. Only while a

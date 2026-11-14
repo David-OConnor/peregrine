@@ -1,6 +1,9 @@
 //! For the tabs bar, and each tab in it.
 
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::LazyLock,
+};
 
 use eframe::{
     emath::{Align, Rect},
@@ -17,6 +20,7 @@ use crate::{
     state::{self, State},
     ui,
     ui::{dirs, dirs::cleanup_missing_button, project_bar, tab_keys},
+    wsl::{self, Here},
 };
 
 /// A dir that says little on its own, so a tab on it is always labelled with
@@ -26,8 +30,9 @@ const VAGUE_DIR: &str = "src";
 /// What a tab is labelled with: its cwd's final folder, `leaf`, after
 /// `parents`, the folders above it that tell it apart (see [tab_labels]),
 /// e.g. `molchanica/` for `~/code/molchanica/src`. A connected tab is named
-/// for its remote, with no `parents`.
+/// for its remote, with no `parents`. `mark` goes first: 🐧 for a WSL tab.
 struct TabLabel {
+    mark: &'static str,
     parents: String,
     leaf: String,
 }
@@ -36,9 +41,20 @@ struct TabLabel {
 /// label; otherwise its cwd's final folder. A [VAGUE_DIR] gets the folder
 /// above it too, and tabs on different dirs that would read the same, e.g.
 /// two projects' `venv`s, get as many of the folders above as tell them
-/// apart. Folders above stop at `~` for dirs under `home`.
-fn tab_labels(cwds: &[PathBuf], remotes: &[Option<String>], home: Option<&Path>) -> Vec<TabLabel> {
-    let names: Vec<Vec<String>> = cwds.iter().map(|p| folder_names(p, home)).collect();
+/// apart. Folders above stop at `~` for dirs under `home`. A tab in WSL
+/// (`heres`) goes by its Linux path, after a 🐧.
+fn tab_labels(
+    cwds: &[PathBuf],
+    heres: &[Option<Here>],
+    remotes: &[Option<String>],
+    home: Option<&Path>,
+) -> Vec<TabLabel> {
+    let names: Vec<Vec<String>> = (0..cwds.len())
+        .map(|i| match &heres[i] {
+            Some(here) => linux_names(here),
+            None => folder_names(&cwds[i], home),
+        })
+        .collect();
     // How many of each tab's `names` its label shows.
     let mut depth: Vec<usize> = names
         .iter()
@@ -78,6 +94,7 @@ fn tab_labels(cwds: &[PathBuf], remotes: &[Option<String>], home: Option<&Path>)
     (0..cwds.len())
         .map(|i| match &remotes[i] {
             Some(label) => TabLabel {
+                mark: "",
                 parents: String::new(),
                 leaf: label.clone(),
             },
@@ -89,6 +106,7 @@ fn tab_labels(cwds: &[PathBuf], remotes: &[Option<String>], home: Option<&Path>)
                     .map(|name| format!("{name}/"))
                     .collect();
                 TabLabel {
+                    mark: if heres[i].is_some() { "🐧" } else { "" },
                     parents,
                     leaf: shown[0].clone(),
                 }
@@ -126,6 +144,30 @@ fn folder_names(dir: &Path, home: Option<&Path>) -> Vec<String> {
     names
 }
 
+/// [folder_names] for a WSL tab, from its Linux path: up to `~` for the
+/// distro's home, else to `Ubuntu:`.
+fn linux_names(here: &Here) -> Vec<String> {
+    let home = wsl::known_home(&here.distro);
+    let root = format!("{}:", here.distro);
+    let dirs: Vec<&str> = here.linux.split('/').filter(|n| !n.is_empty()).collect();
+    let Some((own, above)) = dirs.split_last() else {
+        return vec![format!("{root}/")];
+    };
+
+    let mut names = vec![own.to_string()];
+    for k in (0..above.len()).rev() {
+        let path = format!("/{}", dirs[..=k].join("/"));
+        if home.as_deref() == Some(path.as_str()) {
+            names.push("~".to_owned());
+            return names;
+        }
+        names.push(dirs[k].to_owned());
+    }
+    names.push(root);
+
+    names
+}
+
 /// The text of tab `n`'s `label`, cut to fit `width` in `font`: from the
 /// front of its `parents`, after a `…`, so the folder itself still shows.
 /// Only when even that doesn't fit is its end cut off (see [tab_button]).
@@ -137,7 +179,7 @@ fn fit_label(ui: &Ui, n: usize, label: &TabLabel, font: &FontId, width: f32) -> 
                 .x
         })
     };
-    let full = format!("{n}: {}{}", label.parents, label.leaf);
+    let full = format!("{n}: {}{}{}", label.mark, label.parents, label.leaf);
     if label.parents.is_empty() || text_width(&full) <= width {
         return full;
     }
@@ -146,10 +188,10 @@ fn fit_label(ui: &Ui, n: usize, label: &TabLabel, font: &FontId, width: f32) -> 
     (1..chars.len())
         .map(|skip| {
             let rest: String = chars[skip..].iter().collect();
-            format!("{n}: …{rest}{}", label.leaf)
+            format!("{n}: {}…{rest}{}", label.mark, label.leaf)
         })
         .find(|text| text_width(text) <= width)
-        .unwrap_or_else(|| format!("{n}: {}", label.leaf))
+        .unwrap_or_else(|| format!("{n}: {}{}", label.mark, label.leaf))
 }
 
 /// One [TAB_WIDTH]-wide tab of the top strip, for tab `n`'s `label` (see
@@ -175,7 +217,7 @@ fn tab_button(
     // The font a plain-text button label would get. PLACEHOLDER color lets
     // the button apply its own (selected/hovered).
     let font = FontSelection::Default.resolve_with_fallback(ui.style(), TextStyle::Button.into());
-    let full = format!("{n}: {}{}", label.parents, label.leaf);
+    let full = format!("{n}: {}{}{}", label.mark, label.parents, label.leaf);
     let text = fit_label(ui, n, label, &font, label_width.max(0.));
     let mut job = LayoutJob::simple_singleline(text.clone(), font, Color32::PLACEHOLDER);
 
@@ -248,7 +290,10 @@ pub fn tabs_bar(state: &mut State, ui: &mut Ui) {
         .iter()
         .map(|r| r.as_ref().map(|r| r.label()))
         .collect();
-    let labels = tab_labels(&state.cwd, &remotes, home.as_deref());
+    let heres: Vec<Option<Here>> = (0..n)
+        .map(|i| Here::of(&state.cwd[i], state.wsl[i].as_deref()))
+        .collect();
+    let labels = tab_labels(&state.cwd, &heres, &remotes, home.as_deref());
 
     // Saved remotes, for the one-click connect buttons to the right of `+`.
     let remotes: Vec<(usize, String)> = state
@@ -267,6 +312,8 @@ pub fn tabs_bar(state: &mut State, ui: &mut Ui) {
     let mut to_move: Option<(usize, usize)> = None;
     let mut add_new = false;
     let mut connect_remote: Option<usize> = None;
+    let wsl_opening = state.wsl_opening.is_some();
+    let mut open_wsl: Option<String> = None;
     let mut font_delta = 0.;
     let mut gui_font_delta = 0.;
     let mut set_dark = None;
@@ -308,12 +355,15 @@ pub fn tabs_bar(state: &mut State, ui: &mut Ui) {
         // Font-size controls sit to the left of the tab strip: one for the
         // terminal panes, one for the side panels.
 
-        ui.label("CLI font:");
-        font_delta = ui::font_size_control(ui, font_size);
+        let label = ui.label("CLI font:");
+        let (delta, rect) = ui::font_size_control(ui, font_size);
+        font_delta = delta;
+        // Ctrl+scroll over it steps the terminal's font, not the GUI's.
+        state.ui.cli_font_rect = label.rect.union(rect);
         ui.separator();
 
         ui.label("GUI font:");
-        gui_font_delta = ui::font_size_control(ui, gui_font_size);
+        gui_font_delta = ui::font_size_control(ui, gui_font_size).0;
 
         ui.separator();
         // Breathing room either side of the tab section.
@@ -407,6 +457,10 @@ pub fn tabs_bar(state: &mut State, ui: &mut Ui) {
                     {
                         add_new = true;
                     }
+
+                    if wsl_installed() {
+                        open_wsl = wsl_menu(ui, wsl_opening);
+                    }
                 });
             });
 
@@ -466,9 +520,43 @@ pub fn tabs_bar(state: &mut State, ui: &mut Ui) {
         state.add_tab();
     }
 
+    if let Some(distro) = open_wsl {
+        state.open_wsl_tab(distro, ui.ctx());
+    }
+
     if let Some(i) = connect_remote {
         state.connect_remote(i);
     }
+}
+
+/// Whether any WSL distro is installed, for [wsl_menu]. Read once.
+fn wsl_installed() -> bool {
+    static INSTALLED: LazyLock<bool> = LazyLock::new(|| !wsl::distros().is_empty());
+
+    cfg!(windows) && *INSTALLED
+}
+
+/// The 🐧 menu beside `+`: a new tab in a WSL distro. A spinner instead
+/// while one's `opening`. Returns the distro picked.
+fn wsl_menu(ui: &mut Ui, opening: bool) -> Option<String> {
+    if opening {
+        ui.spinner().on_hover_text("Starting WSL…");
+        return None;
+    }
+
+    let mut picked = None;
+    ui.menu_button("🐧", |ui| {
+        // Read afresh while open, so a distro installed meanwhile shows up.
+        for d in wsl::distros() {
+            if ui.button(&d.name).clicked() {
+                picked = Some(d.name);
+            }
+        }
+    })
+    .response
+    .on_hover_text("New WSL tab");
+
+    picked
 }
 
 /// Width of every tab in the top strip, its `x` included. Longer labels are

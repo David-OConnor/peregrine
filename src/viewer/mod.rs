@@ -931,6 +931,8 @@ impl Inner {
         if self.docs.is_empty() {
             self.opened_at = self.placement.map(|p| p.on_screen(ctx));
         } else {
+            // Focus alone leaves a minimized window minimized.
+            ctx.send_viewport_cmd_to(window_id(), ViewportCommand::Minimized(false));
             ctx.send_viewport_cmd_to(window_id(), ViewportCommand::Focus);
             ctx.request_repaint_of(window_id());
         }

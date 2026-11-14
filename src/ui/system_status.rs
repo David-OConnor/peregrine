@@ -8,8 +8,8 @@ use std::{
 };
 
 use egui::{
-    Align, Button, CollapsingHeader, Context, Label, Layout, ProgressBar, RichText, ScrollArea,
-    TextStyle, Ui,
+    Align, Button, CollapsingHeader, Context, Label, Layout, ProgressBar, Response, RichText,
+    ScrollArea, TextStyle, Ui,
 };
 use egui_extras::{Column, TableBuilder};
 
@@ -17,7 +17,7 @@ use super::{chars_width, panel_header, path_job, search};
 use crate::{
     state::State,
     system_status::{
-        PROCESS_MEMORY, Snapshot,
+        Averages, PROCESS_MEMORY, Snapshot,
         processes::{Figures, Period, Processes, Row, Sort, Table},
         space::{self, RootTargets, Scan, SteamLibrary},
     },
@@ -96,12 +96,13 @@ pub(super) fn draw(state: &mut State, ui: &mut Ui) {
     }
 
     let mut roots_changed = false;
+    let mut cleared = false;
 
     ScrollArea::vertical()
         .id_salt("system_status_scroll")
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            contents(
+            cleared = contents(
                 snapshot,
                 &mut monitor.cpu_processes,
                 &mut monitor.memory_processes,
@@ -124,12 +125,22 @@ pub(super) fn draw(state: &mut State, ui: &mut Ui) {
             }
         });
 
+    if cleared {
+        monitor.clear_stopped();
+    }
+
     if roots_changed {
         let _ = state.save();
     }
 }
 
-fn contents(snapshot: &Snapshot, cpu_table: &mut Table, memory_table: &mut Table, ui: &mut Ui) {
+/// True when a Processes list's Clear is clicked.
+fn contents(
+    snapshot: &Snapshot,
+    cpu_table: &mut Table,
+    memory_table: &mut Table,
+    ui: &mut Ui,
+) -> bool {
     let hardware = &snapshot.hardware;
     ui.add_space(6.);
     ui.strong("CPU");
@@ -154,7 +165,11 @@ fn contents(snapshot: &Snapshot, cpu_table: &mut Table, memory_table: &mut Table
         ui.weak("CPU usage unavailable");
     }
 
-    process_list(ui, cpu_table, snapshot, &CPU);
+    average_meters(ui, snapshot.cpu_averages, |percent| {
+        (percent / 100., format!("{percent:.0}%"))
+    });
+
+    let cpu_cleared = process_list(ui, cpu_table, snapshot, &CPU);
 
     section_separator(ui);
     ui.strong("Memory");
@@ -166,25 +181,27 @@ fn contents(snapshot: &Snapshot, cpu_table: &mut Table, memory_table: &mut Table
     }
 
     if let Some(memory) = &snapshot.memory {
-        let used = memory.total.saturating_sub(memory.available);
-        let fraction = ratio(used, memory.total);
-
-        meter(
-            ui,
-            fraction,
-            format!(
+        let used = |used: u64| {
+            let fraction = ratio(used, memory.total);
+            let text = format!(
                 "{} / {} used · {:.0}%",
                 short_bytes(used),
                 short_bytes(memory.total),
                 fraction * 100.
-            ),
-        );
+            );
+
+            (fraction, text)
+        };
+
+        let (fraction, text) = used(memory.total.saturating_sub(memory.available));
+        meter(ui, fraction, text);
+        average_meters(ui, snapshot.memory_averages, |bytes| used(bytes as u64));
         ui.weak(format!("{} available", bytes(memory.available)));
     } else {
         ui.weak("Memory usage unavailable");
     }
 
-    process_list(ui, memory_table, snapshot, &MEMORY);
+    let memory_cleared = process_list(ui, memory_table, snapshot, &MEMORY);
 
     section_separator(ui);
     ui.strong("GPUs");
@@ -246,24 +263,46 @@ fn contents(snapshot: &Snapshot, cpu_table: &mut Table, memory_table: &mut Table
         );
         ui.add_space(4.);
     }
+
+    cpu_cleared || memory_cleared
 }
 
 /// A folding list of what each program is using of `measure`, now and on
-/// average. Nothing here runs while it's folded.
-fn process_list(ui: &mut Ui, table: &mut Table, snapshot: &Snapshot, measure: &Measure) {
+/// average. Nothing here runs while it's folded. True when its Clear is clicked.
+fn process_list(ui: &mut Ui, table: &mut Table, snapshot: &Snapshot, measure: &Measure) -> bool {
     let Some(processes) = &snapshot.processes else {
         ui.weak("Per-process usage unavailable");
-        return;
+        return false;
     };
+
+    let mut clear = false;
 
     CollapsingHeader::new("Processes")
         .id_salt(measure.id)
         .show(ui, |ui| {
             ui.style_mut().interaction.selectable_labels = false;
 
-            if search::search_box(ui, &mut table.search, &format!("{}_search", measure.id)) {
-                table.invalidate();
-            }
+            ui.horizontal_wrapped(|ui| {
+                if search::search_box(ui, &mut table.search, &format!("{}_search", measure.id)) {
+                    table.invalidate();
+                }
+
+                if ui
+                    .add(Button::selectable(table.running_only, "Running only"))
+                    .on_hover_text("Hide programs with nothing running")
+                    .clicked()
+                {
+                    table.running_only = !table.running_only;
+                    table.invalidate();
+                }
+
+                let stopped = processes.rows.iter().any(|row| row.instances == 0);
+
+                clear = ui
+                    .add_enabled(stopped, Button::new("Clear"))
+                    .on_hover_text("Remove programs not running now, from both lists")
+                    .clicked();
+            });
 
             process_rows(ui, table, processes, snapshot.sampled_at, measure);
 
@@ -276,6 +315,8 @@ fn process_list(ui: &mut Ui, table: &mut Table, snapshot: &Snapshot, measure: &M
                 duration_text(processes.recorded)
             ));
         });
+
+    clear
 }
 
 /// The table of a [process_list]. Its columns' headings sort it.
@@ -578,7 +619,7 @@ fn target_list(ui: &mut Ui, found: &RootTargets) {
     }
 }
 
-fn meter(ui: &mut Ui, fraction: f32, text: String) {
+fn meter(ui: &mut Ui, fraction: f32, text: String) -> Response {
     let bar = ProgressBar::new(fraction.clamp(0., 1.))
         .text(text)
         .animate(false);
@@ -589,7 +630,31 @@ fn meter(ui: &mut Ui, fraction: f32, text: String) {
         bar
     };
 
-    ui.add(bar);
+    ui.add(bar)
+}
+
+/// Meters for `averages`, below its "now" one. `figure` gives the fraction and
+/// text for an average.
+fn average_meters(ui: &mut Ui, averages: Averages, figure: impl Fn(f32) -> (f32, String)) {
+    for (average, label, hint) in [
+        (
+            averages.minute,
+            "1m",
+            "Average over the last minute this panel was open",
+        ),
+        (
+            averages.half_hour,
+            "30m",
+            "Average over the last 30 minutes this panel was open",
+        ),
+    ] {
+        let Some(average) = average else {
+            continue;
+        };
+
+        let (fraction, text) = figure(average);
+        meter(ui, fraction, format!("{label} avg · {text}")).on_hover_text(hint);
+    }
 }
 
 fn ratio(used: u64, total: u64) -> f32 {

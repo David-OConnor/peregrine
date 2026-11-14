@@ -1,6 +1,7 @@
 //! On-demand system snapshots. No work runs until the pane opens.
 
 use std::{
+    mem,
     sync::{Arc, mpsc},
     thread,
     time::{Duration, Instant},
@@ -24,6 +25,7 @@ pub mod space;
 
 /// What a process's memory figure means here.
 pub use platform::PROCESS_MEMORY;
+use processes::{HALF_HOUR, MINUTE, Recent, Usage};
 
 pub const SAMPLE_INTERVAL: Duration = Duration::from_secs(2);
 const STORAGE_INTERVAL: Duration = Duration::from_secs(15);
@@ -75,19 +77,61 @@ pub(super) struct CpuTimes {
     pub total: u64,
 }
 
+/// The whole machine's use, averaged over the last minute and half hour of
+/// recording. None before there's any.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Averages {
+    pub minute: Option<f32>,
+    pub half_hour: Option<f32>,
+}
+
+/// The history behind an [Averages].
+struct Recents {
+    minute: Recent,
+    half_hour: Recent,
+}
+
+impl Default for Recents {
+    fn default() -> Self {
+        Self {
+            minute: Recent::new(&MINUTE),
+            half_hour: Recent::new(&HALF_HOUR),
+        }
+    }
+}
+
+impl Recents {
+    fn add(&mut self, usage: Usage) {
+        self.minute.add(usage);
+        self.half_hour.add(usage);
+    }
+
+    fn averages(&self, figure: impl Fn(&Usage) -> Option<f32>) -> Averages {
+        Averages {
+            minute: figure(&self.minute.total()),
+            half_hour: figure(&self.half_hour.total()),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Snapshot {
     pub hardware: Arc<Hardware>,
     pub cpu_usage: Option<f32>,
+    /// Percent, as [Self::cpu_usage].
+    pub cpu_averages: Averages,
     pub cpu_available: bool,
     pub memory: Option<Memory>,
+    /// Bytes used.
+    pub memory_averages: Averages,
     pub processes: Option<processes::Processes>,
     pub volumes: Arc<Vec<Volume>>,
     pub sampled_at: Instant,
 }
 
 struct Worker {
-    request: mpsc::Sender<()>,
+    /// Asks for a sample. True clears stopped programs first.
+    request: mpsc::Sender<bool>,
     response: mpsc::Receiver<Snapshot>,
 }
 
@@ -101,10 +145,27 @@ pub struct Monitor {
     pub memory_processes: processes::Table,
     worker: Option<Worker>,
     pending: bool,
+    /// A clear of stopped programs not yet sent to the sampler.
+    clear_stopped: bool,
     next_sample: Option<Instant>,
 }
 
 impl Monitor {
+    /// Forgets the programs not running now, from both process lists.
+    pub fn clear_stopped(&mut self) {
+        self.clear_stopped = true;
+        self.hide_stopped();
+        self.cpu_processes.invalidate();
+        self.memory_processes.invalidate();
+    }
+
+    /// Hides from the snapshot what the sampler's yet to forget.
+    fn hide_stopped(&mut self) {
+        if let Some(processes) = self.snapshot.as_mut().and_then(|s| s.processes.as_mut()) {
+            processes.rows.retain(|row| row.instances > 0);
+        }
+    }
+
     /// Called only while visible. At most one request is in flight.
     pub fn update(&mut self, wake: impl Fn() + Send + 'static) {
         if let Some(worker) = &self.worker {
@@ -114,6 +175,10 @@ impl Monitor {
                     self.snapshot = Some(snapshot);
                     self.pending = false;
                     self.error = None;
+
+                    if self.clear_stopped {
+                        self.hide_stopped();
+                    }
                 }
                 Err(mpsc::TryRecvError::Disconnected) => {
                     self.worker = None;
@@ -137,7 +202,11 @@ impl Monitor {
                 .spawn(move || {
                     let mut sampler = Sampler::default();
 
-                    while requests.recv().is_ok() {
+                    while let Ok(clear_stopped) = requests.recv() {
+                        if clear_stopped {
+                            sampler.process_tracker.clear_stopped();
+                        }
+
                         if responses.send(sampler.sample()).is_err() {
                             break;
                         }
@@ -157,7 +226,8 @@ impl Monitor {
         }
 
         if let Some(worker) = &self.worker {
-            self.pending = worker.request.send(()).is_ok();
+            let clear_stopped = mem::take(&mut self.clear_stopped);
+            self.pending = worker.request.send(clear_stopped).is_ok();
         }
     }
 
@@ -178,6 +248,9 @@ struct Sampler {
     hardware_at: Option<Instant>,
     storage_at: Option<Instant>,
     cpu: Option<(CpuTimes, Instant)>,
+    cpu_recent: Recents,
+    memory_at: Option<Instant>,
+    memory_recent: Recents,
     process_reader: platform::ProcessReader,
     process_tracker: processes::Tracker,
 }
@@ -205,19 +278,40 @@ impl Sampler {
         }
 
         let current = platform::cpu_times();
-        let cpu_usage = current.and_then(|current| {
+        let cpu = current.and_then(|current| {
             let (previous, at) = self.cpu?;
-
-            if now.duration_since(at) > SAMPLE_INTERVAL * 3 {
-                return None;
-            }
-
+            let seconds = recording_seconds(at, now)?;
             let total = current.total.checked_sub(previous.total)?;
             let busy = current.busy.checked_sub(previous.busy)?;
 
-            (total > 0).then(|| (100. * busy as f32 / total as f32).clamp(0., 100.))
+            (total > 0).then(|| ((100. * busy as f32 / total as f32).clamp(0., 100.), seconds))
         });
         self.cpu = current.map(|times| (times, now));
+
+        if let Some((usage, seconds)) = cpu {
+            // As though of one CPU, so it averages to the meter's percent.
+            self.cpu_recent.add(Usage {
+                seconds,
+                cpu_seconds: seconds * f64::from(usage) / 100.,
+                ..Default::default()
+            });
+        }
+
+        let memory = platform::memory();
+
+        if let Some(memory) = &memory
+            && let Some(seconds) = self.memory_at.and_then(|at| recording_seconds(at, now))
+        {
+            let used = memory.total.saturating_sub(memory.available);
+
+            self.memory_recent.add(Usage {
+                seconds,
+                byte_seconds: used as f64 * seconds,
+                ..Default::default()
+            });
+        }
+
+        self.memory_at = memory.is_some().then_some(now);
 
         let cpus = self
             .hardware
@@ -235,14 +329,24 @@ impl Sampler {
 
         Snapshot {
             hardware: Arc::clone(&self.hardware),
-            cpu_usage,
+            cpu_usage: cpu.map(|(usage, _)| usage),
+            cpu_averages: self.cpu_recent.averages(|usage| usage.cpu_percent(1)),
             cpu_available: current.is_some(),
-            memory: platform::memory(),
+            memory,
+            memory_averages: self.memory_recent.averages(Usage::memory),
             processes,
             volumes: Arc::clone(&self.volumes),
             sampled_at: Instant::now(),
         }
     }
+}
+
+/// Seconds from `last` to `now`, or None after a gap too long to have been
+/// recording through, as when the pane was closed.
+fn recording_seconds(last: Instant, now: Instant) -> Option<f64> {
+    let elapsed = now.saturating_duration_since(last);
+
+    (!elapsed.is_zero() && elapsed <= SAMPLE_INTERVAL * 3).then_some(elapsed.as_secs_f64())
 }
 
 fn simd_summary() -> String {

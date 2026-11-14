@@ -371,6 +371,7 @@ impl Search {
         };
         ctx.input_mut(|i| {
             if i.consume_key(Modifiers::COMMAND, Key::F) {
+                self.query.clear();
                 self.focus = true;
             }
             if editing && i.consume_key(Modifiers::COMMAND, Key::R) {

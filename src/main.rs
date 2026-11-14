@@ -29,6 +29,7 @@ mod ui;
 mod util;
 mod viewer;
 mod workspace;
+mod wsl;
 
 use std::{
     path::{Path, PathBuf},
@@ -83,8 +84,12 @@ fn app_icon() -> Arc<egui::IconData> {
 
 /// Render a path as `~/relative` when it lives under the home directory;
 /// otherwise use the absolute form. Uses forward slashes after the tilde for
-/// consistency with the rest of the shell.
+/// consistency with the rest of the shell. A WSL path shows as
+/// `Ubuntu:~/relative` (see [wsl::display]).
 pub fn render_with_tilde(p: &Path, home: Option<&Path>) -> String {
+    if let Some(shown) = wsl::display(p) {
+        return shown;
+    }
     if let Some(home) = home {
         if let Ok(rest) = p.strip_prefix(home) {
             let rest_str = rest.to_string_lossy().replace('\\', "/");

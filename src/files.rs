@@ -818,12 +818,13 @@ pub struct Shortcut {
 /// The Files panel's jump-to buttons that go to an ordinary dir, in display
 /// order. Home, Desktop and Downloads are the same everywhere; the others are
 /// each OS's counterpart of the same place (see [app_data], [programs] and
-/// [trash_dir]). Windows has no single root, and its Recycle Bin isn't a
-/// listable dir, so there those two are the drive menu ([drives]) and
-/// [open_recycle_bin] instead, and aren't listed here.
+/// [trash_dir]). Windows also gets [local_programs]. Windows has no single
+/// root, and its Recycle Bin isn't a listable dir, so there those two are the
+/// drive menu ([drives]) and [open_recycle_bin] instead, and aren't listed
+/// here.
 pub fn shortcuts(home: Option<&Path>) -> Vec<Shortcut> {
     let in_home = |sub: &str| home.map(|h| h.join(sub));
-    #[allow(unused_mut)]
+
     let mut list = vec![
         Shortcut {
             glyph: "🏠",
@@ -843,6 +844,8 @@ pub fn shortcuts(home: Option<&Path>) -> Vec<Shortcut> {
         app_data(home),
         programs(),
     ];
+    #[cfg(windows)]
+    list.push(local_programs(home));
     #[cfg(not(windows))]
     list.extend([
         Shortcut {
@@ -894,6 +897,20 @@ fn programs() -> Shortcut {
         glyph: "📦",
         hover,
         dir: Some(dir),
+    }
+}
+
+/// Per-user installs on Windows: `%LOCALAPPDATA%\Programs`.
+#[cfg(windows)]
+fn local_programs(home: Option<&Path>) -> Shortcut {
+    let local = env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .or_else(|| home.map(|h| h.join(r"AppData\Local")));
+
+    Shortcut {
+        glyph: "💼",
+        hover: r"AppData\Local\Programs",
+        dir: local.map(|d| d.join("Programs")),
     }
 }
 

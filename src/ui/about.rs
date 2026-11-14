@@ -176,13 +176,16 @@ fn shortcut_groups(mac: bool) -> Vec<(&'static str, Shortcuts)> {
     let cmd = if mac { "Cmd" } else { "Ctrl" };
     // Option + a digit or letter types a symbol on Mac.
     let alt = if mac { "Cmd + Option" } else { "Alt" };
-    // As the Files panel's 🗃 and 📦 buttons.
-    let folders = if cfg!(windows) {
-        "Go to AppData / Program Files"
+    // As the Files panel's 🗃 and 📦 buttons, and on Windows, 💼.
+    let (folder_keys, folders) = if cfg!(windows) {
+        (
+            "3 / 4 / 5",
+            r"Go to AppData / Program Files / AppData\Local\Programs",
+        )
     } else if mac {
-        "Go to ~/Library / /Applications"
+        ("3 / 4", "Go to ~/Library / /Applications")
     } else {
-        "Go to ~/.local / /usr"
+        ("3 / 4", "Go to ~/.local / /usr")
     };
 
     let anywhere = vec![
@@ -193,12 +196,16 @@ fn shortcut_groups(mac: bool) -> Vec<(&'static str, Shortcuts)> {
         ),
         (format!("{alt} + `"), "Go to the home directory"),
         (format!("{alt} + 1 / 2"), "Go to Desktop / Downloads"),
-        (format!("{alt} + 3 / 4"), folders),
+        (format!("{alt} + {folder_keys}"), folders),
         (
             format!("{cmd} + C / X / V"),
             "Copy, cut, and paste, with clipboard history",
         ),
         ("Ctrl + Shift + V".into(), "Show or hide the clipboard pane"),
+        (
+            format!("{cmd} + + / - or {cmd} + scroll"),
+            "Grow / shrink the font of the terminal or the panels, whichever you're in or pointing at",
+        ),
         (
             if mac { "Option + F12" } else { "Alt + F12" }.into(),
             "Show or hide the terminal pane",

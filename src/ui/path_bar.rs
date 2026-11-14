@@ -28,6 +28,7 @@ use crate::{
         dirs::{BOOKMARKED_TEXT, bookmarked_fill},
         file_browser::{RowAction, apply_row_action, drop_target},
     },
+    wsl,
 };
 
 /// Draw the path bar for the active tab's dir, in the width left in `ui`:
@@ -114,11 +115,14 @@ fn crumbs(cwd: &Path, home: Option<&Path>) -> (Vec<Crumb>, Vec<PathBuf>) {
     (crumbs, above_home)
 }
 
-/// A dir's own name, or a root's (`C:`, `/`, `\\server\share`), without the
-/// separator after it unless that's all there is.
+/// A dir's own name, or a root's (`C:`, `/`, `\\server\share`, or a WSL
+/// distro's name), without the separator after it unless that's all there is.
 fn dir_name(dir: &Path) -> String {
     if let Some(name) = dir.file_name() {
         return name.to_string_lossy().into_owned();
+    }
+    if let Some((distro, _)) = wsl::split(dir) {
+        return distro;
     }
     let root = dir.to_string_lossy();
     let trimmed = root.trim_end_matches(['/', '\\']);
@@ -138,7 +142,12 @@ fn breadcrumbs(
     bookmarked: bool,
     action: &mut Option<RowAction>,
 ) -> bool {
-    let home = state.home.as_deref();
+    // In WSL, `~` is the distro's home, not Windows'.
+    let wsl_home = wsl::known_home_dir(state.cwd());
+    let home = match state.here() {
+        Some(_) => wsl_home.as_deref(),
+        None => state.home.as_deref(),
+    };
     let (crumbs, above_home) = crumbs(state.cwd(), home);
     let dark = ui.visuals().dark_mode;
     let listing = (state.ui.show_hidden_attr, state.ui.show_dotfiles);
@@ -169,7 +178,7 @@ fn breadcrumbs(
                 if !above_home.is_empty() {
                     let (resp, _) = MenuButton::from_button(chevron("«", plain)).ui(ui, |ui| {
                         for dir in &above_home {
-                            let name = dir.display().to_string();
+                            let name = render_with_tilde(dir, None);
                             dir_item(ui, dir, &name, false, home, action);
                         }
                     });
@@ -447,7 +456,13 @@ fn match_list(matches: &[String]) -> String {
 fn submit(state: &mut State, ui: &Ui, mut edit: PathEdit) -> bool {
     ui.ctx().request_repaint();
 
-    let gone = resolve(&edit.text, state.cwd(), state.home.as_deref()).and_then(|target| {
+    // A Linux path, in WSL (see [wsl::resolve]).
+    let text = wsl::resolve(state.here().as_ref(), edit.text.trim())
+        .map(|t| wsl::fs_path(&t))
+        .filter(|t| t.exists())
+        .map_or_else(|| edit.text.clone(), |t| t.to_string_lossy().into_owned());
+    let home = state.tab_home();
+    let gone = resolve(&text, state.cwd(), home.as_deref()).and_then(|target| {
         let shown = target.dir.display().to_string();
         state
             .try_change_dir(target.dir)

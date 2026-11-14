@@ -209,11 +209,12 @@ pub(super) fn draw(state: &mut State, ui: &mut Ui) {
     let can_forward = !state.ui.nav_forward[i].is_empty();
 
     // Common-destination shortcuts (see [files::shortcuts]): 🏠 Home,
-    // 🖥 Desktop, 📥 Downloads, 🗃 app data, 📦 programs, 🖴 root, 🗑 trash.
+    // 🖥 Desktop, 📥 Downloads, 🗃 app data, 📦 programs, 💼 per-user
+    // programs (Windows only), 🖴 root, 🗑 trash.
     // Each is only enabled when the target actually exists, so we never `cd`
     // into a missing dir and push a diagnostic. On Windows, 🖴 is a menu of
     // drives and 🗑 opens the Recycle Bin in Explorer. Rows dragged onto ⬆
-    // or a shortcut go to that dir. The first five have keys too (see
+    // or a shortcut go to that dir. The first five (six on Windows) have keys too (see
     // [terminal::folder_keys]). The one for the dir already shown is green.
 
     let shortcuts = files::shortcuts(home.as_deref());
@@ -303,9 +304,20 @@ pub(super) fn draw(state: &mut State, ui: &mut Ui) {
                         go_to = Some(d.root);
                     }
                 }
+
+                // Each WSL distro's files.
+                let distros = crate::wsl::distros();
+                if !distros.is_empty() {
+                    ui.separator();
+                }
+                for d in distros {
+                    if ui.button(format!("🐧 {}", d.name)).clicked() {
+                        go_to = Some(crate::wsl::unc_root(&d.name));
+                    }
+                }
             })
             .response
-            .on_hover_text("This PC: devices and drives");
+            .on_hover_text("This PC: devices and drives, and WSL");
             if ui
                 .button("🗑")
                 .on_hover_text("Recycle Bin (opens in Explorer)")

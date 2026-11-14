@@ -9,13 +9,13 @@ use std::{
 };
 
 use egui::{
-    Align, Button, CentralPanel, CollapsingHeader, Color32, ComboBox, Context, Frame, Key, Panel,
-    Rect, Response, RichText, ScrollArea, Sense, Stroke, TextEdit, TextFormat, TextStyle,
-    TextWrapMode, Ui, ViewportBuilder, ViewportClass, ViewportId, WidgetText,
+    Align, Button, CentralPanel, CollapsingHeader, Color32, ComboBox, Context, Frame, Key,
+    Modifiers, Panel, Rect, Response, RichText, ScrollArea, Sense, Stroke, TextEdit, TextFormat,
+    TextStyle, TextWrapMode, Ui, ViewportBuilder, ViewportClass, ViewportId, WidgetText,
     text::{CCursor, CCursorRange, LayoutJob},
 };
 
-use super::{Divider, MIN_SPLIT_HEIGHT, panel_header, plural, scale_panel_fonts, terminal};
+use super::{Divider, MIN_SPLIT_HEIGHT, panel_header, plural, scale_panel_fonts, terminal, zoom};
 use crate::{
     OutType,
     path_env::{self, DirPrograms, Scope},
@@ -622,6 +622,9 @@ pub fn path_window(state: &mut State, ctx: &Context) {
         // As in the main window. (Embedded in it, the main window's pass
         // has already taken it.)
         terminal::toggle_bookmark_key(state, ui.ctx());
+        if class != ViewportClass::EmbeddedWindow {
+            zoom::handle_gui(state, ui.ctx());
+        }
         CentralPanel::default().show(ui, |ui| {
             scale_panel_fonts(ui, state.gui_font_size);
             // Without native multi-window support egui draws this as a
@@ -629,7 +632,10 @@ pub fn path_window(state: &mut State, ctx: &Context) {
             if class == ViewportClass::EmbeddedWindow {
                 panel_header(ui, "PATH", &mut state.ui.panel_vis.path_editor);
             }
-            path_panel(state, ui);
+            // Embedded, the main window's keys are shared; take them only
+            // while the pointer is over the panel.
+            let keys = class != ViewportClass::EmbeddedWindow || ui.ui_contains_pointer();
+            path_panel(state, keys, ui);
         });
     });
     // Closed just now: one more pass of the main window stops showing it.
@@ -642,8 +648,8 @@ pub fn path_window(state: &mut State, ctx: &Context) {
 /// order, the first searched first. Click a row to select it, double-click
 /// to edit it in place (Enter or clicking away keeps the change, Escape
 /// drops it). Missing dirs and duplicates are marked. Changes are kept
-/// apart per scope until saved.
-fn path_panel(state: &mut State, ui: &mut Ui) {
+/// apart per scope until saved. Ctrl+S (Cmd+S on Mac) saves, if `keys`.
+fn path_panel(state: &mut State, keys: bool, ui: &mut Ui) {
     // Measured before anything is laid out, so the details pane's share is
     // of the whole panel, as in the Files panel. Its top edge drags up and
     // down.
@@ -657,6 +663,7 @@ fn path_panel(state: &mut State, ui: &mut Ui) {
         home.as_deref(),
         &divider,
         state.ui.path_details_split,
+        keys,
         ui,
     );
     // After the list, so the divider is on top of it for the pointer.
@@ -690,14 +697,15 @@ fn path_panel(state: &mut State, ui: &mut Ui) {
 }
 
 /// The panel's contents, with the details pane at `split` of its height (see
-/// [Divider]). Returns what the user asked for, and where the details pane
-/// was drawn.
+/// [Divider]). Takes Ctrl+S if `keys`. Returns what the user asked for, and
+/// where the details pane was drawn.
 fn draw(
     panel: &mut PathPanel,
     cwd: &Path,
     home: Option<&Path>,
     divider: &Divider,
     split: f32,
+    keys: bool,
     ui: &mut Ui,
 ) -> (Option<Request>, Rect) {
     // Scope picker. `*` marks one with unsaved changes.
@@ -873,15 +881,29 @@ fn draw(
                         };
                     }
                     let (save, save_hover) = match scope {
-                        Scope::Session => ("Apply", "Use this list as this app's PATH".to_owned()),
-                        _ => ("Save", format!("{}.", path_env::takes_effect(scope))),
+                        Scope::Session => (
+                            "Apply",
+                            "Use this list as this app's PATH (Ctrl+S; Cmd+S on Mac)".to_owned(),
+                        ),
+                        _ => (
+                            "Save",
+                            format!("{}. (Ctrl+S; Cmd+S on Mac)", path_env::takes_effect(scope)),
+                        ),
                     };
+
+                    // A row being edited counts, as Save keeps its text.
+                    let save_key =
+                        keys && ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::S));
+                    if save_key {
+                        edit.finish_edit(true);
+                    }
+
                     let dirty = edit.dirty();
-                    if ui
+                    let clicked = ui
                         .add_enabled(dirty, Button::new(RichText::new(save).strong()))
                         .on_hover_text(save_hover)
-                        .clicked()
-                    {
+                        .clicked();
+                    if clicked || (save_key && dirty) {
                         request = Some(Request::Save);
                     }
                     let (reload, reload_hover) = if dirty {

@@ -271,6 +271,19 @@ pub fn web_url(url: &str) -> Option<String> {
     })
 }
 
+/// The branch checked out in the repo `dir` is in, read from its files:
+/// `HEAD` when detached, as `git rev-parse --abbrev-ref HEAD` gives it.
+pub fn head_branch(dir: &Path) -> Option<String> {
+    let repo = GitDirs::find(dir)?;
+    let head = fs::read_to_string(repo.git.join("HEAD")).ok()?;
+    let branch = head
+        .trim()
+        .strip_prefix("ref: refs/heads/")
+        .unwrap_or("HEAD");
+
+    Some(branch.to_owned())
+}
+
 /// Where a repo keeps its files.
 struct GitDirs {
     /// The worktree's top dir, holding `.git`.

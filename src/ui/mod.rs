@@ -31,6 +31,7 @@ mod system_status;
 pub mod tab_keys;
 mod tabs;
 pub mod terminal;
+pub mod zoom;
 
 use crate::{
     OutType,
@@ -669,8 +670,9 @@ fn panel_toggles(state: &mut State, ui: &mut Ui) {
     });
 }
 
-/// Returns the requested change in font size, or zero when unchanged.
-fn font_size_control(ui: &mut Ui, size: f32) -> f32 {
+/// Returns the requested change in font size, or zero when unchanged, and
+/// where the control was drawn.
+fn font_size_control(ui: &mut Ui, size: f32) -> (f32, Rect) {
     let mut val = size.round() as i32;
 
     let response = ui
@@ -680,13 +682,15 @@ fn font_size_control(ui: &mut Ui, size: f32) -> f32 {
                 .speed(0.25)
                 .update_while_editing(false),
         )
-        .on_hover_text("Increase or decrease font size. Drag, or click to type.");
+        .on_hover_text("Increase or decrease font size. Drag, click to type, or Ctrl+scroll.");
 
-    if response.changed() {
+    let delta = if response.changed() {
         val as f32 - size
     } else {
         0.
-    }
+    };
+
+    (delta, response.rect)
 }
 
 /// Cap a resizable side panel so the central output/input column keeps at
@@ -743,6 +747,9 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
     // Even while a full-screen program has the keyboard, so it can be hidden
     // from there too.
     terminal::toggle_terminal_key(state, ui.ctx());
+    // Likewise, as in other terminals. Before any widget, so the program
+    // doesn't also get the keys.
+    zoom::handle(state, ui.ctx());
 
     // After that command, which runs in the tab it was typed in, and before
     // any widget, so the input box never sees these keys. Not while a
@@ -768,6 +775,7 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
     state.pump_paste();
     state.pump_delete(ui.ctx());
     state.pump_zip_job();
+    state.pump_wsl_opening();
 
     // SSH: finished connection attempts, and remote output. The connection's
     // own tasks request a repaint when there's news; this asks for another

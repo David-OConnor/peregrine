@@ -22,7 +22,7 @@ use std::{
 use super::SAMPLE_INTERVAL;
 
 /// A stretch of a program's running time to average over.
-struct Window {
+pub(super) struct Window {
     seconds: f64,
     /// How much running time each bucket of its [Recent] holds.
     bucket_seconds: f64,
@@ -35,12 +35,12 @@ impl Window {
     }
 }
 
-const MINUTE: Window = Window {
+pub(super) const MINUTE: Window = Window {
     seconds: 60.,
     bucket_seconds: SAMPLE_INTERVAL.as_secs_f64(),
 };
 
-const HALF_HOUR: Window = Window {
+pub(super) const HALF_HOUR: Window = Window {
     seconds: 30. * 60.,
     bucket_seconds: 30.,
 };
@@ -99,10 +99,10 @@ pub struct Processes {
 
 /// What a stretch of running time added up to.
 #[derive(Clone, Copy, Default)]
-struct Usage {
-    seconds: f64,
-    cpu_seconds: f64,
-    byte_seconds: f64,
+pub(super) struct Usage {
+    pub seconds: f64,
+    pub cpu_seconds: f64,
+    pub byte_seconds: f64,
 }
 
 impl Usage {
@@ -112,25 +112,25 @@ impl Usage {
         self.byte_seconds += other.byte_seconds;
     }
 
-    fn cpu_percent(&self, cpus: usize) -> Option<f32> {
+    pub(super) fn cpu_percent(&self, cpus: usize) -> Option<f32> {
         (self.seconds > 0.).then(|| (100. * self.cpu_seconds / (self.seconds * cpus as f64)) as f32)
     }
 
-    fn memory(&self) -> Option<f32> {
+    pub(super) fn memory(&self) -> Option<f32> {
         (self.seconds > 0.).then(|| (self.byte_seconds / self.seconds) as f32)
     }
 }
 
 /// A program's running time over the last [Window], in a fixed number of
 /// buckets, so a long window costs no more per sample than a short one.
-struct Recent {
+pub(super) struct Recent {
     window: &'static Window,
     buckets: Box<[Usage]>,
     newest: usize,
 }
 
 impl Recent {
-    fn new(window: &'static Window) -> Self {
+    pub(super) fn new(window: &'static Window) -> Self {
         Self {
             window,
             buckets: vec![Usage::default(); window.buckets()].into(),
@@ -138,7 +138,7 @@ impl Recent {
         }
     }
 
-    fn add(&mut self, usage: Usage) {
+    pub(super) fn add(&mut self, usage: Usage) {
         if self.buckets[self.newest].seconds >= self.window.bucket_seconds {
             self.newest = (self.newest + 1) % self.buckets.len();
             self.buckets[self.newest] = Usage::default();
@@ -148,7 +148,7 @@ impl Recent {
     }
 
     /// Stops at the window's length, as slow samples can overfill buckets.
-    fn total(&self) -> Usage {
+    pub(super) fn total(&self) -> Usage {
         let count = self.buckets.len();
         let mut total = Usage::default();
 
@@ -205,6 +205,12 @@ pub(super) struct Tracker {
 }
 
 impl Tracker {
+    /// Forgets the programs with nothing running at the last sample.
+    pub(super) fn clear_stopped(&mut self) {
+        self.histories
+            .retain(|_, history| history.tick.instances > 0);
+    }
+
     /// Adds the sample `readings`, taken at `at`, on a machine of `cpus`
     /// logical processors.
     pub(super) fn record(&mut self, readings: &[Reading], at: Instant, cpus: usize) -> Processes {
@@ -327,14 +333,16 @@ impl Default for Sort {
 pub struct Table {
     pub search: String,
     pub sort: Sort,
+    /// Hides rows with nothing running.
+    pub running_only: bool,
     /// Indexes of the rows to show, in order. Worked out when the rows, the
-    /// search, or the sort change, not on every frame.
+    /// search, the filter, or the sort change, not on every frame.
     pub shown: Vec<usize>,
     shown_for: Option<Instant>,
 }
 
 impl Table {
-    /// Call when the search or sort changes.
+    /// Call when the search, filter, or sort changes.
     pub fn invalidate(&mut self) {
         self.shown_for = None;
     }
@@ -354,9 +362,11 @@ impl Table {
         self.shown_for = Some(sampled_at);
 
         let needle = self.search.to_lowercase();
+        let running_only = self.running_only;
         self.shown.clear();
-        self.shown
-            .extend((0..rows.len()).filter(|&i| rows[i].lowercase.contains(&needle)));
+        self.shown.extend((0..rows.len()).filter(|&i| {
+            (!running_only || rows[i].instances > 0) && rows[i].lowercase.contains(&needle)
+        }));
 
         // Stable, and the rows come by name, so ties stay in name order.
         if let Sort::Usage(period) = self.sort {

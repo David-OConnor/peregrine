@@ -287,6 +287,11 @@ pub(super) fn draw(state: &mut State, ui: &mut Ui) {
         }
     }
 
+    state.ui.term_rect = rects
+        .iter()
+        .find(|(p, _)| *p == Pane::Terminal)
+        .map_or(Rect::NOTHING, |(_, r)| *r);
+
     follow_drag(state, ui, &rects);
 }
 
