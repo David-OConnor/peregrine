@@ -105,7 +105,10 @@ pub fn deep_search_results(
     };
 
     ui.horizontal_wrapped(|ui| {
-        let status = if !search.done() {
+        let running = !search.done() && !search.aborted();
+        let status = if search.aborted() {
+            format!("{counts}. Aborted.")
+        } else if running {
             ui.spinner();
             format!("Searching... {counts}")
         } else if search.hits.is_empty() {
@@ -116,6 +119,15 @@ pub fn deep_search_results(
             counts
         };
         ui.label(RichText::new(status).italics().weak());
+
+        if running {
+            let abort =
+                Button::new(RichText::new("Abort").color(ui.visuals().error_fg_color)).small();
+            if ui.add(abort).on_hover_text("Stop searching").clicked() {
+                search.abort();
+                ui.ctx().request_repaint();
+            }
+        }
     });
 
     let incomplete = search.incomplete_files();

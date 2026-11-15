@@ -72,7 +72,7 @@ pub enum Row {
 
 /// A search started by [DeepSearch::start]. It runs on background threads
 /// until [DeepSearch::done]; [DeepSearch::poll] collects what they've found
-/// so far. Dropping it stops them.
+/// so far. [DeepSearch::abort] or dropping it stops them.
 pub struct DeepSearch {
     /// The dir searched.
     pub root: PathBuf,
@@ -152,6 +152,16 @@ impl DeepSearch {
         self.incomplete_files.load(Ordering::Relaxed)
     }
 
+    /// Stop the search, keeping what it's found. It's [Self::done] at the
+    /// next [Self::poll].
+    pub fn abort(&self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+
+    pub fn aborted(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
+    }
+
     /// Take in whatever the search threads have found since the last call.
     pub fn poll(&mut self) {
         let Some(rx) = &self.rx else {
@@ -175,6 +185,12 @@ impl DeepSearch {
                 }
             }
         }
+
+        // Threads still mid-file quit when they next send or check `cancel`.
+        if self.aborted() {
+            self.rx = None;
+        }
+
         if changed {
             self.rows.clear();
             for (i, hit) in self.hits.iter().enumerate() {
