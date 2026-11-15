@@ -1744,6 +1744,26 @@ impl State {
         self.refresh_browser_files();
     }
 
+    /// [Self::add_tab], but never in WSL, for `+`. A dir in a distro, which
+    /// PowerShell can't run in, goes home.
+    pub fn add_native_tab(&mut self) {
+        let i = self.ui.active_tab;
+        let in_distro = wsl::split(self.cwd()).is_some();
+
+        let (cwd, branch) = match &self.home {
+            Some(home) if in_distro => {
+                let _ = env::set_current_dir(home);
+                (home.clone(), tab_branch(home))
+            }
+            _ => (self.cwd().to_path_buf(), self.branch[i].clone()),
+        };
+        let tab = DetachedTab::new(self.cwd.len(), cwd, None);
+        self.insert_tab(tab, branch);
+
+        self.refresh_cwd_history_filter();
+        self.refresh_browser_files();
+    }
+
     /// Put `tab` into the strip at its index (clamped to the end) and make it
     /// the active tab. The caller refreshes whatever follows the cwd.
     fn insert_tab(&mut self, tab: DetachedTab, branch: Option<String>) {

@@ -52,7 +52,7 @@ fn apply(state: &mut State, action: TabAction) {
     let active = state.ui.active_tab;
 
     match action {
-        TabAction::New => state.add_tab(),
+        TabAction::New => state.add_native_tab(),
         TabAction::Close => state.close_tab(active),
         TabAction::Reopen => state.reopen_closed_tab(),
         TabAction::Next => state.select_tab((active + 1) % n),

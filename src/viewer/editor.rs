@@ -199,7 +199,8 @@ impl Editor {
 
     /// Fill the window with egui's native selection, clipboard, navigation,
     /// undo/redo and Tab indentation, with the viewer's gutter and find bar.
-    /// Tab inserts a tab, or 4 spaces if `tab` is [ScratchpadTab::Spaces].
+    /// Tab inserts a tab, or 4 spaces if `tab` is [ScratchpadTab::Spaces];
+    /// over a selection, it indents the selected lines by that.
     /// Ctrl+Y deletes the line, in place of egui's redo. Ctrl+/ comments out
     /// the line, or uncomments it, in source and Markdown.
     pub(super) fn show(
@@ -222,11 +223,27 @@ impl Editor {
             .take_replace(&mut self.text)
             .map(|at| CCursorRange::one(CCursor::new(at)));
         if ctx.memory(|m| m.has_focus(id(doc))) {
-            let (deletes, comments) = ui.input_mut(|i| {
+            let mut range = TextEdit::load_state(&ctx, id(doc))
+                .and_then(|s| s.cursor.char_range())
+                .unwrap_or_default();
+            let (deletes, comments, indents) = ui.input_mut(|i| {
                 for event in &mut i.events {
                     if let Event::Paste(text) = event {
                         *text = text.replace("\r\n", "\n");
                     }
+                }
+                // Before Tab becomes spaces. Unlike `consume_key`, leaves Shift+Tab.
+                let mut indents = 0;
+                if range.primary.index != range.secondary.index {
+                    i.events.retain(|event| {
+                        let tab = matches!(
+                            event,
+                            Event::Key { key: Key::Tab, pressed: true, modifiers, .. }
+                                if modifiers.is_none()
+                        );
+                        indents += usize::from(tab);
+                        !tab
+                    });
                 }
                 if tab == ScratchpadTab::Spaces {
                     scratchpad::tab_to_spaces(&mut i.events);
@@ -234,12 +251,10 @@ impl Editor {
                 (
                     i.count_and_consume_key(Modifiers::COMMAND, Key::Y),
                     i.count_and_consume_key(Modifiers::COMMAND, Key::Slash),
+                    indents,
                 )
             });
-            if deletes + comments > 0 {
-                let mut range = TextEdit::load_state(&ctx, id(doc))
-                    .and_then(|s| s.cursor.char_range())
-                    .unwrap_or_default();
+            if deletes + comments + indents > 0 {
                 for _ in 0..deletes {
                     range = CCursorRange::one(CCursor::new(delete_lines(&mut self.text, range)));
                     select = Some(range);
@@ -251,6 +266,14 @@ impl Editor {
                         range = comment::toggle(&mut self.text, range, comment);
                         select = Some(range);
                     }
+                }
+                let unit = match tab {
+                    ScratchpadTab::Spaces => scratchpad::INDENT,
+                    _ => "\t",
+                };
+                for _ in 0..indents {
+                    range = indent(&mut self.text, range, unit);
+                    select = Some(range);
                 }
             }
         }
@@ -372,6 +395,23 @@ fn delete_lines(text: &mut String, range: CCursorRange) -> usize {
         .unwrap_or(chars.len() - start);
     *text = chars.into_iter().collect();
     start + column.min(len)
+}
+
+/// Tab over a selection, as in JetBrains IDEs: put `unit` before each line
+/// `range` touches, except empty ones, unless all are. Returns the selection
+/// over the same text, taking in the indent at its start.
+fn indent(text: &mut String, range: CCursorRange, unit: &'static str) -> CCursorRange {
+    let lines = comment::lines(text, range);
+    let mut edits: Vec<comment::Edit> = lines
+        .iter()
+        .filter(|(_, line)| !line.is_empty())
+        .map(|&(at, _)| (at, 0, unit))
+        .collect();
+    if edits.is_empty() {
+        edits = lines.iter().map(|&(at, _)| (at, 0, unit)).collect();
+    }
+
+    comment::apply(text, range, &edits)
 }
 
 fn read_complete(path: &Path) -> Result<Vec<u8>, String> {

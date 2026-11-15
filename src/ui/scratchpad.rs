@@ -40,7 +40,7 @@ const FORMATS: [&str; 2] = ["txt", "md"];
 
 /// What Tab inserts, set to [ScratchpadTab::Spaces]. (Shift+Tab, which egui
 /// handles, takes as many off the start of the line.)
-const INDENT: &str = "    ";
+pub(crate) const INDENT: &str = "    ";
 
 /// What Tab can do in the text, with each button's label and hover text. The
 /// viewer's editor offers the first two: its window has no CLI input.

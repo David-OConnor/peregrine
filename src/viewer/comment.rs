@@ -1,5 +1,6 @@
 //! Ctrl+/ in the editor: comment out lines of source, or uncomment them, with
-//! the markers of the file's language (see `syntax::comment`).
+//! the markers of the file's language (see `syntax::comment`). Tab's
+//! indenting shares its line edits.
 
 use std::ops::Range;
 
@@ -17,7 +18,7 @@ pub(super) enum Comment {
 
 /// Text inserted, or removed, at a byte offset: where, how many bytes
 /// removed, and what's inserted in their place.
-type Edit = (usize, usize, &'static str);
+pub(super) type Edit = (usize, usize, &'static str);
 
 /// Ctrl+/, as in VS Code and JetBrains IDEs: comment out the lines `range`
 /// touches, or uncomment them if they all are already. A selection ending at
@@ -26,30 +27,7 @@ type Edit = (usize, usize, &'static str);
 /// they line up. Returns the selection over the same text as before, taking
 /// in the markers at its ends.
 pub(super) fn toggle(text: &mut String, range: CCursorRange, comment: Comment) -> CCursorRange {
-    let byte = |c: CCursor| {
-        text.char_indices()
-            .nth(c.index.0)
-            .map_or(text.len(), |(i, _)| i)
-    };
-    let (primary, secondary) = (byte(range.primary), byte(range.secondary));
-    let (start, end) = (primary.min(secondary), primary.max(secondary));
-    let from = text[..start].rfind('\n').map_or(0, |i| i + 1);
-    let last = if end > start && text[..end].ends_with('\n') {
-        end - 1
-    } else {
-        end
-    };
-    let to = text[last..].find('\n').map_or(text.len(), |i| last + i);
-
-    // Each line, without its newline, and where it starts.
-    let lines: Vec<(usize, &str)> = text[from..to]
-        .split('\n')
-        .scan(from, |offset, line| {
-            let at = *offset;
-            *offset += line.len() + 1;
-            Some((at, line))
-        })
-        .collect();
+    let lines = lines(text, range);
     let mut targets: Vec<_> = lines
         .iter()
         .copied()
@@ -93,10 +71,52 @@ pub(super) fn toggle(text: &mut String, range: CCursorRange, comment: Comment) -
         }
     };
 
+    apply(text, range, &edits)
+}
+
+/// Where `range`'s ends are in `text`, as bytes: primary, then secondary.
+fn bytes(text: &str, range: CCursorRange) -> (usize, usize) {
+    let byte = |c: CCursor| {
+        text.char_indices()
+            .nth(c.index.0)
+            .map_or(text.len(), |(i, _)| i)
+    };
+
+    (byte(range.primary), byte(range.secondary))
+}
+
+/// The lines `range` touches, without their newlines, each with the byte it
+/// starts at. A selection ending at the start of a line leaves that line.
+pub(super) fn lines(text: &str, range: CCursorRange) -> Vec<(usize, &str)> {
+    let (primary, secondary) = bytes(text, range);
+    let (start, end) = (primary.min(secondary), primary.max(secondary));
+    let from = text[..start].rfind('\n').map_or(0, |i| i + 1);
+    let last = if end > start && text[..end].ends_with('\n') {
+        end - 1
+    } else {
+        end
+    };
+    let to = text[last..].find('\n').map_or(text.len(), |i| last + i);
+
+    text[from..to]
+        .split('\n')
+        .scan(from, |offset, line| {
+            let at = *offset;
+            *offset += line.len() + 1;
+            Some((at, line))
+        })
+        .collect()
+}
+
+/// Make `edits`, in order of offset, to `text`. Returns `range` over the same
+/// text as before, taking in what's inserted at its ends.
+pub(super) fn apply(text: &mut String, range: CCursorRange, edits: &[Edit]) -> CCursorRange {
+    let (primary, secondary) = bytes(text, range);
+
     let mut edited =
         String::with_capacity(text.len() + edits.iter().map(|e| e.2.len()).sum::<usize>());
     let mut copied = 0;
-    for &(at, removed, inserted) in &edits {
+    for &(at, removed, inserted) in edits {
         edited.push_str(&text[copied..at]);
         edited.push_str(inserted);
         copied = at + removed;

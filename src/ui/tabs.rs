@@ -517,7 +517,7 @@ pub fn tabs_bar(state: &mut State, ui: &mut Ui) {
     }
 
     if add_new {
-        state.add_tab();
+        state.add_native_tab();
     }
 
     if let Some(distro) = open_wsl {
