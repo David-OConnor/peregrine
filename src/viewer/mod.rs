@@ -45,6 +45,7 @@ use crate::{
 
 mod comment;
 mod editor;
+mod goto;
 mod gutter;
 mod search;
 mod selection;
@@ -234,6 +235,7 @@ struct Doc {
     notice: Option<String>,
     /// Find, for text: the toolbar's second row.
     search: search::Search,
+    goto: goto::GoTo,
     /// Present only in edit mode; automatic reloads leave it alone.
     editor: Option<editor::Editor>,
     /// What Tab inserts in edit mode, picked in the toolbar: a tab, or 4
@@ -307,6 +309,7 @@ impl Doc {
             open: true,
             notice: None,
             search: search::Search::default(),
+            goto: goto::GoTo::default(),
             editor: None,
             tab: ScratchpadTab::Spaces,
             pending: None,
@@ -477,6 +480,24 @@ impl Doc {
                 false
             }
         }
+    }
+
+    /// Ctrl+G's go-to-line box, for text with line numbers: source and plain
+    /// text, or anything in edit mode.
+    fn go_to_line(&mut self, ctx: &Context) {
+        let (text, text_id) = match (&self.editor, &self.content) {
+            (Some(editor), _) => (editor.text(), editor::id(self.id)),
+            (None, Ok(Content::Text(text))) if self.kind != Kind::Markdown => {
+                (text.as_ref(), text_id(self.id))
+            }
+            _ => return,
+        };
+        if self.pending.is_none() {
+            self.goto.keys(ctx);
+        }
+
+        let editing = self.editor.is_some();
+        self.goto.show(ctx, self.id, text, text_id, editing);
     }
 
     fn request(&mut self, ctx: &Context, action: Action) {
@@ -1005,7 +1026,7 @@ impl Inner {
         };
         let title = doc.title();
 
-        if !self.close_pending && doc.pending.is_none() {
+        if !self.close_pending && doc.pending.is_none() && !doc.goto.is_open() {
             self.take_tab_keys(&ctx);
         }
         let clicked = Panel::top(Id::new("viewer_tabs"))
@@ -1065,7 +1086,9 @@ impl Inner {
                 doc.navigate(&ctx, step);
             }
         }
-        if doc.kind != Kind::Image && doc.pending.is_none() {
+        // Before find's keys: it would take the box's Escape.
+        doc.go_to_line(&ctx);
+        if doc.kind != Kind::Image && doc.pending.is_none() && !doc.goto.is_open() {
             doc.search.keys(&ctx, doc.id, doc.editor.is_some());
         }
         doc.receive_image(&ctx);
@@ -1087,7 +1110,7 @@ impl Inner {
             .frame(Frame::central_panel(ui.style()).inner_margin(margin))
             .show(ui, |ui| {
                 if let Some(editor) = &mut doc.editor {
-                    editor.show(ui, doc.kind, doc.tab, &mut doc.search, id);
+                    editor.show(ui, doc.kind, doc.tab, &mut doc.search, &mut doc.goto, id);
                     return;
                 }
                 match &doc.content {
@@ -1152,8 +1175,8 @@ impl Inner {
                             });
                     }
                     Ok(Content::Text(text)) => {
-                        let (kind, lines) = (doc.kind, doc.lines);
-                        show_text(ui, text, kind, lines, &mut doc.layout, &mut doc.search, id);
+                        let text = Arc::clone(text);
+                        show_text(ui, &text, doc);
                     }
                     Ok(Content::Image(picture)) => show_image(ui, picture, &mut doc.zoom, id),
                     Ok(Content::Loading) => {
@@ -1295,21 +1318,26 @@ fn tab_names(docs: &[Doc]) -> Vec<String> {
         .collect()
 }
 
-/// Show source or plain text, its `lines` lines numbered down its left like
-/// an editor's, in the viewer tab with id `doc`, with `search`'s matches
-/// highlighted. Source scrolls sideways; plain text wraps to the window
-/// instead.
-fn show_text(
-    ui: &mut Ui,
-    text: &Arc<str>,
-    kind: Kind,
-    lines: usize,
-    layout: &mut syntax::Source,
-    search: &mut search::Search,
-    doc: Id,
-) {
+/// The read-only text box of source or plain text in the viewer tab `doc`.
+fn text_id(doc: Id) -> Id {
+    Id::new(("viewer_text", doc))
+}
+
+/// Show `text`, `doc`'s source or plain text, its lines numbered down its
+/// left like an editor's, with find's matches highlighted. Source scrolls
+/// sideways; plain text wraps to the window instead.
+fn show_text(ui: &mut Ui, text: &Arc<str>, doc: &mut Doc) {
+    let Doc {
+        id,
+        kind,
+        lines,
+        layout,
+        search,
+        goto,
+        ..
+    } = doc;
     search.find_in_text(ui.ctx(), text);
-    let language = match kind {
+    let language = match *kind {
         Kind::Code(language) => Some(language),
         _ => None,
     };
@@ -1318,11 +1346,11 @@ fn show_text(
         None => ScrollArea::vertical(),
     };
     let space = ui.available_rect_before_wrap();
-    let (gutter, body) = space.split_left_right_at_x(space.left() + gutter::width(ui, lines));
+    let (gutter, body) = space.split_left_right_at_x(space.left() + gutter::width(ui, *lines));
     let output = ui
         .scope_builder(UiBuilder::new().max_rect(body), |ui| {
             scroll
-                .id_salt(("viewer_scroll", doc))
+                .id_salt(("viewer_scroll", *id))
                 .animated(false)
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
@@ -1339,7 +1367,7 @@ fn show_text(
                     // An immutable TextBuffer keeps the current view read-only
                     // while retaining a selection outside the visible rows.
                     let output = TextEdit::multiline(&mut buffer)
-                        .id(Id::new(("viewer_text", doc)))
+                        .id(text_id(*id))
                         .font(TextStyle::Monospace)
                         .cursor_at_end(false)
                         .desired_width(f32::INFINITY)
@@ -1351,6 +1379,7 @@ fn show_text(
                     selection::text(ui, &output.response, language.is_some());
                     let (galley, pos) = (output.galley, output.galley_pos);
                     search.paint_text(ui, &galley, pos, behind);
+                    goto.scroll(ui, &galley, pos);
                     (galley, pos)
                 })
         })

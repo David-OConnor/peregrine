@@ -15,7 +15,7 @@ use egui::{
     text::{CCursor, CCursorRange},
 };
 
-use super::{Kind, MAX_BYTES, comment, gutter, search, selection, syntax};
+use super::{Kind, MAX_BYTES, comment, goto, gutter, search, selection, syntax};
 use crate::ui::{
     line_edit,
     scratchpad::{self, ScratchpadTab},
@@ -148,6 +148,10 @@ impl Editor {
         self.dirty
     }
 
+    pub(super) fn text(&self) -> &str {
+        &self.text
+    }
+
     /// Whether the next Save overwrites another program's change; see [Self::save].
     pub(super) fn conflict(&self) -> bool {
         self.conflict
@@ -209,6 +213,7 @@ impl Editor {
         kind: Kind,
         tab: ScratchpadTab,
         search: &mut search::Search,
+        goto: &mut goto::GoTo,
         doc: Id,
     ) {
         let ctx = ui.ctx().clone();
@@ -340,6 +345,7 @@ impl Editor {
                         }
                         search.find_in_text(ui.ctx(), snapshot);
                         search.paint_text(ui, &output.galley, output.galley_pos, behind);
+                        goto.scroll(ui, &output.galley, output.galley_pos);
                         output
                     })
             })

@@ -192,7 +192,8 @@ On Mac, use **Cmd** in place of **Ctrl**.
 
 - **Ctrl + F**: Find. Focuses the find box, selecting its text
 - **Enter** / **Shift + Enter** (in the find box): Next / previous match
-- **F3** / **Shift + F3**: Next / previous match. Also **Ctrl + G** / **Ctrl + Shift + G**
+- **F3** / **Shift + F3**: Next / previous match. On Mac, also **Cmd + G** / **Cmd + Shift + G**
+- **Ctrl + G**: Go to line. Type `line` or `line:column`, then **Enter**. **Ctrl** on every OS
 - **Alt + C**: Toggle match case. On Mac, **Cmd + Option + C**
 - **Escape** (in the find box): Clear the search
 - **F5**: Reload the file

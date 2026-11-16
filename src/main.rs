@@ -36,7 +36,7 @@ use std::{
     sync::{Arc, LazyLock},
 };
 
-use chrono::Utc;
+use jiff::Timestamp;
 use shell::{HistoryItem, NavState, commands::OutKind, save_data};
 use state::State;
 
@@ -212,7 +212,7 @@ pub fn run_command(state: &mut State, input: &str, ctx: &egui::Context) {
     state.history.push(HistoryItem {
         text: input.to_string(),
         dir: state.cwd().to_path_buf(),
-        dt: Utc::now(),
+        dt: Timestamp::now(),
     });
 
     state.refresh_history_filter();

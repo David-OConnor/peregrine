@@ -384,12 +384,13 @@ impl Search {
                 }
             }
             // Shifted first: an unshifted shortcut matches shifted keys too.
+            // Cmd+G is Mac's only; Ctrl+G is go to line.
             if i.consume_key(Modifiers::SHIFT, Key::F3)
-                || i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::G)
+                || i.consume_key(Modifiers::MAC_CMD | Modifiers::SHIFT, Key::G)
             {
                 self.step(false);
             } else if i.consume_key(Modifiers::NONE, Key::F3)
-                || i.consume_key(Modifiers::COMMAND, Key::G)
+                || i.consume_key(Modifiers::MAC_CMD, Key::G)
             {
                 self.step(true);
             }

@@ -1,6 +1,6 @@
 //! The Settings window, opened from the gear button on the tab strip: path
 //! color depth, and how many characters of each Bookmarks / Recent dirs path
-//! to show.
+//! and Files name to show.
 
 use egui::{Context, DragValue, Grid, Rect, Ui, Window};
 
@@ -8,7 +8,7 @@ use crate::{
     path_color,
     state::State,
     ui::{
-        MAX_FONT_SIZE, MIN_FONT_SIZE,
+        MAX_FILE_NAME_LEN, MAX_FONT_SIZE, MIN_FILE_NAME_LEN, MIN_FONT_SIZE,
         dirs::{MAX_DIR_LABEL_LEN, MIN_DIR_LABEL_LEN},
     },
 };
@@ -71,6 +71,21 @@ fn dir_label_len_control(ui: &mut Ui, len: &mut usize, what: &str) {
     ));
 }
 
+/// A [DragValue] for the Files panel's name length. Updates `len` live,
+/// clamped to [MIN_FILE_NAME_LEN]..=[MAX_FILE_NAME_LEN].
+fn file_name_len_control(ui: &mut Ui, len: &mut usize) {
+    ui.add(
+        DragValue::new(len)
+            .range(MIN_FILE_NAME_LEN..=MAX_FILE_NAME_LEN)
+            .speed(0.25)
+            .update_while_editing(false),
+    )
+    .on_hover_text(
+        "Max characters of file names to show; longer ones are cut in the \
+         middle. Drag, or click to type.",
+    );
+}
+
 pub(super) fn show(state: &mut State, ctx: &Context) {
     if !state.ui.settings {
         return;
@@ -117,10 +132,13 @@ pub(super) fn show(state: &mut State, ctx: &Context) {
                     // Applied every frame so the panels follow a drag live.
                     ui.label("Bookmarks chars:");
                     dir_label_len_control(ui, &mut state.bookmark_label_len, "bookmark");
-                    ui.end_row();
 
                     ui.label("Recent dirs chars:");
                     dir_label_len_control(ui, &mut state.recent_dir_label_len, "recent dir");
+                    ui.end_row();
+
+                    ui.label("File name chars:");
+                    file_name_len_control(ui, &mut state.file_name_len);
                     ui.end_row();
                 });
         });

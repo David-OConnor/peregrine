@@ -5,9 +5,10 @@ use std::{
 };
 
 use egui::{
-    Align, Color32, DragValue, FontData, FontDefinitions, FontFamily, FontId, Layout, Panel, Rect,
-    RichText, ScrollArea, TextFormat, TextStyle, TextWrapMode, Ui, WidgetText, text::LayoutJob,
+    Align, Color32, FontData, FontDefinitions, FontFamily, FontId, Layout, Panel, Rect, RichText,
+    ScrollArea, TextFormat, TextStyle, TextWrapMode, Ui, WidgetText, text::LayoutJob,
 };
+use jiff::ZonedDateTime;
 use shell::DirList;
 
 mod about;
@@ -86,6 +87,12 @@ pub const DEFAULT_GUI_FONT_SIZE: f32 = 11.;
 /// shrunk to an unreadable size or blown up past the window.
 pub const MIN_FONT_SIZE: f32 = 8.;
 pub const MAX_FONT_SIZE: f32 = 22.;
+
+/// Default max characters of a Files-panel name, until set in Settings.
+/// Longer names are cut in the middle. Files columns are sized to fit it.
+pub const DEFAULT_FILE_NAME_LEN: usize = 22;
+pub const MIN_FILE_NAME_LEN: usize = 8;
+pub const MAX_FILE_NAME_LEN: usize = 200;
 
 /// Name of the bold font family registered by [install_fonts]; see
 /// [bold_family].
@@ -509,9 +516,11 @@ fn detail_field(ui: &mut Ui, label: &str, value: WidgetText) {
 
 /// A time as the Files details pane shows it, e.g. `2025-10-15 14:05`.
 fn detail_time(t: SystemTime) -> String {
-    chrono::DateTime::<chrono::Local>::from(t)
-        .format("%Y-%m-%d %H:%M")
-        .to_string()
+    let Ok(t) = ZonedDateTime::try_from(t) else {
+        return "—".to_owned();
+    };
+
+    t.strftime("%Y-%m-%d %H:%M").to_string()
 }
 
 /// Most names [file_details] lists while several rows are selected.

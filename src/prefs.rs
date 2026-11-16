@@ -35,6 +35,7 @@ pub fn save(state: &State, storage: &mut dyn Storage) {
     set_value(storage, "gui_font_size", &state.gui_font_size);
     set_value(storage, "bookmark_label_len", &state.bookmark_label_len);
     set_value(storage, "recent_dir_label_len", &state.recent_dir_label_len);
+    set_value(storage, "file_name_len", &state.file_name_len);
     set_value(storage, "bookmark_names", &state.bookmark_names);
     set_value(storage, "recent_dir_names", &state.recent_dir_names);
     set_value(storage, "bookmark_sort", &state.bookmark_sort);
@@ -76,6 +77,7 @@ pub fn load(state: &mut State, storage: &dyn Storage) {
         "recent_dir_label_len",
         &mut state.recent_dir_label_len,
     );
+    load_into(storage, "file_name_len", &mut state.file_name_len);
     load_into(storage, "bookmark_names", &mut state.bookmark_names);
     load_into(storage, "recent_dir_names", &mut state.recent_dir_names);
     load_into(storage, "bookmark_sort", &mut state.bookmark_sort);

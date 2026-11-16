@@ -942,6 +942,12 @@ fn file_list(state: &mut State, ui: &mut Ui, search_changed: bool, arrow_moved: 
     let icon_slot = file_icons::slot_size(ui);
     let file_icon_id = Id::new("file_icon");
 
+    // A row's width besides its name: the icon, the gap after it, and the
+    // button's padding.
+    let char_width = ui::chars_width(ui, TextStyle::Monospace, 1.);
+    let row_extra = icon_slot.x + ui.spacing().icon_spacing + 2. * ui.spacing().button_padding.x;
+    let name_len = state.file_name_len;
+
     let columns = ScrollArea::vertical()
         .id_salt("file_browser_scroll")
         .auto_shrink([false, false])
@@ -1012,11 +1018,15 @@ fn file_list(state: &mut State, ui: &mut Ui, search_changed: bool, arrow_moved: 
                 } else {
                     Atom::custom(file_icon_id, icon_slot)
                 };
-                let name = text(&f.disp_name).atom_shrink(true);
+                // Cut in the middle to the set length, or to what fits in a
+                // narrower column.
+                let fits = ((ui.available_width() - row_extra) / char_width).max(0.) as usize;
+                let name = text(&truncate_middle(&f.disp_name, name_len.min(fits)));
+                let name = name.atom_shrink(true);
 
                 // Full width so the whole row is clickable and the selection
-                // highlight spans the column. Long names are truncated; the
-                // details pane shows the full name.
+                // highlight spans the column. The details pane shows the full
+                // name.
                 let mut row = Button::selectable(is_selected, (icon, name))
                     .truncate()
                     .sense(Sense::click_and_drag())
@@ -1043,10 +1053,9 @@ fn file_list(state: &mut State, ui: &mut Ui, search_changed: bool, arrow_moved: 
                 }
             };
 
-            // As many columns as fit FILES_COL_MIN_CHARS characters each,
-            // filled down like `ls`, so the folders stay together at the top
-            // left.
-            let min_width = ui::chars_width(ui, TextStyle::Monospace, FILES_COL_MIN_CHARS);
+            // As many columns as fit a name of the set length each, filled
+            // down like `ls`, so the folders stay together at the top left.
+            let min_width = name_len as f32 * char_width + row_extra;
             ui::list_columns(ui, &state.ui.browser_files_filter, min_width, row)
         })
         .inner;
@@ -1684,7 +1693,25 @@ pub const COLOR_EXECUTABLE: Color32 = Color32::from_rgb(120, 220, 120);
 /// a light background so it stays readable.
 const CURRENT_SHORTCUT_DARK: Color32 = Color32::from_rgb(60, 255, 60);
 const CURRENT_SHORTCUT_LIGHT: Color32 = Color32::from_rgb(0, 160, 0);
-/// The Files list splits into as many columns as fit at least this many
-/// monospace characters each (so the threshold follows the GUI font size).
-/// See [ui::file_browser] and [ui::list_columns].
-const FILES_COL_MIN_CHARS: f32 = 26.;
+
+/// `name` cut to at most `max` chars by replacing its middle with `…`, so the
+/// start and the end (with any extension) still show.
+fn truncate_middle(name: &str, max: usize) -> String {
+    let chars: Vec<char> = name.chars().collect();
+    if chars.len() <= max {
+        return name.to_owned();
+    }
+    if max == 0 {
+        return String::new();
+    }
+
+    let keep = max - 1;
+    let tail = keep / 2;
+    let head = keep - tail;
+
+    chars[..head]
+        .iter()
+        .chain(&['…'])
+        .chain(&chars[chars.len() - tail..])
+        .collect()
+}

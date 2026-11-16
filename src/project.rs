@@ -10,6 +10,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use jiff::Timestamp;
 use shell::{quiet_command, venv_python};
 
 /// Entry-point names Python's Run looks for, in this order, matched without
@@ -365,7 +366,7 @@ fn loose_refs(dir: &Path, within: &str, names: &mut Vec<String>) {
 /// last [RECENT_BRANCH_DAYS] days, most recent first: by the last entry in
 /// each one's reflog, and the checkouts in `HEAD`'s.
 fn recent_branches(repo: &GitDirs, local: &[String]) -> Vec<String> {
-    let now = chrono::Utc::now().timestamp();
+    let now = Timestamp::now().as_second();
     let since = now - RECENT_BRANCH_DAYS * 24 * 60 * 60;
 
     let logs = repo.common.join("logs").join("refs").join("heads");

@@ -13,6 +13,11 @@ use std::{
 };
 
 use ignore::{WalkBuilder, WalkState};
+use jiff::{
+    ZonedDateTime,
+    civil::DateTime,
+    tz::{AmbiguousOffset, TimeZone},
+};
 use shell::BrowserFile;
 
 /// A confirmed deletion, moving items to the OS trash on a worker thread.
@@ -195,10 +200,23 @@ fn extract_zip(archive: &Path) -> Result<PathBuf, String> {
 
 /// `t`, a time as zip stores it, in this time zone.
 fn local_time(t: zip::DateTime) -> Option<SystemTime> {
-    let date = chrono::NaiveDate::from_ymd_opt(t.year().into(), t.month().into(), t.day().into())?;
-    let time = date.and_hms_opt(t.hour().into(), t.minute().into(), t.second().into())?;
+    let time = DateTime::new(
+        t.year() as i16,
+        t.month() as i8,
+        t.day() as i8,
+        t.hour() as i8,
+        t.minute() as i8,
+        t.second() as i8,
+        0,
+    )
+    .ok()?;
 
-    Some(time.and_local_timezone(chrono::Local).earliest()?.into())
+    let time = TimeZone::system().to_ambiguous_timestamp(time);
+    if matches!(time.offset(), AmbiguousOffset::Gap { .. }) {
+        return None;
+    }
+
+    time.earlier().ok()?.try_into().ok()
 }
 
 /// Write `srcs` and everything in them to a new zip archive at `archive`,
@@ -283,12 +301,14 @@ fn add_to_zip<W: io::Write + io::Seek>(
 /// `md`'s modified time, as zip stores it: local time, 1980 to 2107. Out of
 /// that range, the start of 1980.
 fn zip_time(md: &fs::Metadata) -> zip::DateTime {
-    use chrono::{Datelike, Timelike};
-
-    let Ok(t) = md.modified() else {
+    let Some(t) = md
+        .modified()
+        .ok()
+        .and_then(|t| ZonedDateTime::try_from(t).ok())
+    else {
         return zip::DateTime::default();
     };
-    let t = chrono::DateTime::<chrono::Local>::from(t);
+
     let Ok(year) = u16::try_from(t.year()) else {
         return zip::DateTime::default();
     };

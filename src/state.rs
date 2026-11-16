@@ -10,7 +10,7 @@ use std::{
     time::SystemTime,
 };
 
-use chrono::Utc;
+use jiff::Timestamp;
 use shell::{
     BrowserFile, CompletionSources, DirList, HintCache, HistoryItem, InputHint, NavState, OpenTabs,
     RecentDir, RemoteTerminal, apply_completion, complete_input, current_branch, dir_missing,
@@ -535,6 +535,9 @@ pub struct State {
     /// alongside the font sizes. Longer paths are truncated from the front.
     pub bookmark_label_len: usize,
     pub recent_dir_label_len: usize,
+    /// Max displayed Files-panel name length (in characters), set in
+    /// Settings. Longer names are cut in the middle.
+    pub file_name_len: usize,
     /// Whether the Bookmarks and Recent dirs panels show just each dir's
     /// final name ("Names") rather than its path ("Paths"). Persisted with the
     /// path lengths.
@@ -611,6 +614,7 @@ impl Default for State {
             gui_font_size: ui::DEFAULT_GUI_FONT_SIZE,
             bookmark_label_len: ui::dirs::DEFAULT_DIR_LABEL_LEN,
             recent_dir_label_len: ui::dirs::DEFAULT_DIR_LABEL_LEN,
+            file_name_len: ui::DEFAULT_FILE_NAME_LEN,
             bookmark_names: true,
             recent_dir_names: true,
             bookmark_sort: ui::dirs::DEFAULT_BOOKMARK_SORT,
@@ -1686,6 +1690,7 @@ impl State {
             gui_font_size: ui::DEFAULT_GUI_FONT_SIZE,
             bookmark_label_len: ui::dirs::DEFAULT_DIR_LABEL_LEN,
             recent_dir_label_len: ui::dirs::DEFAULT_DIR_LABEL_LEN,
+            file_name_len: ui::DEFAULT_FILE_NAME_LEN,
             bookmark_names: true,
             recent_dir_names: true,
             bookmark_sort: ui::dirs::DEFAULT_BOOKMARK_SORT,
@@ -2062,7 +2067,7 @@ impl State {
         self.recent_dirs.retain(|r| r.path != dir);
         self.recent_dirs.push(RecentDir {
             path: dir.to_path_buf(),
-            dt: Utc::now(),
+            dt: Timestamp::now(),
         });
         self.refresh_recent_dirs_filter();
     }

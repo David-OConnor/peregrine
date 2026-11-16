@@ -7,11 +7,11 @@ use std::{
     path::{MAIN_SEPARATOR, Path, PathBuf},
 };
 
-use chrono::{DateTime, Local, Utc};
 use egui::{
     Align, Button, Color32, Event, Frame, Layout, RichText, ScrollArea, Stroke, TextEdit,
     TextWrapMode, Ui,
 };
+use jiff::{Timestamp, ZonedDateTime, tz::TimeZone};
 
 use crate::{
     OutType,
@@ -29,12 +29,14 @@ const SYS_COLOR_LIGHT: Color32 = Color32::from_rgb(20, 150, 50);
 
 /// When an entry was copied, in local time: "14:05" today, "10/14 14:05"
 /// before.
-fn added_label(added: &DateTime<Local>) -> String {
-    if added.date_naive() == Local::now().date_naive() {
-        added.format("%H:%M").to_string()
+fn added_label(added: &ZonedDateTime) -> String {
+    let format = if added.date() == ZonedDateTime::now().date() {
+        "%H:%M"
     } else {
-        added.format("%m/%d %H:%M").to_string()
-    }
+        "%m/%d %H:%M"
+    };
+
+    added.strftime(format).to_string()
 }
 
 /// `path` as just its dir's name and its own: "Downloads\a.txt".
@@ -70,13 +72,14 @@ fn text_paths(text: &str) -> Option<Vec<&Path>> {
 
 /// An entry's first row: "Text 14:05 · 12 characters", with `sys` (its
 /// color) at the right if it's on the system clipboard.
-fn title_row(ui: &mut Ui, kind: &str, detail: &str, added: &DateTime<Utc>, sys: Option<Color32>) {
-    let added = added.with_timezone(&Local);
+fn title_row(ui: &mut Ui, kind: &str, detail: &str, added: Timestamp, sys: Option<Color32>) {
+    let added = added.to_zoned_datetime(TimeZone::system());
+
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 5.0;
         ui.strong(kind);
         ui.label(RichText::new(added_label(&added)).weak())
-            .on_hover_text(added.format("Copied %Y-%m-%d %H:%M:%S").to_string());
+            .on_hover_text(added.strftime("Copied %Y-%m-%d %H:%M:%S").to_string());
         ui.strong(format!("· {detail}"));
         if let Some(color) = sys {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -372,7 +375,7 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
                         .show(ui, |ui| {
                             ui.set_min_width(ui.available_width());
                             let sys = on_sys.then_some(sys_color);
-                            title_row(ui, kind, &detail, &history_entry.added, sys);
+                            title_row(ui, kind, &detail, history_entry.added, sys);
                             let mut preview: String = shown.chars().take(240).collect();
                             let truncated = shown.chars().count() > 240;
                             if truncated {

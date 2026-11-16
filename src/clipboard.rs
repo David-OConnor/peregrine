@@ -23,7 +23,7 @@ use std::{
     time::Duration,
 };
 
-use chrono::Utc;
+use jiff::Timestamp;
 /// One copy operation, and a history entry: it, and when it was last put on
 /// the clipboard. Copying it again moves the entry to the top with a new
 /// time. They live in `shell` so the state file can hold the history.
@@ -70,7 +70,7 @@ impl History {
             0,
             Entry {
                 content,
-                added: Utc::now(),
+                added: Timestamp::now(),
             },
         );
         self.entries.truncate(Self::LIMIT);

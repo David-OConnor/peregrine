@@ -18,7 +18,6 @@ use shell::DirList;
 use crate::{
     render_with_tilde,
     state::{self, State},
-    ui,
     ui::{dirs, dirs::cleanup_missing_button, project_bar, tab_keys},
     wsl::{self, Here},
 };
@@ -303,9 +302,6 @@ pub fn tabs_bar(state: &mut State, ui: &mut Ui) {
         .map(|(i, r)| (i, r.host.clone()))
         .collect();
 
-    let font_size = state.font_size;
-    let gui_font_size = state.gui_font_size;
-
     let mut to_select: Option<usize> = None;
     let mut to_close: Option<usize> = None;
     // A tab dropped after dragging, and the index it lands at.
@@ -314,8 +310,6 @@ pub fn tabs_bar(state: &mut State, ui: &mut Ui) {
     let mut connect_remote: Option<usize> = None;
     let wsl_opening = state.wsl_opening.is_some();
     let mut open_wsl: Option<String> = None;
-    let mut font_delta = 0.;
-    let mut gui_font_delta = 0.;
     let mut set_dark = None;
     let mut project_bar_fits = true;
 
@@ -478,14 +472,6 @@ pub fn tabs_bar(state: &mut State, ui: &mut Ui) {
     // egui saves the choice, with its memory.
     if let Some(dark) = set_dark {
         ui.ctx().set_theme(state::theme(dark));
-    }
-
-    if font_delta != 0.0 {
-        state.adjust_font_size(font_delta);
-    }
-
-    if gui_font_delta != 0.0 {
-        state.adjust_gui_font_size(gui_font_delta);
     }
 
     if let Some(i) = to_select {
