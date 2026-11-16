@@ -352,21 +352,7 @@ pub fn tabs_bar(state: &mut State, ui: &mut Ui) {
         }
 
         ui.separator();
-        // Font-size controls sit to the left of the tab strip: one for the
-        // terminal panes, one for the side panels.
 
-        let label = ui.label("CLI font:");
-        let (delta, rect) = ui::font_size_control(ui, font_size);
-        font_delta = delta;
-        // Ctrl+scroll over it steps the terminal's font, not the GUI's.
-        state.ui.cli_font_rect = label.rect.union(rect);
-        ui.separator();
-
-        ui.label("GUI font:");
-        gui_font_delta = ui::font_size_control(ui, gui_font_size).0;
-
-        ui.separator();
-        // Breathing room either side of the tab section.
         ui.add_space(TAB_SECTION_PADDING);
 
         // The tabs and `+ tab` sit on a background of their own, setting them

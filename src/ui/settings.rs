@@ -2,12 +2,15 @@
 //! color depth, and how many characters of each Bookmarks / Recent dirs path
 //! to show.
 
-use egui::{Context, DragValue, Grid, Ui, Window};
+use egui::{Context, DragValue, Grid, Rect, Ui, Window};
 
 use crate::{
     path_color,
     state::State,
-    ui::dirs::{MAX_DIR_LABEL_LEN, MIN_DIR_LABEL_LEN},
+    ui::{
+        MAX_FONT_SIZE, MIN_FONT_SIZE,
+        dirs::{MAX_DIR_LABEL_LEN, MIN_DIR_LABEL_LEN},
+    },
 };
 
 /// A [DragValue] for [path_color::depth_levels]. Returns the change to apply.
@@ -27,6 +30,29 @@ fn dir_depth_control(ui: &mut Ui) -> i32 {
         );
 
     if response.changed() { val - levels } else { 0 }
+}
+
+/// Returns the requested change in font size, or zero when unchanged, and
+/// where the control was drawn.
+fn font_size_control(ui: &mut Ui, size: f32) -> (f32, Rect) {
+    let mut val = size.round() as i32;
+
+    let response = ui
+        .add(
+            DragValue::new(&mut val)
+                .range(MIN_FONT_SIZE..=MAX_FONT_SIZE)
+                .speed(0.25)
+                .update_while_editing(false),
+        )
+        .on_hover_text("Increase or decrease font size. Drag, click to type, or Ctrl+scroll.");
+
+    let delta = if response.changed() {
+        val as f32 - size
+    } else {
+        0.
+    };
+
+    (delta, response.rect)
 }
 
 /// A [DragValue] for a Bookmarks / Recent dirs path length. Updates `len`
@@ -65,6 +91,23 @@ pub(super) fn show(state: &mut State, ctx: &Context) {
                 .num_columns(2)
                 .spacing([12., 6.])
                 .show(ui, |ui| {
+                    let label = ui.label("CLI font:");
+                    let (delta, rect) = font_size_control(ui, state.font_size);
+                    let cli_font_delta = delta;
+                    // Ctrl+scroll over it steps the terminal's font, not the GUI's.
+                    state.ui.cli_font_rect = label.rect.union(rect);
+
+                    ui.label("GUI font:");
+                    let gui_font_delta = font_size_control(ui, state.gui_font_size).0;
+
+                    if cli_font_delta != 0.0 {
+                        state.adjust_font_size(cli_font_delta);
+                    }
+
+                    if gui_font_delta != 0.0 {
+                        state.adjust_gui_font_size(gui_font_delta);
+                    }
+
                     // How deep a directory is when its color reaches yellow
                     // (see [path_color::depth_levels]).
                     ui.label("Dir color depth:");

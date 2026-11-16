@@ -717,29 +717,6 @@ fn panel_toggles(state: &mut State, ui: &mut Ui) {
     });
 }
 
-/// Returns the requested change in font size, or zero when unchanged, and
-/// where the control was drawn.
-fn font_size_control(ui: &mut Ui, size: f32) -> (f32, Rect) {
-    let mut val = size.round() as i32;
-
-    let response = ui
-        .add(
-            DragValue::new(&mut val)
-                .range(MIN_FONT_SIZE..=MAX_FONT_SIZE)
-                .speed(0.25)
-                .update_while_editing(false),
-        )
-        .on_hover_text("Increase or decrease font size. Drag, click to type, or Ctrl+scroll.");
-
-    let delta = if response.changed() {
-        val as f32 - size
-    } else {
-        0.
-    };
-
-    (delta, response.rect)
-}
-
 /// Cap a resizable side panel so the central output/input column keeps at
 /// least [MIN_CENTRAL_WIDTH] points. `ui` is queried for the width still
 /// available at the point the panel is about to be added (egui lays panels out
