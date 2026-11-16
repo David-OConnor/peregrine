@@ -52,7 +52,7 @@ mod syntax;
 
 /// Extensions (lowercase) of plain-text files. A `.lock` file that `syntax`
 /// recognizes by name is highlighted instead.
-const TEXT_EXTENSIONS: [&str; 2] = ["txt", "lock"];
+const TEXT_EXTENSIONS: [&str; 4] = ["txt", "log", "dat", "lock"];
 /// Names (lowercase) of plain-text files that have no extension, or none as
 /// far as `Path::extension` is concerned: a leading dot starts the name.
 const TEXT_FILE_NAMES: [&str; 3] = [".gitignore", ".gitattributes", "license"];
