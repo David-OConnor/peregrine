@@ -1,10 +1,14 @@
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use eframe::epaint::text::cursor::CCursor;
 use egui::{
     Align, Area, Atom, AtomExt, Button, Color32, DragAndDrop, Event, Frame, Id, Key,
-    KeyboardShortcut, Layout, Modal, Modifiers, Panel, Response, RichText, ScrollArea, Sense,
-    Stroke, StrokeKind, TextEdit, TextStyle, Ui, text::CCursorRange,
+    KeyboardShortcut, Layout, Modal, Modifiers, Panel, PointerButton, Popup, PopupKind, Pos2, Rect,
+    Response, RichText, ScrollArea, Sense, Stroke, StrokeKind, TextEdit, TextStyle, Ui,
+    text::CCursorRange,
 };
 
 use crate::{
@@ -22,6 +26,12 @@ use crate::{
     },
     viewer,
 };
+
+/// New folder, while the listing has the keyboard. Cmd+Option+N on Mac.
+/// (Ctrl+Shift+N, Explorer's, focuses Deep search instead: see
+/// [search::FOCUS_DEEP_SEARCH].)
+const NEW_FOLDER: KeyboardShortcut =
+    KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::ALT), Key::N);
 
 /// Primary component for the file browser pane.
 pub(super) fn draw(state: &mut State, ui: &mut Ui) {
@@ -376,9 +386,7 @@ pub(super) fn draw(state: &mut State, ui: &mut Ui) {
     let (mut cut, mut copy, mut paste, mut unselect) = (false, false, false, false);
     let mut new_file = false;
 
-    // Explorer's shortcut for it.
-    let mut new_folder = list_has_keys
-        && ui.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::N));
+    let mut new_folder = list_has_keys && ui.input_mut(|i| i.consume_shortcut(&NEW_FOLDER));
     let mut delete = list_has_keys
         && has_sel
         && !busy
@@ -420,9 +428,12 @@ pub(super) fn draw(state: &mut State, ui: &mut Ui) {
 
         ui.separator();
 
+        let new_folder_keys = ui.ctx().format_shortcut(&NEW_FOLDER);
         new_folder |= ui
             .button("+📁")
-            .on_hover_text("New folder, named in a box above the listing (Ctrl+Shift+N)")
+            .on_hover_text(format!(
+                "New folder, named in a box above the listing ({new_folder_keys})"
+            ))
             .clicked();
 
         new_file = ui
@@ -660,7 +671,11 @@ pub(super) fn draw(state: &mut State, ui: &mut Ui) {
 
     // After the list, so the divider is on top of it for the pointer.
     divider.end(ui, details.response.rect, &mut state.ui.files_details_split);
+}
 
+/// Run after all panels have had a chance to accept a file drag.
+pub(super) fn handle_drag(state: &mut State, ui: &Ui) {
+    finish_saved_dir_drop(state, ui);
     drag_preview(ui);
     drag_out(state, ui);
 }
@@ -1107,6 +1122,7 @@ pub(super) fn row_action(
     is_folder: bool,
     only_selected: bool,
 ) -> Option<RowAction> {
+    remember_drag_press(ui, resp, path);
     if is_folder && let Some(drop) = drop_target(ui, resp, path) {
         return Some(RowAction::Drop(drop));
     }
@@ -1189,8 +1205,7 @@ pub(super) enum MenuItem {
 /// As in a file manager, only a row's menu acts on the selection, and the
 /// file items at its top, on that row.
 fn context_menu(ui: &Ui, resp: &Response, row: Option<(&Path, bool)>) -> Option<MenuItem> {
-    let new_folder_keys = KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::N);
-    let new_folder_keys = ui.ctx().format_shortcut(&new_folder_keys);
+    let new_folder_keys = ui.ctx().format_shortcut(&NEW_FOLDER);
     let mut picked = None;
 
     resp.context_menu(|ui| {
@@ -1317,19 +1332,12 @@ pub(super) fn apply_row_action(state: &mut State, ui: &Ui, action: Option<RowAct
             ui.ctx().request_repaint();
         }
         RowAction::Drag(p) => {
-            // An unselected row is selected first, as in a file manager: on
-            // its own, or with Ctrl, along with the rest.
-            if !state.selection.paths.contains(&p) {
-                if ui.input(|i| i.modifiers.command) {
-                    state.toggle_file(&p);
-                } else {
-                    state.select_file(&p);
-                }
-            }
-            state.ui.rename_pending = None;
-            let paths = state.selected_paths();
-            if !paths.is_empty() {
-                DragAndDrop::set_payload(ui.ctx(), FileDrag(paths));
+            let (path, extend_selection) = take_drag_press(ui).map_or_else(
+                || (p, ui.input(|i| i.modifiers.command)),
+                |press| (press.path, press.extend_selection),
+            );
+            if let Some(files) = files_to_drag(state, &path, extend_selection) {
+                DragAndDrop::set_payload(ui.ctx(), files);
             }
         }
         RowAction::Drop(d) => state.drop_files(&d.srcs, &d.dest, d.copy, ui.ctx()),
@@ -1338,6 +1346,105 @@ pub(super) fn apply_row_action(state: &mut State, ui: &Ui, action: Option<RowAct
 
 /// The drag-and-drop payload while Files rows are dragged: their paths.
 struct FileDrag(Vec<PathBuf>);
+
+/// The file under the primary press, in case egui receives the first
+/// movement and the release in the same pass and never starts a drag.
+#[derive(Clone)]
+struct FileDragPress {
+    path: PathBuf,
+    position: Pos2,
+    extend_selection: bool,
+}
+
+fn file_drag_press_id() -> Id {
+    Id::new("files_drag_press")
+}
+
+fn primary_pointer_event(ui: &Ui, pressed: bool) -> Option<(Pos2, Modifiers)> {
+    ui.input(|i| {
+        if !i.focused {
+            return None;
+        }
+        i.events.iter().rev().find_map(|event| match event {
+            Event::PointerButton {
+                pos,
+                button: PointerButton::Primary,
+                pressed: is_press,
+                modifiers,
+            } if *is_press == pressed => Some((*pos, *modifiers)),
+            _ => None,
+        })
+    })
+}
+
+pub(super) fn prepare_drag(ui: &Ui) {
+    if ui.input(|i| {
+        i.pointer.primary_pressed()
+            || !i.focused
+            || i.raw.events.iter().any(|event| {
+                matches!(
+                    event,
+                    Event::Key {
+                        key: Key::Escape,
+                        pressed: true,
+                        ..
+                    }
+                )
+            })
+    }) {
+        ui.data_mut(|d| d.remove::<FileDragPress>(file_drag_press_id()));
+    }
+}
+
+fn point_on_row(ui: &Ui, rect: Rect, pos: Pos2) -> bool {
+    let layer = ui.layer_id();
+    ui.is_enabled()
+        && rect.intersect(ui.clip_rect()).contains(pos)
+        && ui.ctx().layer_id_at(pos) == Some(layer)
+        && ui.memory(|m| m.allows_interaction(layer))
+}
+
+fn remember_drag_press(ui: &Ui, resp: &Response, path: &Path) {
+    if let Some((position, modifiers)) = primary_pointer_event(ui, true)
+        && resp.enabled()
+        && point_on_row(ui, resp.interact_rect, position)
+    {
+        ui.data_mut(|d| {
+            d.insert_temp(
+                file_drag_press_id(),
+                FileDragPress {
+                    path: path.to_path_buf(),
+                    position,
+                    extend_selection: modifiers.command,
+                },
+            );
+        });
+    }
+}
+
+fn take_drag_press(ui: &Ui) -> Option<FileDragPress> {
+    ui.data_mut(|d| {
+        let press = d.get_temp::<FileDragPress>(file_drag_press_id());
+        d.remove::<FileDragPress>(file_drag_press_id());
+        press
+    })
+}
+
+fn files_to_drag(state: &mut State, path: &Path, extend_selection: bool) -> Option<FileDrag> {
+    if !state.shown_files().contains(&path) {
+        return None;
+    }
+    if !state.selection.paths.contains(path) {
+        if extend_selection {
+            state.toggle_file(path);
+        } else {
+            state.select_file(path);
+        }
+    }
+    state.ui.rename_pending = None;
+    let paths = state.selected_paths();
+    (!paths.is_empty()).then_some(FileDrag(paths))
+}
 
 /// Files rows let go of over a folder (see [drop_target]).
 pub(super) struct FileDrop {
@@ -1353,9 +1460,22 @@ pub(super) struct FileDrop {
 struct DropHover {
     /// The folder's name.
     name: String,
-    copy: bool,
-    /// `false` when it's one of them, or inside one.
-    ok: bool,
+    /// `None` when the destination is one of the dragged paths or inside one.
+    action: Option<DropAction>,
+}
+
+#[derive(Clone, Copy)]
+enum DropAction {
+    Copy,
+    Move,
+    Choose,
+}
+
+#[derive(Clone)]
+struct PendingDrop {
+    files: Arc<FileDrag>,
+    dest: PathBuf,
+    position: Pos2,
 }
 
 fn drop_hover_id() -> Id {
@@ -1369,9 +1489,15 @@ fn drop_hover_id() -> Id {
 /// copied when it's on another drive; Ctrl (Option on a Mac) copies anyway,
 /// and Shift (Cmd) moves anyway.
 pub(super) fn drop_target(ui: &Ui, resp: &Response, dest: &Path) -> Option<FileDrop> {
-    let drag = resp.dnd_hover_payload::<FileDrag>()?;
-    // Not into itself, or one of the folders being dragged.
-    let ok = !drag.0.iter().any(|src| dest.starts_with(src));
+    let drag = DragAndDrop::payload::<FileDrag>(ui.ctx())?;
+    let release = primary_pointer_event(ui, false);
+    let over_target = match release {
+        Some((pos, _)) => point_on_row(ui, resp.interact_rect, pos),
+        None => resp.contains_pointer(),
+    };
+    if !over_target {
+        return None;
+    }
     let m = ui.input(|i| i.modifiers);
     let mac = ui.ctx().os() == egui::os::OperatingSystem::Mac;
     let (copy_key, move_key) = if mac {
@@ -1385,29 +1511,145 @@ pub(super) fn drop_target(ui: &Ui, resp: &Response, dest: &Path) -> Option<FileD
                 .0
                 .first()
                 .is_some_and(|src| !files::same_volume(src, dest)));
+    let action = if copy {
+        DropAction::Copy
+    } else {
+        DropAction::Move
+    };
+    if !highlight_drop_target(ui, resp.rect, dest, &drag, action) {
+        return None;
+    }
+    release?;
+    let drag = DragAndDrop::take_payload::<FileDrag>(ui.ctx())?;
+    Some(FileDrop {
+        srcs: drag.0.clone(),
+        dest: dest.to_path_buf(),
+        copy,
+    })
+}
+
+/// Highlight a file drop target if the dragged paths can go there.
+fn highlight_drop_target(
+    ui: &Ui,
+    rect: Rect,
+    dest: &Path,
+    drag: &FileDrag,
+    action: DropAction,
+) -> bool {
+    let ok = !drag.0.iter().any(|src| dest.starts_with(src));
     let name = dest.file_name().map_or_else(
         || dest.display().to_string(),
         |n| n.to_string_lossy().into_owned(),
     );
 
-    ui.ctx()
-        .data_mut(|d| d.insert_temp(drop_hover_id(), DropHover { name, copy, ok }));
+    ui.data_mut(|d| {
+        d.insert_temp(
+            drop_hover_id(),
+            DropHover {
+                name,
+                action: ok.then_some(action),
+            },
+        );
+    });
     if !ok {
-        return None;
+        return false;
     }
 
     let visuals = ui.visuals();
     let stroke = Stroke::new(2.0, visuals.widgets.active.fg_stroke.color);
     let radius = visuals.widgets.hovered.corner_radius;
     ui.painter()
-        .rect_stroke(resp.rect, radius, stroke, StrokeKind::Inside);
+        .rect_stroke(rect, radius, stroke, StrokeKind::Inside);
 
-    let drag = resp.dnd_release_payload::<FileDrag>()?;
-    Some(FileDrop {
-        srcs: drag.0.clone(),
-        dest: dest.to_path_buf(),
-        copy,
-    })
+    true
+}
+
+fn drop_menu_id() -> Id {
+    Id::new("files_drop_menu")
+}
+
+fn saved_dir_release_id() -> Id {
+    Id::new("files_saved_dir_release")
+}
+
+/// Record the destination under the release event. The Files pane may be
+/// laid out after this row, so resolve the source after drawing both panes.
+pub(super) fn saved_dir_drop_target(ui: &Ui, rect: Rect, dest: &Path) {
+    if let Some((position, _)) = primary_pointer_event(ui, false) {
+        if point_on_row(ui, rect, position) {
+            ui.data_mut(|d| d.insert_temp(saved_dir_release_id(), dest.to_path_buf()));
+        }
+    } else if let Some(drag) = DragAndDrop::payload::<FileDrag>(ui.ctx())
+        && ui.rect_contains_pointer(rect)
+    {
+        highlight_drop_target(ui, rect, dest, &drag, DropAction::Choose);
+    }
+}
+
+fn finish_saved_dir_drop(state: &mut State, ui: &Ui) {
+    let Some((position, _)) = primary_pointer_event(ui, false) else {
+        return;
+    };
+    let dest = ui.data_mut(|d| d.remove_temp::<PathBuf>(saved_dir_release_id()));
+    let press = take_drag_press(ui);
+    let Some(dest) = dest else {
+        return;
+    };
+    let ctx = ui.ctx();
+    let files = if DragAndDrop::has_payload_of_type::<FileDrag>(ctx) {
+        DragAndDrop::take_payload::<FileDrag>(ctx)
+    } else {
+        let threshold = ctx.options(|o| o.input_options.max_click_dist);
+        press
+            .filter(|p| p.position.distance(position) > threshold)
+            .and_then(|p| files_to_drag(state, &p.path, p.extend_selection))
+            .map(Arc::new)
+    };
+    if let Some(files) = files
+        && !files.0.iter().any(|src| dest.starts_with(src))
+    {
+        ui.data_mut(|d| {
+            d.insert_temp(
+                drop_menu_id(),
+                PendingDrop {
+                    files,
+                    dest,
+                    position,
+                },
+            );
+        });
+        Popup::open_id(ctx, drop_menu_id());
+    }
+}
+
+pub(super) fn drop_menu(state: &mut State, ui: &Ui) {
+    let id = drop_menu_id();
+    let Some(drop) = ui.data(|d| d.get_temp::<PendingDrop>(id)) else {
+        return;
+    };
+    let ctx = ui.ctx();
+    let choice = Popup::new(id, ctx.clone(), drop.position, ui.layer_id())
+        .open_memory(None)
+        .kind(PopupKind::Menu)
+        .layout(Layout::top_down_justified(Align::Min))
+        .style(egui::menu::menu_style)
+        .show(|ui| {
+            let mut choice = None;
+            for (label, copy) in [("Copy", Some(true)), ("Cut", Some(false)), ("Cancel", None)] {
+                if ui.button(label).clicked() {
+                    choice = copy;
+                    ui.close();
+                }
+            }
+            choice
+        })
+        .and_then(|r| r.inner);
+    if !Popup::is_id_open(ctx, id) {
+        ui.data_mut(|d| d.remove::<PendingDrop>(id));
+        if let Some(copy) = choice {
+            state.drop_files(&drop.files.0, &drop.dest, copy, ctx);
+        }
+    }
 }
 
 /// While Files rows are dragged: a note by the pointer of what letting go
@@ -1437,20 +1679,26 @@ fn drag_preview(ui: &Ui) {
     };
 
     let text = match hover {
-        Some(h) if h.ok => {
-            let verb = if h.copy { "Copy" } else { "Move" };
-            let icon = if h.copy {
-                egui::CursorIcon::Copy
-            } else {
-                egui::CursorIcon::Grabbing
-            };
-
-            ctx.set_cursor_icon(icon);
-            format!("{verb} {what} to {}", h.name)
-        }
         Some(h) => {
-            ctx.set_cursor_icon(egui::CursorIcon::NoDrop);
-            format!("Can't move {} into itself", h.name)
+            let (icon, text) = match h.action {
+                Some(DropAction::Copy) => {
+                    (egui::CursorIcon::Copy, format!("Copy {what} to {}", h.name))
+                }
+                Some(DropAction::Move) => (
+                    egui::CursorIcon::Grabbing,
+                    format!("Move {what} to {}", h.name),
+                ),
+                Some(DropAction::Choose) => (
+                    egui::CursorIcon::Grabbing,
+                    format!("Drop {what} on {}", h.name),
+                ),
+                None => (
+                    egui::CursorIcon::NoDrop,
+                    format!("Can't move {} into itself", h.name),
+                ),
+            };
+            ctx.set_cursor_icon(icon);
+            text
         }
         None => what,
     };
@@ -1544,7 +1792,7 @@ fn drag_ended(state: &mut State, ctx: &egui::Context, end: Result<drag_out::Outc
     ctx.request_repaint();
 }
 
-/// Scroll a Files list's `ui` (a [ScrollArea]'s contents) while rows are
+/// Scroll a list's `ui` (a [ScrollArea]'s contents) while Files rows are
 /// dragged near its top or bottom edge, the faster the closer, so they can
 /// be dropped on folders out of view.
 pub(super) fn drag_autoscroll(ui: &Ui) {
@@ -1714,4 +1962,122 @@ fn truncate_middle(name: &str, max: usize) -> String {
         .chain(&['…'])
         .chain(&chars[chars.len() - tail..])
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use egui::{Context, FullOutput, RawInput, Shape, vec2};
+
+    use super::*;
+
+    fn draw_panes(ctx: &Context, state: &mut State, events: Vec<Event>) -> FullOutput {
+        let mut output = ctx.run_ui(
+            RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1500.0, 900.0))),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                prepare_drag(ui);
+                ui::panes::draw(state, ui);
+                handle_drag(state, ui);
+                drop_menu(state, ui);
+            },
+        );
+        output.textures_delta.clear();
+        output
+    }
+
+    fn label_position(output: &FullOutput, label: &str) -> Pos2 {
+        output
+            .shapes
+            .iter()
+            .filter_map(|shape| match &shape.shape {
+                Shape::Text(text) if text.galley.text() == label => {
+                    Some(text.pos + text.galley.size() * 0.5)
+                }
+                _ => None,
+            })
+            .min_by(|a, b| a.y.total_cmp(&b.y))
+            .unwrap_or_else(|| panic!("Could not find {label:?}"))
+    }
+
+    fn primary_button(pos: Pos2, pressed: bool) -> Event {
+        Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn saved_dir_drops_use_the_whole_row_and_the_release_event() {
+        // The full application state needs more stack than a test thread's default.
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+                let source = root.join("resources");
+                let bookmark = root.join("src");
+                let recent = root.join("target");
+                let mut state = State::default();
+                state.state_path = std::env::temp_dir()
+                    .join(format!("peregrine-drop-test-{}.ss", std::process::id()));
+                state.cwd[0] = source.clone();
+                state.refresh_browser_files();
+                state.dir_bookmarks = vec![bookmark.clone()];
+                state.recent_dirs = vec![shell::RecentDir {
+                    path: recent.clone(),
+                    dt: jiff::Timestamp::now(),
+                }];
+                state.refresh_bookmarks_filter();
+                state.refresh_recent_dirs_filter();
+
+                for (name, dir, quick_drag) in
+                    [("0: src", bookmark, true), ("0: target", recent, false)]
+                {
+                    let ctx = Context::default();
+                    ui::install_fonts(&ctx);
+                    let output = draw_panes(&ctx, &mut state, vec![]);
+                    let from = label_position(&output, "icon.png");
+                    // Drop in the blank part of the row, to the right of the buttons.
+                    let to = label_position(&output, name) + vec2(100.0, 0.0);
+                    let mut events = vec![Event::PointerMoved(from), primary_button(from, true)];
+                    if !quick_drag {
+                        draw_panes(&ctx, &mut state, std::mem::take(&mut events));
+                        draw_panes(
+                            &ctx,
+                            &mut state,
+                            vec![Event::PointerMoved(from + vec2(12.0, 0.0))],
+                        );
+                        assert!(DragAndDrop::has_payload_of_type::<FileDrag>(&ctx));
+                    }
+                    events.extend([
+                        Event::PointerMoved(to),
+                        primary_button(to, false),
+                        Event::PointerMoved(egui::pos2(600.0, 450.0)),
+                    ]);
+                    draw_panes(&ctx, &mut state, events);
+                    let drop = ctx
+                        .data(|d| d.get_temp::<PendingDrop>(drop_menu_id()))
+                        .unwrap_or_else(|| {
+                            panic!("Drop from {from:?} to {name} at {to:?} did not open the menu")
+                        });
+                    assert!(Popup::is_id_open(&ctx, drop_menu_id()));
+                    assert_eq!(drop.dest, dir);
+                    assert_eq!(drop.position, to);
+                    assert_eq!(drop.files.0, [source.join("icon.png")]);
+                    assert_eq!(state.cwd(), source);
+                    assert!(state.paste.is_none());
+                    let output = draw_panes(&ctx, &mut state, vec![]);
+                    for label in ["Copy", "Cut", "Cancel"] {
+                        label_position(&output, label);
+                    }
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
 }

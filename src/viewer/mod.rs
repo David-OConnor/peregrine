@@ -5,7 +5,8 @@
 //! source highlighted by `syntect`, plain text as is, images decoded by the
 //! `image` crate. The tab in front re-reads its file when it changes on disk,
 //! so the window can sit beside an editor as a live preview. Text files open
-//! read-only; the toolbar can switch them to a small editor (see `editor`).
+//! read-only; the toolbar can switch them to a small editor (see `editor`),
+//! which a language server helps with source (see `lsp`).
 
 use std::{
     ffi::OsStr,
@@ -24,7 +25,12 @@ use egui::{
     Atom, Button, CentralPanel, Color32, ColorImage, Context, Frame, Id, Key, Margin, Modal,
     Modifiers, Panel, Rect, RichText, ScrollArea, Sense, Shape, TextEdit, TextStyle, TextureFilter,
     TextureHandle, TextureOptions, Ui, UiBuilder, Vec2, ViewportBuilder, ViewportCommand,
-    ViewportId, emath::GuiRounding, os::OperatingSystem, pos2, scroll_area, vec2,
+    ViewportId,
+    emath::GuiRounding,
+    os::OperatingSystem,
+    pos2, scroll_area,
+    text::{CCursor, CCursorRange},
+    vec2,
 };
 use egui_commonmark::CommonMarkCache;
 use image::{
@@ -37,6 +43,7 @@ use crate::{
     markdown::{self, Block, Details, is_markdown},
     placement::Placement,
     ui::{
+        line_edit,
         scratchpad::{self, ScratchpadTab},
         tab_keys::{self, TabAction},
         terminal::{TOGGLE_BOOKMARK, take_shortcut},
@@ -47,9 +54,19 @@ mod comment;
 mod editor;
 mod goto;
 mod gutter;
+mod lsp;
 mod search;
 mod selection;
 mod syntax;
+
+pub use lsp::{LanguageServer, LspSettings, language_servers};
+
+/// A file to open in a tab: in edit mode if `edit`, at `jump` if given.
+struct Open {
+    path: PathBuf,
+    edit: bool,
+    jump: Option<lsp::Jump>,
+}
 
 /// Extensions (lowercase) of plain-text files. A `.lock` file that `syntax`
 /// recognizes by name is highlighted instead.
@@ -176,9 +193,11 @@ struct Inner {
     shown: Option<Id>,
     /// Files to open (or bring to the front and reload, if already open) at
     /// the end of the main window's next pass. Queued rather than opened
-    /// directly so the Files panel and links clicked in the viewer share one
-    /// path. `true` opens it in edit mode.
-    to_open: Vec<(PathBuf, bool)>,
+    /// directly so the Files panel, links clicked in the viewer and go to
+    /// definition share one path.
+    to_open: Vec<Open>,
+    /// The language servers of the tabs in edit mode.
+    servers: lsp::Servers,
     /// Where the window opened. Fixed while it's open: egui moves a window
     /// whose builder changes.
     opened_at: Option<Placement>,
@@ -500,6 +519,31 @@ impl Doc {
         self.goto.show(ctx, self.id, text, text_id, editing);
     }
 
+    /// Put the caret at `jump`, where go to definition went, and scroll
+    /// there. In View mode, which draws no caret, select the name there.
+    fn reveal(&mut self, ctx: &Context, jump: &lsp::Jump) {
+        let (text, box_id) = match (&self.editor, &self.content) {
+            (Some(editor), _) => (editor.text(), editor::id(self.id)),
+            (None, Ok(Content::Text(text))) if self.kind != Kind::Markdown => {
+                (text.as_ref(), text_id(self.id))
+            }
+            _ => return,
+        };
+        let at = jump.char_index(text);
+        let range = if self.editor.is_some() {
+            CCursorRange::one(CCursor::new(at))
+        } else {
+            let name = text
+                .chars()
+                .skip(at)
+                .take_while(|&c| c.is_alphanumeric() || c == '_');
+            CCursorRange::two(CCursor::new(at), CCursor::new(at + name.count().max(1)))
+        };
+        line_edit::set_selection(ctx, box_id, range);
+        ctx.memory_mut(|m| m.request_focus(box_id));
+        self.goto.reveal(at);
+    }
+
     fn request(&mut self, ctx: &Context, action: Action) {
         if self.dirty() {
             self.pending = Some(action);
@@ -809,12 +853,31 @@ impl FileViewers {
     /// need be; or if it's already open in a tab, bring that to the front and
     /// reload it. Takes effect in [Self::show], later this pass.
     pub fn open(&self, path: PathBuf) {
-        self.lock().to_open.push((path, false));
+        self.lock().to_open.push(Open {
+            path,
+            edit: false,
+            jump: None,
+        });
     }
 
     /// As [Self::open], in edit mode when the file allows it.
     pub fn edit(&self, path: PathBuf) {
-        self.lock().to_open.push((path, true));
+        self.lock().to_open.push(Open {
+            path,
+            edit: true,
+            jump: None,
+        });
+    }
+
+    /// The language server settings, for the Settings window and saving.
+    pub fn lsp_settings(&self) -> LspSettings {
+        self.lock().servers.settings().clone()
+    }
+
+    /// Apply changed language server settings: servers whose command
+    /// changed are replaced.
+    pub fn set_lsp_settings(&self, settings: LspSettings) {
+        self.lock().servers.set_settings(settings);
     }
 
     /// Keep the viewer window alive while it has tabs. Call once per pass of
@@ -824,8 +887,12 @@ impl FileViewers {
         let (title, opened_at) = {
             let mut inner = self.lock();
             inner.drop_closed();
-            for (path, edit) in std::mem::take(&mut inner.to_open) {
-                inner.open_now(ctx, path, edit);
+            for open in std::mem::take(&mut inner.to_open) {
+                inner.open_now(ctx, open);
+            }
+            // The window's closed: its servers aren't needed.
+            if inner.docs.is_empty() {
+                inner.servers.stop_all();
             }
             if ctx.input(|i| i.viewport().close_requested()) && inner.docs.iter().any(Doc::dirty) {
                 ctx.send_viewport_cmd(ViewportCommand::CancelClose);
@@ -944,7 +1011,8 @@ impl Inner {
         self.active = (self.active - before).min(self.docs.len().saturating_sub(1));
     }
 
-    fn open_now(&mut self, ctx: &Context, path: PathBuf, edit: bool) {
+    fn open_now(&mut self, ctx: &Context, open: Open) {
+        let Open { path, edit, jump } = open;
         let kind = Kind::of(&path);
         // Compare canonical paths so `./README.md` and `docs/../README.md`
         // find the same tab.
@@ -965,6 +1033,9 @@ impl Inner {
                     doc.start_editing(ctx);
                 }
             }
+            if let Some(jump) = jump {
+                doc.reveal(ctx, &jump);
+            }
             self.active = i;
             return;
         }
@@ -973,6 +1044,9 @@ impl Inner {
         let mut doc = Doc::new(ctx, id, path, kind);
         if edit && doc.can_edit() {
             doc.start_editing(ctx);
+        }
+        if let Some(jump) = jump {
+            doc.reveal(ctx, &jump);
         }
         self.docs.push(doc);
         self.active = self.docs.len() - 1;
@@ -1056,8 +1130,16 @@ impl Inner {
             shown,
             to_open,
             cache,
+            servers,
             ..
         } = self;
+        // Every tab editing source, so each keeps its problems up to date.
+        servers.poll();
+        for doc in docs.iter_mut() {
+            if let Some(editor) = &mut doc.editor {
+                editor.link_lsp(&ctx, servers, &doc.path, doc.kind);
+            }
+        }
         let doc = &mut docs[*active];
         let id = doc.id;
         if shown.replace(id) != Some(id) {
@@ -1088,6 +1170,13 @@ impl Inner {
         }
         // Before find's keys: it would take the box's Escape.
         doc.go_to_line(&ctx);
+        if doc.pending.is_none()
+            && !doc.goto.is_open()
+            && let Some(editor) = &mut doc.editor
+            && editor.take_lsp_escape(ui)
+        {
+            ctx.memory_mut(|m| m.request_focus(editor::id(id)));
+        }
         if doc.kind != Kind::Image && doc.pending.is_none() && !doc.goto.is_open() {
             doc.search.keys(&ctx, doc.id, doc.editor.is_some());
         }
@@ -1110,7 +1199,8 @@ impl Inner {
             .frame(Frame::central_panel(ui.style()).inner_margin(margin))
             .show(ui, |ui| {
                 if let Some(editor) = &mut doc.editor {
-                    editor.show(ui, doc.kind, doc.tab, &mut doc.search, &mut doc.goto, id);
+                    let (search, goto) = (&mut doc.search, &mut doc.goto);
+                    editor.show(ui, doc.kind, doc.tab, search, goto, id, cache);
                     return;
                 }
                 match &doc.content {
@@ -1190,6 +1280,15 @@ impl Inner {
 
         if save_key && doc.editor.is_some() && doc.pending.is_none() {
             doc.save(&ctx);
+        }
+        // Go to definition, in another file: a tab of its own.
+        if let Some(jump) = doc.editor.as_mut().and_then(editor::Editor::take_jump) {
+            to_open.push(Open {
+                path: jump.path.clone(),
+                edit: jump.edit,
+                jump: Some(jump),
+            });
+            ctx.request_repaint_of(ViewportId::ROOT);
         }
         if doc.kind == Kind::Markdown && doc.editor.is_none() {
             let base_dir = doc.path.parent().unwrap_or(Path::new(""));
@@ -1387,7 +1486,7 @@ fn show_text(ui: &mut Ui, text: &Arc<str>, doc: &mut Doc) {
     let (galley, pos) = output.inner;
     // Level with the text, not the sideways scroll bar under it.
     let gutter = Rect::from_x_y_ranges(gutter.x_range(), output.inner_rect.y_range());
-    gutter::paint(ui, gutter, &galley, pos);
+    gutter::paint(ui, gutter, &galley, pos, |_| None);
 }
 
 /// Path, notices, and the Reload / Open externally buttons, plus previous /
@@ -1439,6 +1538,10 @@ fn toolbar(doc: &mut Doc, ui: &mut Ui) {
                     doc.tab = tab;
                     // Back to the text, from the button.
                     ui.ctx().memory_mut(|m| m.request_focus(editor::id(doc.id)));
+                }
+                if let Some(lsp) = doc.editor.as_mut().and_then(editor::Editor::lsp_mut) {
+                    ui.separator();
+                    lsp.toolbar(ui);
                 }
             }
             ui.separator();
@@ -1599,11 +1702,15 @@ fn padding(size: Vec2, viewport: Vec2) -> Vec2 {
 /// Open `path`, a local file linked from `doc`: in a tab of its own if
 /// it's a type the viewer shows, otherwise (e.g. a folder) with its
 /// default program.
-fn open_link(doc: &mut Doc, path: PathBuf, to_open: &mut Vec<(PathBuf, bool)>, ctx: &Context) {
+fn open_link(doc: &mut Doc, path: PathBuf, to_open: &mut Vec<Open>, ctx: &Context) {
     if !path.exists() {
         doc.notice = Some(format!("Link target not found: {}", path.display()));
     } else if can_view(&path) {
-        to_open.push((path, false));
+        to_open.push(Open {
+            path,
+            edit: false,
+            jump: None,
+        });
         // The main window's pass is what opens it.
         ctx.request_repaint_of(ViewportId::ROOT);
     } else if let Err(e) = open_with_default_app(&path) {

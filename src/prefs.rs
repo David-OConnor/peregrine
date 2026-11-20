@@ -30,6 +30,11 @@ pub fn save(state: &State, storage: &mut dyn Storage) {
     set_value(storage, "scratchpad_tab", &ui.scratchpad.tab);
     set_value(storage, "path_window", &ui.path_window.placement);
     set_value(storage, "viewer_window", &state.file_viewers.placement());
+    set_value(
+        storage,
+        "language_servers",
+        &state.file_viewers.lsp_settings(),
+    );
 
     set_value(storage, "font_size", &state.font_size);
     set_value(storage, "gui_font_size", &state.gui_font_size);
@@ -68,6 +73,9 @@ pub fn load(state: &mut State, storage: &dyn Storage) {
     state
         .file_viewers
         .set_placement(get_value(storage, "viewer_window").flatten());
+    if let Some(settings) = get_value(storage, "language_servers") {
+        state.file_viewers.set_lsp_settings(settings);
+    }
 
     load_into(storage, "font_size", &mut state.font_size);
     load_into(storage, "gui_font_size", &mut state.gui_font_size);

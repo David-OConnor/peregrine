@@ -9,7 +9,7 @@ use std::{
 
 use egui::{
     Align, Button, CollapsingHeader, Context, Label, Layout, ProgressBar, Response, RichText,
-    ScrollArea, TextStyle, Ui,
+    ScrollArea, TextFormat, TextStyle, Ui, text::LayoutJob,
 };
 use egui_extras::{Column, TableBuilder};
 
@@ -173,6 +173,7 @@ fn contents(
         average_meters(ui, snapshot.cpu_averages, |percent| {
             (percent / 100., format!("{percent:.0}%"))
         });
+        core_usage(ui, &snapshot.core_usage);
 
         cpu_cleared = process_list(ui, cpu_table, snapshot, &CPU);
     }
@@ -742,6 +743,48 @@ fn average_meters(ui: &mut Ui, averages: Averages, figure: impl Fn(f32) -> (f32,
         let (fraction, text) = figure(average);
         meter(ui, fraction, format!("{label} avg · {text}")).on_hover_text(hint);
     }
+}
+
+/// Each logical processor's use since the last reading, as many to a line as
+/// fit. Monospaced and padded alike, so they hold still as the figures change.
+fn core_usage(ui: &mut Ui, cores: &[(usize, f32)]) {
+    let Some(&(last, _)) = cores.last() else {
+        return;
+    };
+
+    let name_width = format!("C{}:", last + 1).len();
+    let font = TextStyle::Monospace.resolve(ui.style());
+    let visuals = ui.visuals();
+    let (label, figure, warn) = (
+        visuals.text_color(),
+        visuals.strong_text_color(),
+        visuals.warn_fg_color,
+    );
+
+    ui.horizontal_wrapped(|ui| {
+        ui.style_mut().interaction.selectable_labels = false;
+
+        for &(id, usage) in cores {
+            let name = format!("C{}:", id + 1);
+            let digits = if usage >= 90. { warn } else { figure };
+            let mut job = LayoutJob::default();
+            job.append(
+                &format!("{name:<name_width$}"),
+                0.,
+                TextFormat::simple(font.clone(), label),
+            );
+            job.append(
+                &format!("{usage:>4.0}"),
+                0.,
+                TextFormat::simple(font.clone(), digits),
+            );
+            job.append("%", 0., TextFormat::simple(font.clone(), label));
+
+            // Kept whole, so a cell never breaks across lines.
+            ui.add(Label::new(job).extend())
+                .on_hover_text("This logical processor's use since the last reading");
+        }
+    });
 }
 
 fn ratio(used: u64, total: u64) -> f32 {

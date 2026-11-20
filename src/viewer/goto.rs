@@ -84,6 +84,12 @@ impl GoTo {
         }
     }
 
+    /// Scroll to char `at` of the text the next time it's drawn, as after
+    /// going to a line.
+    pub(super) fn reveal(&mut self, at: usize) {
+        self.reveal = Some(at);
+    }
+
     /// Scroll to the line gone to, in `galley`, the text drawn at `pos`.
     /// Call in its scroll area, after drawing it.
     pub(super) fn scroll(&mut self, ui: &Ui, galley: &Galley, pos: Pos2) {

@@ -5,7 +5,7 @@ use std::{
     ptr::{null, null_mut},
 };
 
-use super::{CpuTimes, Disk, Gpu, Hardware, Memory, Volume, processes::Reading};
+use super::{CoreTimes, CpuTimes, Disk, Gpu, Hardware, Memory, Volume, processes::Reading};
 
 pub const PROCESS_MEMORY: &str = "Physical footprint, as Activity Monitor shows";
 
@@ -222,6 +222,11 @@ pub fn cpu_times() -> Option<CpuTimes> {
         busy: total.saturating_sub(idle),
         total,
     })
+}
+
+/// Not read here yet.
+pub fn core_times() -> CoreTimes {
+    Vec::new()
 }
 
 pub fn memory() -> Option<Memory> {

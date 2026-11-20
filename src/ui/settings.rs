@@ -1,8 +1,8 @@
 //! The Settings window, opened from the gear button on the tab strip: path
-//! color depth, and how many characters of each Bookmarks / Recent dirs path
-//! and Files name to show.
+//! color depth, how many characters of each Bookmarks / Recent dirs path
+//! and Files name to show, and the editor's language servers.
 
-use egui::{Context, DragValue, Grid, Rect, Ui, Window};
+use egui::{CollapsingHeader, Context, DragValue, Grid, Id, Rect, TextEdit, Ui, Window};
 
 use crate::{
     path_color,
@@ -11,6 +11,7 @@ use crate::{
         MAX_FILE_NAME_LEN, MAX_FONT_SIZE, MIN_FILE_NAME_LEN, MIN_FONT_SIZE,
         dirs::{MAX_DIR_LABEL_LEN, MIN_DIR_LABEL_LEN},
     },
+    viewer::{self, LanguageServer, LspSettings},
 };
 
 /// A [DragValue] for [path_color::depth_levels]. Returns the change to apply.
@@ -86,6 +87,78 @@ fn file_name_len_control(ui: &mut Ui, len: &mut usize) {
     );
 }
 
+/// The file viewer's language servers: on or off, and the command run for
+/// each language's.
+fn lsp_settings(ui: &mut Ui, state: &State) {
+    let mut settings = state.file_viewers.lsp_settings();
+    let before = settings.clone();
+    ui.checkbox(&mut settings.enabled, "Language servers in edit mode")
+        .on_hover_text(
+            "Editing source, start its language's server, if one is installed: it \
+             underlines problems (F8 steps through them), shows docs on hover or \
+             Ctrl+Q, completes (Ctrl+Space), goes to definitions (F12 or \
+             Ctrl+click) and formats (Shift+Alt+F).",
+        );
+    if settings.enabled {
+        CollapsingHeader::new("Server commands")
+            .id_salt("lsp_commands")
+            .show(ui, |ui| {
+                Grid::new("lsp_commands_grid")
+                    .num_columns(2)
+                    .spacing([12., 4.])
+                    .show(ui, |ui| {
+                        for language in viewer::language_servers() {
+                            ui.label(format!("{}:", language.name));
+                            command_box(ui, &mut settings, &language);
+                            ui.end_row();
+                        }
+                    });
+            });
+    }
+    if settings != before {
+        state.file_viewers.set_lsp_settings(settings);
+    }
+}
+
+/// The command line `language`'s server runs, applied once the box loses
+/// focus: each change restarts the server. Empty runs the first of its
+/// defaults found on PATH.
+fn command_box(ui: &mut Ui, settings: &mut LspSettings, language: &LanguageServer) {
+    let id = Id::new(("lsp_command", language.name));
+    let draft = id.with("draft");
+    let saved = settings
+        .commands
+        .get(language.name)
+        .cloned()
+        .unwrap_or_default();
+    let mut text = ui.data(|d| d.get_temp::<String>(draft)).unwrap_or(saved);
+    let response = ui
+        .add(
+            TextEdit::singleline(&mut text)
+                .id(id)
+                .hint_text(language.commands[0])
+                .desired_width(280.),
+        )
+        .on_hover_text(format!(
+            "Leave empty to run the first of these on PATH:\n{}\n\nTo install one: {}",
+            language.commands.join("\n"),
+            language.install
+        ));
+    if response.has_focus() {
+        ui.data_mut(|d| d.insert_temp(draft, text));
+        return;
+    }
+    ui.data_mut(|d| d.remove::<String>(draft));
+    if response.lost_focus() {
+        match text.trim() {
+            "" => settings.commands.remove(language.name),
+            line => settings
+                .commands
+                .insert(language.name.to_owned(), line.to_owned()),
+        };
+    }
+}
+
 pub(super) fn show(state: &mut State, ctx: &Context) {
     if !state.ui.settings {
         return;
@@ -141,6 +214,9 @@ pub(super) fn show(state: &mut State, ctx: &Context) {
                     file_name_len_control(ui, &mut state.file_name_len);
                     ui.end_row();
                 });
+
+            ui.separator();
+            lsp_settings(ui, state);
         });
     state.ui.settings = open;
 

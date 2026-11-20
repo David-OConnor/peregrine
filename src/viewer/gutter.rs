@@ -4,7 +4,7 @@
 //! area, so it scrolls up and down with the text but stays put when the text
 //! scrolls sideways.
 
-use egui::{Align2, Galley, Pos2, Rect, TextStyle, Ui, pos2};
+use egui::{Align2, Color32, Galley, Pos2, Rect, TextStyle, Ui, pos2};
 
 /// Space left of the numbers, and between them and the text, in digits.
 const PADDING: [f32; 2] = [2., 3.];
@@ -26,11 +26,18 @@ fn digit_width(ui: &Ui) -> f32 {
 
 /// Number the lines of `galley`, drawn with its top left at `pos`, in
 /// `gutter`: each of its rows that begins a line and shows within the
-/// gutter's height.
-pub(super) fn paint(ui: &Ui, gutter: Rect, galley: &Galley, pos: Pos2) {
+/// gutter's height. `mark` gives a line's number (from 0) a color of its
+/// own, as for a problem the language server found there.
+pub(super) fn paint(
+    ui: &Ui,
+    gutter: Rect,
+    galley: &Galley,
+    pos: Pos2,
+    mark: impl Fn(usize) -> Option<Color32>,
+) {
     // The text's own font, so each number sits on its line's baseline.
     let font = TextStyle::Monospace.resolve(ui.style());
-    let color = ui.visuals().weak_text_color();
+    let weak = ui.visuals().weak_text_color();
     let right = gutter.right() - digit_width(ui) * PADDING[1];
     let painter = ui.painter_at(gutter);
     let mut line = 0;
@@ -44,6 +51,7 @@ pub(super) fn paint(ui: &Ui, gutter: Rect, galley: &Galley, pos: Pos2) {
             line += 1;
             if rect.bottom() > gutter.top() {
                 let at = pos2(right, rect.top());
+                let color = mark(line - 1).unwrap_or(weak);
                 painter.text(at, Align2::RIGHT_TOP, line.to_string(), font.clone(), color);
             }
         }

@@ -606,7 +606,7 @@ fn line_start(text: &[u8], at: usize) -> bool {
 /// Compared a chunk at a time first, which is as fast as `memcmp`.
 const CHUNK: usize = 64;
 
-fn common_prefix(a: &[u8], b: &[u8]) -> usize {
+pub(super) fn common_prefix(a: &[u8], b: &[u8]) -> usize {
     let len = a.len().min(b.len());
     let mut n = 0;
     while n + CHUNK <= len && a[n..n + CHUNK] == b[n..n + CHUNK] {
@@ -618,7 +618,7 @@ fn common_prefix(a: &[u8], b: &[u8]) -> usize {
     n
 }
 
-fn common_suffix(a: &[u8], b: &[u8]) -> usize {
+pub(super) fn common_suffix(a: &[u8], b: &[u8]) -> usize {
     let len = a.len().min(b.len());
     let (a_end, b_end) = (a.len(), b.len());
     let mut n = 0;

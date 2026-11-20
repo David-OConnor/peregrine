@@ -191,6 +191,14 @@ fn shortcut_groups(mac: bool) -> Vec<(&'static str, Shortcuts)> {
     let anywhere = vec![
         ("Tab".into(), "Focus the CLI input, and clear it"),
         (
+            format!("{} + Enter or F11", if mac { "Option" } else { "Alt" }),
+            "Toggle fullscreen for the main window",
+        ),
+        (
+            format!("{cmd} + Shift + N"),
+            "Focus the Files panel's Deep search, set to Filenames. Shows the panel if hidden",
+        ),
+        (
             format!("{cmd} + B"),
             "Bookmark the current directory, or remove its bookmark",
         ),
@@ -308,7 +316,10 @@ fn shortcut_groups(mac: bool) -> Vec<(&'static str, Shortcuts)> {
                 "Move the selection to the Trash, after confirming"
             },
         ),
-        (format!("{cmd} + Shift + N"), "New folder"),
+        (
+            if mac { "Cmd + Option + N" } else { "Ctrl + Alt + N" }.into(),
+            "New folder",
+        ),
         (
             format!("{cmd} + C / X / V"),
             "Copy, cut, and paste the selected files",

@@ -77,6 +77,19 @@ pub(super) struct CpuTimes {
     pub total: u64,
 }
 
+impl CpuTimes {
+    /// Percent busy from `earlier` to these times.
+    fn usage_since(self, earlier: Self) -> Option<f32> {
+        let total = self.total.checked_sub(earlier.total)?;
+        let busy = self.busy.checked_sub(earlier.busy)?;
+
+        (total > 0).then(|| (100. * busy as f32 / total as f32).clamp(0., 100.))
+    }
+}
+
+/// Each logical processor's [CpuTimes], by its number from 0, in order.
+pub(super) type CoreTimes = Vec<(usize, CpuTimes)>;
+
 /// The whole machine's use, averaged over the last minute and half hour of
 /// recording. None before there's any.
 #[derive(Clone, Copy, Debug, Default)]
@@ -121,6 +134,9 @@ pub struct Snapshot {
     /// Percent, as [Self::cpu_usage].
     pub cpu_averages: Averages,
     pub cpu_available: bool,
+    /// Each logical processor's percent since the last sample, by its number
+    /// from 0. Empty until two samples, or where it can't be read.
+    pub core_usage: Vec<(usize, f32)>,
     pub memory: Option<Memory>,
     /// Bytes used.
     pub memory_averages: Averages,
@@ -248,6 +264,7 @@ struct Sampler {
     hardware_at: Option<Instant>,
     storage_at: Option<Instant>,
     cpu: Option<(CpuTimes, Instant)>,
+    cores: Option<(CoreTimes, Instant)>,
     cpu_recent: Recents,
     memory_at: Option<Instant>,
     memory_recent: Recents,
@@ -281,12 +298,28 @@ impl Sampler {
         let cpu = current.and_then(|current| {
             let (previous, at) = self.cpu?;
             let seconds = recording_seconds(at, now)?;
-            let total = current.total.checked_sub(previous.total)?;
-            let busy = current.busy.checked_sub(previous.busy)?;
 
-            (total > 0).then(|| ((100. * busy as f32 / total as f32).clamp(0., 100.), seconds))
+            Some((current.usage_since(previous)?, seconds))
         });
         self.cpu = current.map(|times| (times, now));
+
+        let cores = platform::core_times();
+        let core_usage = self
+            .cores
+            .as_ref()
+            .filter(|(_, at)| recording_seconds(*at, now).is_some())
+            .map_or_else(Vec::new, |(previous, _)| {
+                cores
+                    .iter()
+                    .filter_map(|&(id, current)| {
+                        // By number, as processors can go offline in between.
+                        let i = previous.binary_search_by_key(&id, |&(id, _)| id).ok()?;
+
+                        Some((id, current.usage_since(previous[i].1)?))
+                    })
+                    .collect()
+            });
+        self.cores = (!cores.is_empty()).then_some((cores, now));
 
         if let Some((usage, seconds)) = cpu {
             // As though of one CPU, so it averages to the meter's percent.
@@ -332,6 +365,7 @@ impl Sampler {
             cpu_usage: cpu.map(|(usage, _)| usage),
             cpu_averages: self.cpu_recent.averages(|usage| usage.cpu_percent(1)),
             cpu_available: current.is_some(),
+            core_usage,
             memory,
             memory_averages: self.memory_recent.averages(Usage::memory),
             processes,

@@ -5,6 +5,7 @@
 )]
 
 mod ansi;
+mod applications;
 mod clipboard;
 mod cmd_color;
 mod completion;

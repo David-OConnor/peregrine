@@ -165,9 +165,11 @@ Shortcuts to reduce typing:
 The About window lists these too. Most are inspired by other programs - especially JetBrains IDEs.
 
 - **Tab**: Focus the CLI input, and clear it. Works anywhere in the window; in the CLI input itself, Tab autocompletes instead
+- **Ctrl + Shift + N**: Focus the file browser's ripgrep search (*Deep search*), set to *Filenames* mode, selecting its text. Opens the file browser if it's hidden. On Mac, **Cmd + Shift + N**
 - **Ctrl + V**, **Ctrl + C**, **Ctrl + X** paste, copy, and cut using the native advanced clipboard, and/or system one
 - **Ctrl + Shift + V**: Toggle the clipboard pane
 - **Alt + F12**: Toggle the Terminal pane
+- **Alt + Enter** or **F11** toggles fullscreen for the main window. On Mac, use **Option + Enter** or **F11**.
 - **Shift + F10**: Run the project, as the project bar's **Run** button does (`cargo run`, or the Python application). If both a Cargo and Python project, runs `cargo run`
 - **Alt + `**: Go to the home directory
 - **Alt + 1** / **Alt + 2**: Go to Desktop / Downloads
@@ -175,7 +177,7 @@ The About window lists these too. Most are inspired by other programs - especial
 - **Alt + 4**: Go to Program Files. `/Applications` on Mac, `/usr` on Linux
 - **Alt + 5**: Go to `AppData\Local\Programs`. Windows only
 
-On Mac, use **Cmd + Option** in place of **Alt**.
+For the folder shortcuts on Mac, use **Cmd + Option** in place of **Alt**.
 
 ### File browser
 - **Enter** opens a file. (Same as double-clicking) Native viewer for text, markdown, code, and image files. OS-default otherwise.
@@ -183,7 +185,7 @@ On Mac, use **Cmd + Option** in place of **Alt**.
 - **Ctrl + A** selects everything shown
 - **Escape** clears selections
 - **Delete** moves the selected items to the Recycle Bin (Trash on Mac and Linux), after confirming
-- **Ctrl + Shift + N** creates a new folder. On Mac, **Cmd + Shift + N**
+- **Ctrl + Alt + N** creates a new folder. On Mac, **Cmd + Option + N**
 - **Ctrl + L** or **Alt + D** edits the path bar. **Enter** goes to the path typed; **Escape** cancels. On Mac, **Cmd + L**
 
 

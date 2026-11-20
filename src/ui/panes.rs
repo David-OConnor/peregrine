@@ -9,9 +9,9 @@ use egui::{
 use serde::{Deserialize, Serialize};
 
 use super::{
-    BROWSER_COL_WIDTH, CWD_HIST_COL_WIDTH, REMOTE_COL_WIDTH, RIGHT_COL_WIDTH, central_reserve,
-    clipboard, cmd_history, dirs, file_browser, remote, scale_panel_fonts, scratchpad,
-    system_status, tabs, terminal,
+    BROWSER_COL_WIDTH, CWD_HIST_COL_WIDTH, REMOTE_COL_WIDTH, RIGHT_COL_WIDTH, applications,
+    central_reserve, clipboard, cmd_history, dirs, file_browser, remote, scale_panel_fonts,
+    scratchpad, system_status, tabs, terminal,
 };
 use crate::state::State;
 
@@ -41,6 +41,7 @@ pub struct PanelVis {
     pub clipboard: bool,
     pub scratchpad: bool,
     pub system_status: bool,
+    pub applications: bool,
     pub terminal: bool,
 }
 
@@ -57,6 +58,7 @@ impl Default for PanelVis {
             clipboard: false,
             scratchpad: false,
             system_status: false,
+            applications: false,
             terminal: true,
         }
     }
@@ -75,11 +77,14 @@ pub enum Pane {
     Clipboard,
     Scratchpad,
     SystemStatus,
+    Applications,
 }
+
+pub const PANE_COUNT: usize = 11;
 
 impl Pane {
     /// Every pane, left to right as they are until dragged elsewhere.
-    pub const DEFAULT_ORDER: [Self; 10] = [
+    pub const DEFAULT_ORDER: [Self; PANE_COUNT] = [
         Self::Bookmarks,
         Self::RecentDirs,
         Self::Files,
@@ -90,6 +95,7 @@ impl Pane {
         Self::Clipboard,
         Self::Scratchpad,
         Self::SystemStatus,
+        Self::Applications,
     ];
 
     /// The name its place in the saved order is stored under (see
@@ -106,6 +112,7 @@ impl Pane {
             Self::Clipboard => "clipboard",
             Self::Scratchpad => "scratchpad",
             Self::SystemStatus => "system_status",
+            Self::Applications => "applications",
         }
     }
 
@@ -122,6 +129,7 @@ impl Pane {
             Self::Clipboard => "Clipboard",
             Self::Scratchpad => "Scratchpad",
             Self::SystemStatus => "System",
+            Self::Applications => "Applications",
         }
     }
 
@@ -138,6 +146,7 @@ impl Pane {
             Self::Clipboard => &mut vis.clipboard,
             Self::Scratchpad => &mut vis.scratchpad,
             Self::SystemStatus => &mut vis.system_status,
+            Self::Applications => &mut vis.applications,
         }
     }
 
@@ -157,6 +166,7 @@ impl Pane {
             Self::Clipboard => CLIPBOARD_COL_WIDTH,
             Self::Scratchpad => scratchpad::COL_WIDTH,
             Self::SystemStatus => system_status::COL_WIDTH,
+            Self::Applications => applications::COL_WIDTH,
             // Never a side panel.
             Self::Terminal => super::MIN_CENTRAL_WIDTH,
         }
@@ -175,6 +185,7 @@ impl Pane {
             Self::Clipboard => "clipboard_panel",
             Self::Scratchpad => "scratchpad_panel",
             Self::SystemStatus => "system_status_panel",
+            Self::Applications => "applications_panel",
         }
     }
 }
@@ -183,7 +194,7 @@ impl Pane {
 /// keys are skipped, and a pane the keys lack (one added since they were
 /// saved, or all of them when nothing was) goes after the pane it follows
 /// in [Pane::DEFAULT_ORDER].
-pub fn order_from_keys(keys: &[String]) -> [Pane; 10] {
+pub fn order_from_keys(keys: &[String]) -> [Pane; PANE_COUNT] {
     let mut order: Vec<Pane> = Vec::with_capacity(Pane::DEFAULT_ORDER.len());
     for key in keys {
         if let Some(pane) = Pane::DEFAULT_ORDER.into_iter().find(|p| p.key() == key)
@@ -255,13 +266,25 @@ pub(super) fn draw(state: &mut State, ui: &mut Ui) {
             .or_else(|| (!right.is_empty()).then(|| right.remove(0)))
     };
 
+    // Keep enough room to read Applications even when the panes drawn before
+    // it would otherwise take all the space outside the terminal.
+    let mut applications_reserve =
+        if left.contains(&Pane::Applications) || right.contains(&Pane::Applications) {
+            applications::MIN_COL_WIDTH
+        } else {
+            0.
+        };
+    let side_panes = left.into_iter().map(|pane| (pane, true)).chain(
+        // From the window's edge in: the first one added is the rightmost.
+        right.into_iter().rev().map(|pane| (pane, false)),
+    );
     let mut rects = Vec::with_capacity(order.len());
-    for &pane in &left {
-        rects.push((pane, side_panel(state, ui, pane, true)));
-    }
-    // From the window's edge in: the first one added is the rightmost.
-    for &pane in right.iter().rev() {
-        rects.push((pane, side_panel(state, ui, pane, false)));
+    for (pane, is_left) in side_panes {
+        if pane == Pane::Applications {
+            applications_reserve = 0.;
+        }
+        let max = (central_reserve(ui, f32::INFINITY) - applications_reserve).max(0.);
+        rects.push((pane, side_panel(state, ui, pane, is_left, max)));
     }
     match centre {
         Some(Pane::Terminal) => rects.push((Pane::Terminal, terminal_pane(state, ui))),
@@ -298,24 +321,25 @@ pub(super) fn draw(state: &mut State, ui: &mut Ui) {
 /// `pane` as a resizable side panel, on the left or right, at the width it
 /// was dragged to (egui keeps that, between runs too), or its default.
 /// Returns where it was drawn.
-fn side_panel(state: &mut State, ui: &mut Ui, pane: Pane, left: bool) -> Rect {
+fn side_panel(state: &mut State, ui: &mut Ui, pane: Pane, left: bool, max: f32) -> Rect {
     let panel = if left {
         Panel::left(pane.panel_id())
     } else {
         Panel::right(pane.panel_id())
     };
+    let panel = panel.resizable(true).default_size(pane.default_width());
+    let panel = if pane == Pane::Applications {
+        panel.min_size(applications::MIN_COL_WIDTH)
+    } else {
+        panel
+    };
     let gui_font_size = state.gui_font_size;
-    let max = central_reserve(ui, f32::INFINITY);
-    let r = panel
-        .resizable(true)
-        .default_size(pane.default_width())
-        .max_size(max)
-        .show(ui, |ui| {
-            // The side panels' text follows the "GUI font size" control.
-            scale_panel_fonts(ui, gui_font_size);
-            grip(ui, pane);
-            contents(state, ui, pane);
-        });
+    let r = panel.max_size(max).show(ui, |ui| {
+        // The side panels' text follows the "GUI font size" control.
+        scale_panel_fonts(ui, gui_font_size);
+        grip(ui, pane);
+        contents(state, ui, pane);
+    });
 
     r.response.rect
 }
@@ -332,6 +356,7 @@ fn contents(state: &mut State, ui: &mut Ui, pane: Pane) {
         Pane::Clipboard => clipboard::draw(state, ui),
         Pane::Scratchpad => scratchpad::draw(state, ui),
         Pane::SystemStatus => system_status::draw(state, ui),
+        Pane::Applications => applications::draw(state, ui),
         // Only ever in the middle, where [terminal_pane] draws it.
         Pane::Terminal => {}
     }
@@ -462,4 +487,75 @@ fn follow_drag(state: &mut State, ui: &Ui, rects: &[(Pane, Rect)]) {
                 ui.label(pane.title());
             });
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use egui::{Context, Pos2, RawInput, Rect, Shape, vec2};
+
+    use super::{Pane, PanelVis, draw, order_from_keys, order_keys};
+    use crate::{
+        state::State,
+        ui::{MIN_CENTRAL_WIDTH, install_fonts, panel_toggles, shrink_panel_fonts},
+    };
+
+    #[test]
+    fn saved_layouts_gain_the_applications_pane() {
+        let mut saved: Vec<_> = Pane::DEFAULT_ORDER
+            .into_iter()
+            .filter(|&pane| pane != Pane::Applications)
+            .collect();
+        saved.rotate_left(3);
+
+        let restored = order_from_keys(&order_keys(&saved));
+        assert!(restored.contains(&Pane::Applications));
+        assert!(
+            restored
+                .into_iter()
+                .filter(|&pane| pane != Pane::Applications)
+                .eq(saved)
+        );
+        assert!(!Pane::Applications.visible(PanelVis::default()));
+    }
+
+    #[test]
+    fn applications_heading_fits_when_other_panes_fill_a_narrow_window() {
+        let ctx = Context::default();
+        install_fonts(&ctx);
+        let mut state = State::default();
+        state.ui.panel_vis.applications = true;
+        let input = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(640., 600.))),
+            ..Default::default()
+        };
+        let mut draw_window = |ui: &mut egui::Ui| {
+            egui::Panel::top("tabs_panel")
+                .resizable(false)
+                .show(ui, |ui| {
+                    shrink_panel_fonts(ui);
+                    panel_toggles(&mut state, ui);
+                });
+            draw(&mut state, ui);
+        };
+        // Allow egui to measure the wrapped toggle bar before checking its clip.
+        ctx.run_ui(input.clone(), &mut draw_window)
+            .textures_delta
+            .clear();
+        let mut output = ctx.run_ui(input, draw_window);
+        output.textures_delta.clear();
+
+        let visible_labels = output.shapes.iter().filter(|shape| {
+            matches!(
+                &shape.shape,
+                Shape::Text(text) if text.galley.job.text == "Applications"
+                    && shape.clip_rect.contains_rect(text.visual_bounding_rect())
+            )
+        });
+        assert_eq!(
+            visible_labels.count(),
+            2,
+            "the toggle and heading should both fit"
+        );
+        assert!(state.ui.term_rect.width() >= MIN_CENTRAL_WIDTH);
+    }
 }

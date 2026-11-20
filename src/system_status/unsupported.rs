@@ -1,4 +1,4 @@
-use super::{CpuTimes, Hardware, Memory, Volume, processes::Reading};
+use super::{CoreTimes, CpuTimes, Hardware, Memory, Volume, processes::Reading};
 
 pub const PROCESS_MEMORY: &str = "Memory in use";
 
@@ -21,6 +21,10 @@ pub fn hardware() -> Hardware {
 
 pub fn cpu_times() -> Option<CpuTimes> {
     None
+}
+
+pub fn core_times() -> CoreTimes {
+    Vec::new()
 }
 
 pub fn memory() -> Option<Memory> {

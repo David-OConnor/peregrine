@@ -5,13 +5,15 @@ use std::{
 };
 
 use egui::{
-    Align, Color32, FontData, FontDefinitions, FontFamily, FontId, Layout, Panel, Rect, RichText,
-    ScrollArea, TextFormat, TextStyle, TextWrapMode, Ui, WidgetText, text::LayoutJob,
+    Align, Color32, Context, FontData, FontDefinitions, FontFamily, FontId, Key, KeyboardShortcut,
+    Layout, Modifiers, Panel, Rect, RichText, ScrollArea, TextFormat, TextStyle, TextWrapMode, Ui,
+    ViewportCommand, WidgetText, text::LayoutJob,
 };
 use jiff::ZonedDateTime;
 use shell::DirList;
 
 mod about;
+pub mod applications;
 pub mod clipboard;
 mod cmd_history;
 pub mod dirs;
@@ -317,8 +319,7 @@ fn list_columns<T: Copy>(
     min_width: f32,
     mut row: impl FnMut(&mut Ui, T),
 ) -> usize {
-    let gap = ui.spacing().item_spacing.x;
-    let n = ((ui.available_width() + gap) / (min_width + gap)).max(1.0) as usize;
+    let n = list_column_count(ui, min_width);
     if n == 1 {
         for &item in items {
             row(ui, item);
@@ -334,6 +335,11 @@ fn list_columns<T: Copy>(
         }
     });
     n
+}
+
+fn list_column_count(ui: &Ui, min_width: f32) -> usize {
+    let gap = ui.spacing().item_spacing.x;
+    ((ui.available_width() + gap) / (min_width + gap)).max(1.0) as usize
 }
 
 /// How many of `len` items [list_columns] puts in each column, when
@@ -706,7 +712,7 @@ fn selection_details(s: &SelectionSummary, home: Option<&Path>, ui: &mut Ui) {
 /// back. Each toggle reads from / writes back to [panes::PanelVis] on the
 /// active StateUi.
 fn panel_toggles(state: &mut State, ui: &mut Ui) {
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         let v = &mut state.ui.panel_vis;
         for pane in state.ui.pane_order {
             let r = ui.toggle_value(pane.visible_mut(v), pane.title());
@@ -716,6 +722,12 @@ fn panel_toggles(state: &mut State, ui: &mut Ui) {
                 }
                 panes::Pane::Terminal => {
                     r.on_hover_text("Toggle the terminal (Alt+F12)");
+                }
+                panes::Pane::Files => {
+                    let keys = ui.ctx().format_shortcut(&search::FOCUS_DEEP_SEARCH);
+                    r.on_hover_text(format!(
+                        "Toggle the file browser. {keys} shows it and focuses its Deep search"
+                    ));
                 }
                 _ => {}
             }
@@ -762,7 +774,19 @@ fn scale_panel_fonts(ui: &mut Ui, size: f32) {
     }
 }
 
+fn toggle_fullscreen_key(ctx: &Context) {
+    let alt_enter = terminal::take_shortcut(ctx, KeyboardShortcut::new(Modifiers::ALT, Key::Enter));
+    let f11 = terminal::take_shortcut(ctx, KeyboardShortcut::new(Modifiers::NONE, Key::F11));
+    if alt_enter || f11 {
+        let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+        ctx.send_viewport_cmd(ViewportCommand::Fullscreen(!fullscreen));
+    }
+}
+
 pub fn draw(state: &mut State, ui: &mut Ui) {
+    // Consume the shortcuts before Enter can submit input or reach a running program.
+    toggle_fullscreen_key(ui.ctx());
+
     if state.egui_ctx.is_none() {
         state.egui_ctx = Some(ui.ctx().clone());
     }
@@ -795,6 +819,7 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
         terminal::toggle_bookmark_key(state, ui.ctx());
         terminal::folder_keys(state, ui.ctx());
         terminal::focus_input_key(state, ui.ctx());
+        search::focus_deep_search_key(state, ui.ctx());
     }
     // Pressed in a file viewer window (see `viewer::FileViewers`).
     if state.file_viewers.take_bookmark_key() {
@@ -833,7 +858,9 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
     // After the tabs and toggles, which change what it should be watching.
     state.pump_dir_watch(ui.ctx());
 
+    file_browser::prepare_drag(ui);
     panes::draw(state, ui);
+    file_browser::handle_drag(state, ui);
 
     // File viewer windows are child viewports: they only stay open while
     // the main window's pass keeps showing them.
@@ -845,6 +872,7 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
     about::show(state, ui.ctx());
     projects::show(state, ui.ctx());
     settings::show(state, ui.ctx());
+    file_browser::drop_menu(state, ui);
     dirs::stale_dir_popup(state, ui.ctx());
     file_browser::delete_popup(state, ui.ctx());
     file_browser::paste_conflict_popup(state, ui.ctx());
@@ -863,5 +891,59 @@ pub fn draw(state: &mut State, ui: &mut Ui) {
     let scratchpad_due = state.ui.scratchpad.save_due(ui.ctx());
     if clipboard_changed || scratchpad_due {
         let _ = state.save();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use egui::{Context, Event, Key, Modifiers, RawInput, ViewportCommand, ViewportId};
+
+    use super::toggle_fullscreen_key;
+
+    #[test]
+    fn fullscreen_shortcuts_consume_key_presses_without_repeating() {
+        let ctx = Context::default();
+        for (key, modifiers, fullscreen, expected) in [
+            (Key::Enter, Modifiers::ALT, false, Some(true)),
+            (Key::Enter, Modifiers::ALT, true, None),
+            (Key::F11, Modifiers::NONE, true, Some(false)),
+            (Key::F11, Modifiers::NONE, false, None),
+            (Key::Enter, Modifiers::NONE, false, None),
+        ] {
+            let mut input = RawInput::default();
+            input
+                .viewports
+                .get_mut(&ViewportId::ROOT)
+                .unwrap()
+                .fullscreen = Some(fullscreen);
+            input.events.push(Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false, // egui marks repeated presses based on the preceding frames.
+                modifiers,
+            });
+
+            let mut output = ctx.run_ui(input, |ui| {
+                toggle_fullscreen_key(ui.ctx());
+                let plain_enter = key == Key::Enter && modifiers == Modifiers::NONE;
+                assert_eq!(ui.input(|i| i.key_pressed(key)), plain_enter);
+            });
+            output.textures_delta.clear();
+
+            let fullscreen_commands: Vec<_> = output.viewport_output[&ViewportId::ROOT]
+                .commands
+                .iter()
+                .filter_map(|command| match command {
+                    ViewportCommand::Fullscreen(enabled) => Some(*enabled),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                fullscreen_commands,
+                expected.as_slice(),
+                "{modifiers:?} + {key:?}"
+            );
+        }
     }
 }

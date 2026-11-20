@@ -581,7 +581,14 @@ fn paste_one(src: &Path, dest_dir: &Path, moving: bool, replace: bool) -> Result
     let Ok(md) = fs::symlink_metadata(src) else {
         return Err(format!("{} no longer exists", src.display()));
     };
-    if md.is_dir() && dest_dir.starts_with(src) {
+    // A saved destination can reach the source through a directory alias.
+    if md.is_dir()
+        && (dest_dir.starts_with(src)
+            || matches!(
+                (fs::canonicalize(dest_dir), fs::canonicalize(src)),
+                (Ok(dest), Ok(src)) if dest.starts_with(&src)
+            ))
+    {
         return Err(format!(
             "can't {} {} into itself",
             if moving { "move" } else { "copy" },

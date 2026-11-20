@@ -49,6 +49,11 @@ software_manager = { path = "../software_manager", default-features = false }
 # `software_manager` builds, so this adds nothing new.
 ureq = { version = "3.4.2", features = ["json"] }
 
+# The editor's language server client (see `src/viewer/lsp`) speaks JSON-RPC
+# to the servers. Already built for ureq's `json` feature, so this adds
+# nothing new.
+serde_json = "1"
+
 # Terminal emulator for full-screen programs (vim, nano, less, top) run over
 # SSH: the remote's output is parsed into a screen of cells the GUI draws
 # (see `src/remote.rs`, `src/ui/remote_grid.rs`).
@@ -95,9 +100,11 @@ raw-window-handle = "0.6"
 windows-sys = { version = "0.61", features = [
     "Wdk_System_SystemInformation",
     "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
     "Win32_Security",
     "Win32_Storage_FileSystem",
+    "Win32_Storage_Packaging_Appx",
     "Win32_System_Com",
     "Win32_System_Console",
     "Win32_System_Diagnostics_Debug",
@@ -116,6 +123,15 @@ windows-sys = { version = "0.61", features = [
     "Win32_UI_Shell",
     "Win32_UI_Shell_Common",
     "Win32_UI_WindowsAndMessaging",
+] }
+
+# Applications panel: Shell app IDs and AppsFolder names/icons through COM.
+windows = { version = "0.62.2", features = [
+    "Win32_Storage_EnhancedStorage",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_Shell_PropertiesSystem",
 ] }
 
 # Files panel Cut / Copy / Paste (see `src/clipboard.rs`): file lists on the
@@ -142,6 +158,16 @@ libc = "0.2"
 x11rb = { version = "0.13", default-features = false }
 wayland-client = { version = "0.31", default-features = false, features = ["system"] }
 rustix = { version = "1", features = ["event"] }
+
+# Applications panel: compositor window lists and freedesktop SVG app icons.
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+resvg = { version = "0.45.1", default-features = false }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSBitmapImageRep", "NSImage", "NSImageRep", "NSRunningApplication", "NSWorkspace"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSData", "NSDictionary", "NSString", "NSURL"] }
 
 [build-dependencies]
 # Embeds `resources/icon.ico` in the Windows `.exe` (see `build.rs`).

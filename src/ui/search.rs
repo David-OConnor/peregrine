@@ -13,7 +13,8 @@ use eframe::{
     },
 };
 use egui::{
-    Button, Id, Key, Layout, Response, RichText, ScrollArea, TextEdit, TextStyle, Ui, WidgetText,
+    Button, Context, Id, Key, KeyboardShortcut, Layout, Modifiers, Response, RichText, ScrollArea,
+    TextEdit, TextStyle, Ui, WidgetText,
 };
 
 use crate::{
@@ -22,8 +23,16 @@ use crate::{
     path_color, render_with_tilde,
     state::State,
     ui,
-    ui::{dirs, dirs::BOOKMARKED_TEXT, file_browser, file_browser::RowAction},
+    ui::{
+        dirs, dirs::BOOKMARKED_TEXT, file_browser, file_browser::RowAction, line_edit, terminal,
+    },
 };
+
+/// Moves the keyboard to the Deep search box from anywhere in the window,
+/// in file-name mode (see [focus_deep_search_key]), as JetBrains IDEs' Go to
+/// File. Cmd+Shift+N on Mac.
+pub const FOCUS_DEEP_SEARCH: KeyboardShortcut =
+    KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::N);
 
 pub const QUICK_SEARCH_WIDTH: f32 = 140.;
 
@@ -372,6 +381,38 @@ pub fn deep_search_bar(state: &mut State, ui: &mut Ui) {
     }
 }
 
+/// Act on [FOCUS_DEEP_SEARCH] if it was pressed this frame, and remove its
+/// key events, so no widget also sees them: show the Files pane if it's
+/// hidden, give it the keyboard, switch Deep search to Filenames (re-running
+/// a search already in the box), and focus the box with its text selected,
+/// so typing replaces it. Not while a popup is up. Modifiers must match
+/// exactly, as for the tab shortcuts (see [ui::tab_keys]).
+pub fn focus_deep_search_key(state: &mut State, ctx: &Context) {
+    if ctx.memory(|m| m.top_modal_layer().is_some())
+        || !terminal::take_shortcut(ctx, FOCUS_DEEP_SEARCH)
+    {
+        return;
+    }
+
+    state.ui.panel_vis.file_browser = true;
+    // As if it had been clicked, so its keys (Ctrl+C etc.) follow.
+    state.ui.files_active = true;
+    // So the CLI input doesn't take the keyboard back later this frame.
+    state.ui.focus_input = false;
+
+    let opts = &mut state.ui.deep_search_opts;
+    if !opts.file_names {
+        opts.file_names = true;
+        if !state.ui.deep_search.is_empty() {
+            state.start_deep_search(ctx);
+        }
+    }
+
+    let id = deep_search_id();
+    line_edit::select_all(ctx, id, &state.ui.deep_search);
+    ctx.memory_mut(|m| m.request_focus(id));
+}
+
 /// The Deep search box's, for the Files panel to tell it has the keyboard.
 pub fn deep_search_id() -> Id {
     Id::new("files_deep_search")
@@ -409,7 +450,9 @@ fn deep_search_box(ui: &mut Ui, buf: &mut String, file_names: bool) -> Response 
     .on_hover_text(format!(
         "Search the {what} in this folder and its subfolders, \
          as ripgrep does: hidden and .gitignored files are skipped. \
-         Case-insensitive unless the search has a capital letter."
+         Case-insensitive unless the search has a capital letter.\n\n\
+         {} focuses it, searching names.",
+        ui.ctx().format_shortcut(&FOCUS_DEEP_SEARCH)
     ))
 }
 

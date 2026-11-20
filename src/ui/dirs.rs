@@ -20,7 +20,7 @@ use crate::{
     render_with_tilde,
     state::State,
     ui,
-    ui::{ListAction, search, terminal},
+    ui::{ListAction, file_browser, search, terminal},
 };
 
 /// Default max displayed length (in characters) of a Bookmarks / Recent dirs
@@ -656,6 +656,7 @@ pub(super) fn dir_bookmarks(state: &mut State, ui: &mut Ui) {
         .id_salt("bookmarks_scroll")
         .auto_shrink([false, false])
         .show(ui, |ui| {
+            file_browser::drag_autoscroll(ui);
             let sorted = &state.ui.bookmarks_sorted;
             // `"<n>: "`, sized for the largest number.
             let prefix_chars = sorted.len().to_string().len() + 2;
@@ -664,6 +665,8 @@ pub(super) fn dir_bookmarks(state: &mut State, ui: &mut Ui) {
             let depth = sorted.iter().map(|r| r.lines.len()).max().unwrap_or(0);
             let min_width =
                 dir_col_width(ui, prefix_chars, label_chars, &['x']) + depth as f32 * indent;
+            let single_column = state.ui.bookmarks_filter.len() == 1
+                || ui::list_column_count(ui, min_width) == 1;
 
             // A search leaves gaps in the tree, so it lists matches flat.
             let nest = state.ui.bookmarks_search.is_empty();
@@ -716,11 +719,9 @@ pub(super) fn dir_bookmarks(state: &mut State, ui: &mut Ui) {
 
                 paint_tree_lines(ui, lines, left, row.response.rect.y_range(), gap);
 
-                let column = ui.max_rect().x_range();
-                rows.push((
-                    n,
-                    Rect::from_x_y_ranges(column, row.response.rect.y_range()),
-                ));
+                let y = row.response.rect.y_range();
+                file_browser::saved_dir_drop_target(ui, drop_row_rect(ui, y, single_column), bm);
+                rows.push((n, Rect::from_x_y_ranges(ui.max_rect().x_range(), y)));
             });
 
             let pointer = ui.input(|i| i.pointer.latest_pos());
@@ -788,6 +789,7 @@ pub(super) fn dir_history(state: &mut State, ui: &mut Ui) {
         .id_salt("recent_dirs_scroll")
         .auto_shrink([false, false])
         .show(ui, |ui| {
+            file_browser::drag_autoscroll(ui);
             // Render newest-first so the most-recently-used dirs are at the top.
             let rows: Vec<usize> = state.ui.recent_dirs_filter.iter().rev().copied().collect();
             // `"<i>: "`, sized for the largest index.
@@ -795,6 +797,7 @@ pub(super) fn dir_history(state: &mut State, ui: &mut Ui) {
             let paths = state.recent_dirs.iter().map(|r| &r.path);
             let label_chars = dir_label_chars(ui, paths, opts);
             let min_width = dir_col_width(ui, prefix_chars, label_chars, &[STAR_OFF, 'x']);
+            let single_column = rows.len() == 1 || ui::list_column_count(ui, min_width) == 1;
 
             ui::list_columns(ui, &rows, min_width, |ui, i| {
                 let Some(r) = state.recent_dirs.get(i) else {
@@ -802,7 +805,7 @@ pub(super) fn dir_history(state: &mut State, ui: &mut Ui) {
                 };
 
                 let bookmarked = state.dir_bookmarks.contains(&r.path);
-                ui.horizontal(|ui| {
+                let row = ui.horizontal(|ui| {
                     let highlight = row_highlight(state, &r.path, bookmarked);
                     let resp = dir_button(ui, format!("{i}: "), &r.path, opts, highlight);
                     if let Some(a) = dir_click(&resp, &r.path, DirList::RecentDirs) {
@@ -821,10 +824,23 @@ pub(super) fn dir_history(state: &mut State, ui: &mut Ui) {
                         action = Some(ListAction::RemoveRecentDir(r.path.clone()));
                     }
                 });
+                let rect = drop_row_rect(ui, row.response.rect.y_range(), single_column);
+                file_browser::saved_dir_drop_target(ui, rect, &r.path);
             });
         });
 
     ui::apply_action(state, action);
+}
+
+fn drop_row_rect(ui: &Ui, y: Rangef, single_column: bool) -> Rect {
+    // A narrow list's content can be only as wide as the labels. Its clip
+    // rect still spans the panel. Multiple columns use their own bounds.
+    let x = if single_column {
+        ui.clip_rect().x_range()
+    } else {
+        ui.max_rect().x_range()
+    };
+    Rect::from_x_y_ranges(x, y)
 }
 
 /// Popup shown while `state.ui.stale_dir` is set: a Recent dirs / Bookmarks

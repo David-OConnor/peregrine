@@ -1,6 +1,8 @@
 //! A small text editor sharing the viewer's background syntax highlighter.
 //! Only complete, losslessly decoded files can be edited. The original bytes
 //! also let Save notice changes made by another program before overwriting.
+//! Source files get the language server's help, if one is installed (see
+//! `lsp`).
 
 use std::{
     fs::{self, File},
@@ -14,8 +16,9 @@ use egui::{
     UiBuilder,
     text::{CCursor, CCursorRange},
 };
+use egui_commonmark::CommonMarkCache;
 
-use super::{Kind, MAX_BYTES, comment, goto, gutter, search, selection, syntax};
+use super::{Kind, MAX_BYTES, comment, goto, gutter, lsp, search, selection, syntax};
 use crate::ui::{
     line_edit,
     scratchpad::{self, ScratchpadTab},
@@ -120,6 +123,8 @@ pub(super) struct Editor {
     lines: usize,
     layout: syntax::Source,
     focus: bool,
+    /// The file, open in its language's server.
+    lsp: Option<lsp::DocLsp>,
 }
 
 impl Editor {
@@ -141,7 +146,43 @@ impl Editor {
             conflict: false,
             layout: syntax::Source::default(),
             focus: true,
+            lsp: None,
         })
+    }
+
+    /// Open the file, of `kind`, at `path`, in its language's server, if
+    /// there is one; or again in a new one, after Settings or Restart
+    /// replaced it. Call every pass while editing.
+    pub(super) fn link_lsp(
+        &mut self,
+        ctx: &Context,
+        servers: &mut lsp::Servers,
+        path: &Path,
+        kind: Kind,
+    ) {
+        if self.lsp.as_ref().is_some_and(|lsp| lsp.stale(servers)) {
+            self.lsp = None;
+        }
+        if self.lsp.is_none()
+            && let Kind::Code(language) = kind
+        {
+            self.lsp = servers.attach(ctx, path, language, &self.snapshot);
+        }
+    }
+
+    pub(super) fn lsp_mut(&mut self) -> Option<&mut lsp::DocLsp> {
+        self.lsp.as_mut()
+    }
+
+    /// Where go to definition went, in another file.
+    pub(super) fn take_jump(&mut self) -> Option<lsp::Jump> {
+        self.lsp.as_mut()?.take_jump()
+    }
+
+    /// Escape, while the language server's popup or completion list is
+    /// up: close it, rather than find. Returns whether it did.
+    pub(super) fn take_lsp_escape(&mut self, ui: &Ui) -> bool {
+        self.lsp.as_mut().is_some_and(|lsp| lsp.take_escape(ui))
     }
 
     pub(super) fn dirty(&self) -> bool {
@@ -190,6 +231,9 @@ impl Editor {
         self.original.clone_from(&self.text);
         self.dirty = false;
         self.conflict = false;
+        if let Some(lsp) = &mut self.lsp {
+            lsp.saved();
+        }
         Ok(())
     }
 
@@ -206,7 +250,9 @@ impl Editor {
     /// Tab inserts a tab, or 4 spaces if `tab` is [ScratchpadTab::Spaces];
     /// over a selection, it indents the selected lines by that.
     /// Ctrl+Y deletes the line, in place of egui's redo. Ctrl+/ comments out
-    /// the line, or uncomments it, in source and Markdown.
+    /// the line, or uncomments it, in source and Markdown. With a language
+    /// server, its keys too (see `lsp`); `cache` renders its docs.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn show(
         &mut self,
         ui: &mut Ui,
@@ -215,6 +261,7 @@ impl Editor {
         search: &mut search::Search,
         goto: &mut goto::GoTo,
         doc: Id,
+        cache: &mut Option<CommonMarkCache>,
     ) {
         let ctx = ui.ctx().clone();
         let language = match kind {
@@ -223,10 +270,28 @@ impl Editor {
             _ => None,
         };
         // Edits made before the box is drawn, so it shows them. Its undo
-        // takes them back as it does typing.
-        let mut select = search
-            .take_replace(&mut self.text)
-            .map(|at| CCursorRange::one(CCursor::new(at)));
+        // takes them back as it does typing. The language server's first,
+        // while the text is still the one it was told of.
+        let mut select = None;
+        let mut refocus = false;
+        if let Some(lsp) = &mut self.lsp {
+            let focused = ctx.memory(|m| m.has_focus(id(doc)));
+            let caret = TextEdit::load_state(&ctx, id(doc))
+                .and_then(|s| s.cursor.char_range())
+                .map_or(0, |r| r.primary.index.0);
+            let spaces = (tab == ScratchpadTab::Spaces).then_some(scratchpad::INDENT.len());
+            if let Some(edit) = lsp.before(ui, &mut self.text, caret, focused, spaces) {
+                let end = CCursor::new(edit.caret + edit.select);
+                select = Some(CCursorRange::two(CCursor::new(edit.caret), end));
+                if edit.reveal {
+                    goto.reveal(edit.caret);
+                }
+                refocus = edit.focus;
+            }
+        }
+        if let Some(at) = search.take_replace(&mut self.text) {
+            select = Some(CCursorRange::one(CCursor::new(at)));
+        }
         if ctx.memory(|m| m.has_focus(id(doc))) {
             let mut range = TextEdit::load_state(&ctx, id(doc))
                 .and_then(|s| s.cursor.char_range())
@@ -287,6 +352,9 @@ impl Editor {
             self.changed(&ctx);
             search.text_changed();
         }
+        if refocus {
+            ctx.memory_mut(|m| m.request_focus(id(doc)));
+        }
         let code = matches!(kind, Kind::Code(_));
         let space = ui.available_rect_before_wrap();
         let (gutter, body) =
@@ -295,6 +363,7 @@ impl Editor {
             text,
             snapshot,
             layout,
+            lsp,
             ..
         } = self;
         let output = ui
@@ -346,13 +415,24 @@ impl Editor {
                         search.find_in_text(ui.ctx(), snapshot);
                         search.paint_text(ui, &output.galley, output.galley_pos, behind);
                         goto.scroll(ui, &output.galley, output.galley_pos);
+                        if let Some(lsp) = lsp {
+                            lsp.after(ui, &output, snapshot);
+                        }
                         output
                     })
             })
             .inner;
         let edit = output.inner;
         let gutter = Rect::from_x_y_ranges(gutter.x_range(), output.inner_rect.y_range());
-        gutter::paint(ui, gutter, &edit.galley, edit.galley_pos);
+        let visuals = ui.visuals().clone();
+        let marks = self.lsp.as_mut().map_or(&[][..], lsp::DocLsp::line_marks);
+        gutter::paint(ui, gutter, &edit.galley, edit.galley_pos, |line| {
+            let mark = *marks.get(line)?;
+            (mark > 0).then(|| lsp::severity_color(&visuals, mark))
+        });
+        if let Some(lsp) = &mut self.lsp {
+            lsp.popups(&ctx, doc, cache);
+        }
         if edit.response.changed() {
             self.changed(&ctx);
         }

@@ -8,7 +8,7 @@ use std::{
     sync::LazyLock,
 };
 
-use super::{CpuTimes, Disk, Gpu, Hardware, Memory, Volume, processes::Reading};
+use super::{CoreTimes, CpuTimes, Disk, Gpu, Hardware, Memory, Volume, processes::Reading};
 
 pub const PROCESS_MEMORY: &str = "Resident memory, not counting pages shared with other processes";
 
@@ -238,6 +238,29 @@ pub fn cpu_times() -> Option<CpuTimes> {
         return None;
     }
 
+    stat_times(fields)
+}
+
+/// The `cpuN` lines after the total, one per online processor.
+pub fn core_times() -> CoreTimes {
+    let Ok(stat) = fs::read_to_string("/proc/stat") else {
+        return Vec::new();
+    };
+
+    stat.lines()
+        .skip(1)
+        .take_while(|line| line.starts_with("cpu"))
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let id = fields.next()?.strip_prefix("cpu")?.parse().ok()?;
+
+            Some((id, stat_times(fields)?))
+        })
+        .collect()
+}
+
+/// A `/proc/stat` CPU line's times, after its name.
+fn stat_times<'a>(fields: impl Iterator<Item = &'a str>) -> Option<CpuTimes> {
     // Guest times are already included in user/nice.
     let times: Vec<u64> = fields
         .take(8)

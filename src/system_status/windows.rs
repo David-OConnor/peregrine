@@ -1,11 +1,13 @@
 use std::{
-    mem::size_of,
+    mem::{size_of, size_of_val},
     path::PathBuf,
     ptr::{null, null_mut},
 };
 
 use windows_sys::{
-    Wdk::System::SystemInformation::{NtQuerySystemInformation, SystemProcessInformation},
+    Wdk::System::SystemInformation::{
+        NtQuerySystemInformation, SystemProcessInformation, SystemProcessorPerformanceInformation,
+    },
     Win32::{
         Devices::DeviceAndDriverInstallation::*,
         Foundation::{CloseHandle, FILETIME, INVALID_HANDLE_VALUE, STATUS_INFO_LENGTH_MISMATCH},
@@ -30,13 +32,16 @@ use windows_sys::{
                 ALL_PROCESSOR_GROUPS, GetActiveProcessorCount, GetActiveProcessorGroupCount,
                 GetCurrentThread, GetSystemTimes, GetThreadGroupAffinity, SetThreadGroupAffinity,
             },
-            WindowsProgramming::{DRIVE_FIXED, DRIVE_REMOVABLE, SYSTEM_PROCESS_INFORMATION},
+            WindowsProgramming::{
+                DRIVE_FIXED, DRIVE_REMOVABLE, SYSTEM_PROCESS_INFORMATION,
+                SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION,
+            },
         },
     },
     core::GUID,
 };
 
-use super::{CpuTimes, Disk, Gpu, Hardware, Memory, Volume, processes::Reading};
+use super::{CoreTimes, CpuTimes, Disk, Gpu, Hardware, Memory, Volume, processes::Reading};
 
 const DISK_INTERFACE: GUID = GUID::from_u128(0x53f56307_b6bf_11d0_94f2_00a0c91efb8b);
 
@@ -253,13 +258,70 @@ fn read_cpu_times() -> Option<CpuTimes> {
     })
 }
 
+/// Each logical processor's times, in the calling thread's processor group.
+fn read_core_times() -> Option<Vec<CpuTimes>> {
+    // A group holds at most 64.
+    let mut cores = [SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION::default(); 64];
+    let mut bytes = 0;
+    // SAFETY: the length passed is the array's own.
+    let status = unsafe {
+        NtQuerySystemInformation(
+            SystemProcessorPerformanceInformation,
+            cores.as_mut_ptr().cast(),
+            size_of_val(&cores) as u32,
+            &mut bytes,
+        )
+    };
+
+    if status < 0 {
+        return None;
+    }
+
+    let count =
+        (bytes as usize / size_of::<SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION>()).min(cores.len());
+
+    Some(
+        cores[..count]
+            .iter()
+            .map(|core| {
+                // Kernel time includes idle time, as with GetSystemTimes.
+                let total = (core.KernelTime as u64).saturating_add(core.UserTime as u64);
+
+                CpuTimes {
+                    busy: total.saturating_sub(core.IdleTime as u64),
+                    total,
+                }
+            })
+            .collect(),
+    )
+}
+
 pub fn cpu_times() -> Option<CpuTimes> {
-    // GetSystemTimes covers only the calling thread's processor group.
+    let total = in_each_group(read_cpu_times)?.into_iter().fold(
+        CpuTimes { busy: 0, total: 0 },
+        |sum, times| CpuTimes {
+            busy: sum.busy.saturating_add(times.busy),
+            total: sum.total.saturating_add(times.total),
+        },
+    );
+
+    Some(total)
+}
+
+pub fn core_times() -> CoreTimes {
+    in_each_group(read_core_times).map_or_else(Vec::new, |groups| {
+        groups.into_iter().flatten().enumerate().collect()
+    })
+}
+
+/// `read` in each processor group in turn, as what it calls covers only the
+/// calling thread's group.
+fn in_each_group<T>(mut read: impl FnMut() -> Option<T>) -> Option<Vec<T>> {
     // SAFETY: no arguments; returns the current system's group count.
     let groups = unsafe { GetActiveProcessorGroupCount() };
 
     if groups <= 1 {
-        return read_cpu_times();
+        return Some(vec![read()?]);
     }
 
     struct RestoreAffinity(GROUP_AFFINITY);
@@ -278,25 +340,22 @@ pub fn cpu_times() -> Option<CpuTimes> {
     }
 
     let _restore = RestoreAffinity(original);
-    let mut total = CpuTimes { busy: 0, total: 0 };
 
-    for group in 0..groups {
-        let affinity = GROUP_AFFINITY {
-            Mask: 1,
-            Group: group,
-            ..Default::default()
-        };
-        // SAFETY: each active group contains processor zero; affects only this worker.
-        if unsafe { SetThreadGroupAffinity(GetCurrentThread(), &affinity, null_mut()) } == 0 {
-            return None;
-        }
+    (0..groups)
+        .map(|group| {
+            let affinity = GROUP_AFFINITY {
+                Mask: 1,
+                Group: group,
+                ..Default::default()
+            };
+            // SAFETY: each active group contains processor zero; affects only this worker.
+            if unsafe { SetThreadGroupAffinity(GetCurrentThread(), &affinity, null_mut()) } == 0 {
+                return None;
+            }
 
-        let times = read_cpu_times()?;
-        total.busy = total.busy.saturating_add(times.busy);
-        total.total = total.total.saturating_add(times.total);
-    }
-
-    Some(total)
+            read()
+        })
+        .collect()
 }
 
 pub fn memory() -> Option<Memory> {
